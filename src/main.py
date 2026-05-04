@@ -6,10 +6,10 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from src.api.health import router as health_router
 from src.core.config import get_settings
+from src.core.database import engine
 from src.core.exceptions import AppError, RateLimitError
 from src.core.logging import setup_logging
 from src.core.observability import setup_observability
@@ -24,7 +24,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     setup_logging(environment=cfg.ENVIRONMENT)
     setup_observability(app, token=cfg.LOGFIRE_TOKEN or None)
 
-    engine: AsyncEngine = create_async_engine(cfg.ASYNC_DATABASE_URL, echo=False)
     redis: aioredis.Redis[str] = aioredis.from_url(  # type: ignore[type-arg,no-untyped-call]
         cfg.REDIS_URL, decode_responses=True
     )
