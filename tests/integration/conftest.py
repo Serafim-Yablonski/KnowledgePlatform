@@ -3,8 +3,13 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.models.user import User
+from src.repositories.user import SQLAlchemyUserRepository
+from src.schemas.auth import UserCreate
+
 
 @pytest.fixture
-async def test_user(db_session: AsyncSession) -> None:
-    # TODO: implement after src/models/user.py is created
-    pytest.skip("User model not yet implemented")
+async def test_user(db_session: AsyncSession) -> User:
+    repo = SQLAlchemyUserRepository(db_session)
+    data = UserCreate(email="fixture@example.com", password="fixturepass")
+    return await repo.create(data, hashed_password="$2b$12$fixturehash")

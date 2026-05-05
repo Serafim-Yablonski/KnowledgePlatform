@@ -50,6 +50,7 @@ class AuthSettings(BaseSettings):
     SECRET_KEY: str = "dev-secret-key-change-before-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
 
 class AISettings(BaseSettings):
@@ -79,6 +80,9 @@ class AppSettings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 50
 
 
+_DEV_SECRET = "dev-secret-key-change-before-production"
+
+
 class Settings(
     DatabaseSettings,
     RedisSettings,
@@ -88,6 +92,19 @@ class Settings(
     AppSettings,
 ):
     model_config = _ENV_CONFIG
+
+    @model_validator(mode="after")
+    def _reject_dev_secrets_in_production(self) -> Self:
+        if self.ENVIRONMENT == "production":
+            if self.SECRET_KEY == _DEV_SECRET:
+                raise ValueError(
+                    "SECRET_KEY must be changed before deploying to production"
+                )
+            if self.POSTGRES_PASSWORD == "password":
+                raise ValueError(
+                    "POSTGRES_PASSWORD must be changed before deploying to production"
+                )
+        return self
 
 
 @lru_cache

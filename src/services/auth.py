@@ -1,0 +1,46 @@
+from sqlalchemy.exc import IntegrityError
+
+from src.core.exceptions import ConflictError, ForbiddenError
+from src.core.security import (
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    hash_password,
+    verify_password,
+)
+from src.models.user import User
+from src.repositories.protocols import UserRepositoryProtocol
+from src.schemas.auth import TokenResponse, UserCreate, UserLogin, UserResponse
+
+
+class AuthService:
+    def __init__(self, user_repo: UserRepositoryProtocol) -> None:
+        self._repo = user_repo
+
+    async def register(self, data: UserCreate) -> UserResponse:
+        hashed = hash_password(data.password)
+        try:
+            user = await self._repo.create(data, hashed)
+        except IntegrityError as exc:
+            raise ConflictError("Email already registered") from exc
+        return UserResponse.model_validate(user)
+
+    async def login(self, data: UserLogin) -> TokenResponse:
+        user = await self._repo.get_by_email(data.email)
+        if user is None or not verify_password(data.password, user.hashed_password):
+            raise ForbiddenError("Invalid credentials")
+        if not user.is_active:
+            raise ForbiddenError("Invalid credentials")
+        return TokenResponse(
+            access_token=create_access_token(user.id),
+            refresh_token=create_refresh_token(user.id),
+        )
+
+    async def get_current_user(self, token: str) -> User:
+        payload = decode_token(token)
+        if payload.type != "access":
+            raise ForbiddenError("Invalid token type")
+        user = await self._repo.get_by_id(payload.sub)
+        if user is None or not user.is_active:
+            raise ForbiddenError("User not found or inactive")
+        return user
