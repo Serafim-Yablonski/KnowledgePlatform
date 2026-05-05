@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.api.health import router as health_router
+from src.api.v1 import router as v1_router
 from src.core.config import get_settings
 from src.core.database import engine
 from src.core.exceptions import AppError, RateLimitError
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
     application.add_exception_handler(AppError, _app_error_handler)
     application.add_exception_handler(Exception, _unhandled_error_handler)
     application.include_router(health_router)
+    application.include_router(v1_router)
     return application
 
 
