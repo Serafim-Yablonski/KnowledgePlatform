@@ -1,10 +1,10 @@
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 
-from src.models.base import Base
+from src.models.base import Base, HasIDMixin
 
 
-class User(Base):
+class User(HasIDMixin, Base):
     __tablename__ = "users"
     __table_args__ = (
         # Partial unique index: only active users occupy an email slot.
