@@ -1,10 +1,13 @@
 import uuid
 from typing import Protocol
 
+from src.domain.documents import ContentType, Cursor, DocumentStatus
 from src.domain.roles import WorkspaceRole
+from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
 from src.schemas.auth import UserCreate
+from src.schemas.document import DocumentUpdate
 
 
 class UserRepositoryProtocol(Protocol):
@@ -55,3 +58,30 @@ class WorkspaceRepositoryProtocol(Protocol):
     ) -> list[WorkspaceMembership]: ...
 
     async def count_members(self, workspace_id: uuid.UUID) -> int: ...
+
+
+class DocumentRepositoryProtocol(Protocol):
+    async def create(
+        self,
+        workspace_id: uuid.UUID,
+        title: str,
+        content_type: ContentType,
+        file_path: str,
+        file_size_bytes: int,
+        uploaded_by: uuid.UUID,
+    ) -> Document: ...
+
+    async def get_by_id(self, document_id: uuid.UUID) -> Document | None: ...
+
+    async def update(self, document: Document, data: DocumentUpdate) -> Document: ...
+
+    async def delete(self, document: Document) -> None: ...
+
+    async def list_by_workspace(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        limit: int = 20,
+        cursor: Cursor | None = None,
+        status: DocumentStatus | None = None,
+    ) -> tuple[list[Document], Cursor | None]: ...
