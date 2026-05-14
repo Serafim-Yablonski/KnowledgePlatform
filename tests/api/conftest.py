@@ -1,6 +1,8 @@
 """API test fixtures — httpx.AsyncClient against the full async FastAPI stack."""
 
+from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import factory
 import pytest
@@ -13,6 +15,15 @@ import src.services.document as _doc_svc_module
 def _patch_upload_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Redirect file uploads to a per-test temp directory."""
     monkeypatch.setattr(_doc_svc_module.settings, "UPLOAD_DIR", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _stub_celery_dispatch() -> Generator[MagicMock]:
+    """Prevent Celery task dispatch from connecting to Redis in API tests."""
+    from src.workers.tasks.extract_text import extract_text
+
+    with patch.object(extract_text, "delay") as mock:
+        yield mock
 
 
 class UserFactory(factory.Factory):  # type: ignore[misc]

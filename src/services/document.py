@@ -105,6 +105,10 @@ class DocumentService:
         doc.file_size_bytes = actual_size
         # Single commit covers both the initial flush and the file_path update.
         await self._session.commit()
+        # Dispatch AFTER commit so the worker can find the document record.
+        from src.workers.tasks.extract_text import extract_text
+
+        extract_text.delay(str(doc.id))
         await self._session.refresh(doc)
 
         return DocumentResponse.model_validate(doc)

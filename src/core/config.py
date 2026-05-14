@@ -19,6 +19,8 @@ class DatabaseSettings(BaseSettings):
     )
     # Derived from DATABASE_URL if not set — replaces postgresql:// with postgresql+asyncpg://
     ASYNC_DATABASE_URL: str = ""
+    # Derived from DATABASE_URL if not set — psycopg3 sync driver for Celery workers
+    SYNC_DATABASE_URL: str = ""
     POSTGRES_DB: str = "knowledge_platform"
     POSTGRES_USER: str = "user"
     POSTGRES_PASSWORD: str = "password"
@@ -33,6 +35,25 @@ class DatabaseSettings(BaseSettings):
                     url = "postgresql+asyncpg://" + url[len(prefix) :]
                     break
             self.ASYNC_DATABASE_URL = url
+        return self
+
+    @model_validator(mode="after")
+    def _derive_sync_url(self) -> Self:
+        if not self.SYNC_DATABASE_URL:
+            url = self.DATABASE_URL
+            # Strip any existing driver suffix to get a bare postgresql:// URL,
+            # then re-prefix with the psycopg3 (sync) driver.
+            for prefix in (
+                "postgresql+asyncpg://",
+                "postgresql+psycopg2://",
+                "postgresql+psycopg://",
+                "postgres://",
+                "postgresql://",
+            ):
+                if url.startswith(prefix):
+                    url = "postgresql+psycopg://" + url[len(prefix) :]
+                    break
+            self.SYNC_DATABASE_URL = url
         return self
 
 

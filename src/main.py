@@ -2,7 +2,6 @@ import traceback
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,6 +13,7 @@ from src.core.database import engine
 from src.core.exceptions import AppError, RateLimitError
 from src.core.logging import setup_logging
 from src.core.observability import setup_observability
+from src.core.redis import close_redis, init_redis
 
 logger = structlog.get_logger(__name__)
 
@@ -25,17 +25,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     setup_logging(environment=cfg.ENVIRONMENT)
     setup_observability(app, token=cfg.LOGFIRE_TOKEN or None)
 
-    redis: aioredis.Redis[str] = aioredis.from_url(  # type: ignore[type-arg,no-untyped-call]
-        cfg.REDIS_URL, decode_responses=True
-    )
+    redis_client = await init_redis()
     app.state.engine = engine
-    app.state.redis = redis
+    app.state.redis = redis_client
 
     logger.info("startup complete", environment=cfg.ENVIRONMENT)
     yield
 
     await engine.dispose()
-    await redis.aclose()
+    await close_redis()
     logger.info("shutdown complete")
 
 
