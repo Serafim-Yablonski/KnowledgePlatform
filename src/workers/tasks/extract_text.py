@@ -54,11 +54,13 @@ def extract_text(self: Task, document_id: str) -> None:
 
             # Initialize before the try so the success log below is always bound.
             raw_text = ""
+            extraction_succeeded = False
             try:
                 raw_text = _read_text(file_path, content_type)
                 doc.raw_text = raw_text
                 doc.status = DocumentStatus.READY
                 session.commit()
+                extraction_succeeded = True
             except Exception as exc:
                 logger.error(
                     "text extraction failed",
@@ -84,3 +86,11 @@ def extract_text(self: Task, document_id: str) -> None:
             extracted_text_length=len(raw_text),
             extraction_duration_ms=round(duration_ms),
         )
+
+    # Dispatch AFTER the session is fully closed so the commit is durable before
+    # the embed worker reads the document. Placing this inside the session block
+    # risks enqueuing the task before the connection is released (outbox pattern).
+    if extraction_succeeded:
+        from src.workers.tasks.embed_chunks import embed_chunks
+
+        embed_chunks.delay(document_id)
