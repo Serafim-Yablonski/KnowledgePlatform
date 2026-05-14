@@ -3,6 +3,7 @@ from typing import Protocol
 
 from src.domain.documents import ContentType, Cursor, DocumentStatus
 from src.domain.roles import WorkspaceRole
+from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
@@ -85,3 +86,13 @@ class DocumentRepositoryProtocol(Protocol):
         cursor: Cursor | None = None,
         status: DocumentStatus | None = None,
     ) -> tuple[list[Document], Cursor | None]: ...
+
+
+class ChunkRepositoryProtocol(Protocol):
+    async def create_batch(self, chunks: list[DocumentChunk]) -> None: ...
+
+    async def delete_by_document_version(
+        self, document_id: uuid.UUID, below_version: int
+    ) -> int: ...
+
+    async def get_by_document(self, document_id: uuid.UUID) -> list[DocumentChunk]: ...
