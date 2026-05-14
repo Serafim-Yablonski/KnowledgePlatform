@@ -9,6 +9,7 @@ from src.core.database import get_session
 from src.core.exceptions import ForbiddenError
 from src.models.user import User
 from src.models.workspace import Workspace
+from src.services.document import DocumentService
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -31,6 +32,12 @@ async def get_current_user(
     repo = SQLAlchemyUserRepository(session)
     service = AuthService(repo)
     return await service.get_current_user(credentials.credentials)
+
+
+def get_document_service(session: AsyncSession = Depends(get_db)) -> DocumentService:
+    from src.repositories.document import SQLAlchemyDocumentRepository
+
+    return DocumentService(repo=SQLAlchemyDocumentRepository(session), session=session)
 
 
 async def get_current_workspace(
