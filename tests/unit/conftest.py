@@ -1,5 +1,8 @@
 """Unit test fixtures — Protocol stubs and mocked repository implementations."""
 
+from collections.abc import Generator
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -23,3 +26,12 @@ class _AccidentalDbAccess:
 @pytest.fixture
 def mock_session_factory() -> _AccidentalDbAccess:
     return _AccidentalDbAccess()
+
+
+@pytest.fixture(autouse=True)
+def stub_celery_dispatch() -> Generator[MagicMock]:
+    """Prevent Celery task dispatch from connecting to Redis in unit tests."""
+    from src.workers.tasks.extract_text import extract_text
+
+    with patch.object(extract_text, "delay") as mock:
+        yield mock
