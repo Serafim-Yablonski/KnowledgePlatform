@@ -38,7 +38,9 @@ _LOW_SIM: list[float] = [0.0, 0.0, 1.0] + [0.0] * (EMBEDDING_DIMS - 3)
 async def test_user(db_session: AsyncSession) -> User:
     repo = SQLAlchemyUserRepository(db_session)
     return await repo.create(
-        UserCreate(email=f"search-int-{uuid.uuid4()}@example.com", password="password123"),
+        UserCreate(
+            email=f"search-int-{uuid.uuid4()}@example.com", password="password123"
+        ),
         hashed_password="$2b$12$testhash",
     )
 
