@@ -1,4 +1,4 @@
-.PHONY: run test test-unit test-int lint typecheck eval eval-compare \
+.PHONY: run test test-unit test-int lint typecheck eval eval-compare eval-baseline \
         migrate revision ci docker-build clean seed install
 
 # ─── Development ──────────────────────────────────────────────────────────────
@@ -38,6 +38,9 @@ eval:
 
 eval-compare:
 	uv run python -m src.ai.eval.compare results/baseline.json results/current.json
+
+eval-baseline:
+	cp results/current.json results/baseline.json
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
