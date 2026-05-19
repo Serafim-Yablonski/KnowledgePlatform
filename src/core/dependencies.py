@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -7,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_session
 from src.core.exceptions import ForbiddenError
+from src.core.redis import get_redis
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.services.document import DocumentService
+from src.services.search import SearchService
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -57,3 +60,26 @@ async def get_current_workspace(
     if workspace is None:
         raise ForbiddenError("Not a member of this workspace")
     return workspace
+
+
+def get_search_service(
+    session: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+) -> SearchService:
+    from src.ai.embeddings import EmbeddingService
+    from src.core.cache import ResponseCache
+    from src.core.config import get_settings
+    from src.repositories.search import SQLAlchemySearchRepository
+
+    cfg = get_settings()
+    embedding_svc = EmbeddingService(
+        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
+        model=cfg.EMBEDDING_MODEL,
+        dimensions=cfg.EMBEDDING_DIMENSIONS,
+        redis_client=redis,
+    )
+    return SearchService(
+        search_repo=SQLAlchemySearchRepository(session),
+        embedding_service=embedding_svc,
+        cache=ResponseCache(redis),
+    )

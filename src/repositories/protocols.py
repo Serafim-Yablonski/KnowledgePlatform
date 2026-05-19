@@ -3,6 +3,7 @@ from typing import Protocol
 
 from src.domain.documents import ContentType, Cursor, DocumentStatus
 from src.domain.roles import WorkspaceRole
+from src.domain.search import SearchResult
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
@@ -96,3 +97,13 @@ class ChunkRepositoryProtocol(Protocol):
     ) -> int: ...
 
     async def get_by_document(self, document_id: uuid.UUID) -> list[DocumentChunk]: ...
+
+
+class SearchRepositoryProtocol(Protocol):
+    async def search_similar(
+        self,
+        workspace_id: uuid.UUID,
+        embedding: list[float],
+        top_k: int,
+        min_score: float,
+    ) -> list[SearchResult]: ...
