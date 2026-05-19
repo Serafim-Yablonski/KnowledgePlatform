@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -34,6 +35,9 @@ class EvalCaseResult:
     recall: float
     reciprocal_rank: float
     correctly_rejected: bool
+    answer_faithfulness: float = 0.0
+    answer_relevance: float = 0.0
+    negative_handling: bool = False
 
 
 @dataclass
@@ -46,6 +50,9 @@ class EvalMetrics:
     total_cases: int
     negative_cases: int
     positive_cases: int
+    answer_faithfulness: float = 0.0
+    answer_relevance: float = 0.0
+    negative_handling_rate: float = 0.0
 
 
 @dataclass
@@ -55,7 +62,7 @@ class EvalResults:
     metrics: EvalMetrics
     cases: list[EvalCaseResult] = field(default_factory=list)
 
-    def to_dict(self) -> dict:  # type: ignore[type-arg]
+    def to_dict(self) -> dict[str, Any]:
         return {
             "timestamp": self.timestamp,
             "git_commit": self.git_commit,
@@ -68,6 +75,9 @@ class EvalResults:
                 "total_cases": self.metrics.total_cases,
                 "negative_cases": self.metrics.negative_cases,
                 "positive_cases": self.metrics.positive_cases,
+                "answer_faithfulness": self.metrics.answer_faithfulness,
+                "answer_relevance": self.metrics.answer_relevance,
+                "negative_handling_rate": self.metrics.negative_handling_rate,
             },
             "cases": [
                 {
@@ -83,13 +93,16 @@ class EvalResults:
                     "recall": c.recall,
                     "reciprocal_rank": c.reciprocal_rank,
                     "correctly_rejected": c.correctly_rejected,
+                    "answer_faithfulness": c.answer_faithfulness,
+                    "answer_relevance": c.answer_relevance,
+                    "negative_handling": c.negative_handling,
                 }
                 for c in self.cases
             ],
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> EvalResults:  # type: ignore[type-arg]
+    def from_dict(cls, data: dict[str, Any]) -> EvalResults:
         m = data["metrics"]
         metrics = EvalMetrics(
             precision_at_k=m["precision_at_k"],
@@ -100,6 +113,9 @@ class EvalResults:
             total_cases=m["total_cases"],
             negative_cases=m["negative_cases"],
             positive_cases=m["positive_cases"],
+            answer_faithfulness=m.get("answer_faithfulness", 0.0),
+            answer_relevance=m.get("answer_relevance", 0.0),
+            negative_handling_rate=m.get("negative_handling_rate", 0.0),
         )
         cases = [
             EvalCaseResult(
@@ -115,6 +131,9 @@ class EvalResults:
                 recall=c["recall"],
                 reciprocal_rank=c["reciprocal_rank"],
                 correctly_rejected=c["correctly_rejected"],
+                answer_faithfulness=c.get("answer_faithfulness", 0.0),
+                answer_relevance=c.get("answer_relevance", 0.0),
+                negative_handling=c.get("negative_handling", False),
             )
             for c in data.get("cases", [])
         ]

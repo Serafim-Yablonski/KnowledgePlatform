@@ -113,6 +113,16 @@ class DocumentService:
 
         return DocumentResponse.model_validate(doc)
 
+    async def get_by_id(
+        self,
+        workspace_id: uuid.UUID,
+        document_id: uuid.UUID,
+    ) -> DocumentResponse:
+        doc = await self._repo.get_by_id(document_id)
+        if doc is None or doc.workspace_id != workspace_id:
+            raise NotFoundError("Document not found")
+        return DocumentResponse.model_validate(doc)
+
     async def get(
         self, user: User, workspace: Workspace, document_id: uuid.UUID
     ) -> DocumentResponse:

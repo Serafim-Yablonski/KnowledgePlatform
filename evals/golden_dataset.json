@@ -1,0 +1,389 @@
+[
+  {
+    "id": "eval_001",
+    "question": "What is the default isolation level in PostgreSQL?",
+    "expected_answer": "Read Committed",
+    "expected_source_doc_ids": ["postgres-indexing", "database-transactions"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["postgresql", "isolation", "single-doc"]
+  },
+  {
+    "id": "eval_002",
+    "question": "What is the maximum size of a Redis string value?",
+    "expected_answer": "512 MB",
+    "expected_source_doc_ids": ["redis-data-structures"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["redis", "strings"]
+  },
+  {
+    "id": "eval_003",
+    "question": "What is the default Docker network driver for standalone containers?",
+    "expected_answer": "bridge",
+    "expected_source_doc_ids": ["docker-networking"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["docker", "networking"]
+  },
+  {
+    "id": "eval_004",
+    "question": "What asyncio function should be used as the entry point for running a coroutine?",
+    "expected_answer": "asyncio.run()",
+    "expected_source_doc_ids": ["python-asyncio"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["python", "asyncio"]
+  },
+  {
+    "id": "eval_005",
+    "question": "What HTTP status code should an API return when a resource is not found?",
+    "expected_answer": "404",
+    "expected_source_doc_ids": ["api-design-rest"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["rest", "http", "status-codes"]
+  },
+  {
+    "id": "eval_006",
+    "question": "What is the default port number for Redis?",
+    "expected_answer": "6379",
+    "expected_source_doc_ids": ["redis-data-structures"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["redis", "configuration"]
+  },
+  {
+    "id": "eval_007",
+    "question": "What index type in PostgreSQL is suited for append-only time-series data?",
+    "expected_answer": "BRIN (Block Range INdex)",
+    "expected_source_doc_ids": ["postgres-indexing"],
+    "difficulty": "medium",
+    "category": "factual_lookup",
+    "tags": ["postgresql", "indexing", "time-series"]
+  },
+  {
+    "id": "eval_008",
+    "question": "What does the Python asyncio TaskGroup do when one of its tasks raises an exception?",
+    "expected_answer": "It cancels all remaining tasks in the group",
+    "expected_source_doc_ids": ["python-asyncio"],
+    "difficulty": "medium",
+    "category": "factual_lookup",
+    "tags": ["python", "asyncio", "task-group"]
+  },
+  {
+    "id": "eval_009",
+    "question": "Which Docker network driver is available on Linux only?",
+    "expected_answer": "host",
+    "expected_source_doc_ids": ["docker-networking"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["docker", "networking"]
+  },
+  {
+    "id": "eval_010",
+    "question": "What does BRIN stand for in PostgreSQL?",
+    "expected_answer": "Block Range INdex",
+    "expected_source_doc_ids": ["postgres-indexing"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["postgresql", "indexing"]
+  },
+  {
+    "id": "eval_011",
+    "question": "What asyncio primitive limits the number of coroutines that can access a resource concurrently?",
+    "expected_answer": "asyncio.Semaphore",
+    "expected_source_doc_ids": ["python-asyncio"],
+    "difficulty": "medium",
+    "category": "factual_lookup",
+    "tags": ["python", "asyncio", "synchronization"]
+  },
+  {
+    "id": "eval_012",
+    "question": "What Redis data structure supports consumer groups for at-least-once message processing?",
+    "expected_answer": "Streams",
+    "expected_source_doc_ids": ["redis-data-structures"],
+    "difficulty": "medium",
+    "category": "factual_lookup",
+    "tags": ["redis", "streams", "messaging"]
+  },
+  {
+    "id": "eval_013",
+    "question": "What operator class should be used when creating a pgvector HNSW index for cosine distance?",
+    "expected_answer": "vector_cosine_ops",
+    "expected_source_doc_ids": ["postgres-indexing"],
+    "difficulty": "medium",
+    "category": "factual_lookup",
+    "tags": ["postgresql", "pgvector", "indexing"]
+  },
+  {
+    "id": "eval_014",
+    "question": "What HTTP header should be included in a 201 Created response?",
+    "expected_answer": "Location header",
+    "expected_source_doc_ids": ["api-design-rest"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["rest", "http", "status-codes"]
+  },
+  {
+    "id": "eval_015",
+    "question": "What does ACID stand for in database transactions?",
+    "expected_answer": "Atomicity, Consistency, Isolation, Durability",
+    "expected_source_doc_ids": ["database-transactions"],
+    "difficulty": "easy",
+    "category": "factual_lookup",
+    "tags": ["database", "transactions", "acid"]
+  },
+  {
+    "id": "eval_016",
+    "question": "How does PostgreSQL ensure database transactions survive a system crash, and how does this interact with the synchronous_commit setting?",
+    "expected_answer": "PostgreSQL uses write-ahead logging (WAL). Changes are written to the WAL before being applied to data pages. On recovery, committed transactions are replayed. Setting synchronous_commit=off trades durability for performance, allowing up to one WAL flush interval of data loss.",
+    "expected_source_doc_ids": ["database-transactions", "postgres-indexing"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["postgresql", "durability", "wal"]
+  },
+  {
+    "id": "eval_017",
+    "question": "What are the tradeoffs between using Redis Streams versus a traditional message queue for background task processing?",
+    "expected_answer": "Redis Streams support consumer groups with acknowledgment, allowing each message to be processed once with replay on failure. They are suitable for high-throughput append-only logs. Unlike simple LPUSH/RPOP queues, streams persist entries and support multiple consumer groups reading the same data independently.",
+    "expected_source_doc_ids": ["redis-data-structures"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["redis", "messaging", "streams"]
+  },
+  {
+    "id": "eval_018",
+    "question": "How does asyncio avoid data races between concurrent coroutines, and is this different from how threading handles concurrency?",
+    "expected_answer": "AsyncIO is single-threaded and switches between coroutines only at await points (cooperative multitasking), so data races at the CPU level are impossible. However, logical races can still occur when multiple coroutines modify shared state between awaits. Threading uses preemptive scheduling so data races at the CPU level are possible and require locks.",
+    "expected_source_doc_ids": ["python-asyncio"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["python", "asyncio", "concurrency"]
+  },
+  {
+    "id": "eval_019",
+    "question": "What consistency guarantees does PostgreSQL Repeatable Read isolation level provide compared to the SQL standard?",
+    "expected_answer": "PostgreSQL's Repeatable Read prevents dirty reads, non-repeatable reads, and phantom reads. The SQL standard only requires preventing the first two — phantom read prevention is a stronger guarantee that PostgreSQL provides beyond the standard.",
+    "expected_source_doc_ids": ["postgres-indexing", "database-transactions"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["postgresql", "isolation", "consistency"]
+  },
+  {
+    "id": "eval_020",
+    "question": "When building a distributed system that needs to choose between consistency and availability during a network partition, what does the CAP theorem say and how does PostgreSQL fit in?",
+    "expected_answer": "The CAP theorem states a system can provide at most two of: Consistency, Availability, Partition Tolerance. Since partitions are unavoidable, the real choice is CP vs AP. PostgreSQL is a CP system — during a partition, it prioritizes consistency over availability.",
+    "expected_source_doc_ids": ["distributed-systems", "database-transactions"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["distributed-systems", "cap", "postgresql", "multi-doc"]
+  },
+  {
+    "id": "eval_021",
+    "question": "What are the differences between cursor-based and offset-based pagination, and which approach is preferred for APIs that have high write rates?",
+    "expected_answer": "Offset pagination uses page numbers but suffers from skipped or duplicated results when rows are inserted or deleted between pages. Cursor-based pagination encodes the last-seen item position, handling concurrent writes without skips. Cursor pagination is preferred for high write-rate APIs but does not support random page access.",
+    "expected_source_doc_ids": ["api-design-rest"],
+    "difficulty": "medium",
+    "category": "multi_document_synthesis",
+    "tags": ["api", "pagination", "rest"]
+  },
+  {
+    "id": "eval_022",
+    "question": "How does the Redis hash encoding change based on the number of fields, and what is the threshold?",
+    "expected_answer": "Hashes with fewer than 128 fields and values under 64 bytes each use a compact listpack encoding. Beyond these limits, Redis switches to a hash table. The thresholds are configurable via hash-max-listpack-entries and hash-max-listpack-value.",
+    "expected_source_doc_ids": ["redis-data-structures"],
+    "difficulty": "medium",
+    "category": "multi_document_synthesis",
+    "tags": ["redis", "hashes", "encoding"]
+  },
+  {
+    "id": "eval_023",
+    "question": "What happens to running Docker containers when a network partition occurs between services in a user-defined bridge network, and how does this relate to the CAP theorem?",
+    "expected_answer": "Docker's embedded DNS server resolves service names within the bridge network. A network partition would cause connection failures between services. This relates to the CAP theorem's partition tolerance concern — systems must choose whether to return errors (CP) or serve stale data (AP) during such partitions.",
+    "expected_source_doc_ids": ["docker-networking", "distributed-systems"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["docker", "distributed-systems", "cap", "multi-doc"]
+  },
+  {
+    "id": "eval_024",
+    "question": "What is the Saga pattern and how does it compare to Two-Phase Commit for distributed transactions?",
+    "expected_answer": "The Saga pattern uses a sequence of local transactions, each publishing an event that triggers the next step, with compensating transactions for failures. Unlike 2PC, it avoids distributed locks and is non-blocking, providing higher availability but only eventual consistency. 2PC is atomic but blocking if the coordinator fails.",
+    "expected_source_doc_ids": ["distributed-systems", "database-transactions"],
+    "difficulty": "hard",
+    "category": "multi_document_synthesis",
+    "tags": ["distributed-systems", "transactions", "saga", "multi-doc"]
+  },
+  {
+    "id": "eval_025",
+    "question": "Does asyncio bypass the Python GIL, and what should you use for true CPU parallelism?",
+    "expected_answer": "AsyncIO does NOT bypass the GIL. It is single-threaded and achieves concurrency through cooperative multitasking at await points. For true CPU parallelism, use asyncio.to_thread() for blocking calls or concurrent.futures.ProcessPoolExecutor for CPU-bound work.",
+    "expected_source_doc_ids": ["python-asyncio"],
+    "difficulty": "medium",
+    "category": "reasoning",
+    "tags": ["python", "asyncio", "gil", "concurrency"]
+  },
+  {
+    "id": "eval_026",
+    "question": "If a PostgreSQL query on a small table ignores your index, what is the most likely reason?",
+    "expected_answer": "The query planner estimates a sequential scan is cheaper for small tables. An index is also not used when column selectivity is low, statistics are stale, or the table is too small for the overhead of an index scan to pay off.",
+    "expected_source_doc_ids": ["postgres-indexing"],
+    "difficulty": "medium",
+    "category": "reasoning",
+    "tags": ["postgresql", "indexing", "query-planning"]
+  },
+  {
+    "id": "eval_027",
+    "question": "Why does overcrowding a pan cause food to steam rather than brown?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "cooking", "out-of-domain"]
+  },
+  {
+    "id": "eval_028",
+    "question": "What is the recommended rate limiting algorithm to allow short traffic bursts above the sustained rate?",
+    "expected_answer": "Token bucket, which allows bursts up to the bucket capacity while maintaining a smooth refill rate.",
+    "expected_source_doc_ids": ["api-design-rest"],
+    "difficulty": "medium",
+    "category": "reasoning",
+    "tags": ["api", "rate-limiting", "algorithms"]
+  },
+  {
+    "id": "eval_029",
+    "question": "Why does Raft require a majority quorum rather than unanimous agreement?",
+    "expected_answer": "Requiring unanimous agreement would mean any single node failure blocks progress. A majority quorum (n/2 + 1 nodes) tolerates failures while still being able to make progress. With 3 nodes, 1 failure is tolerated; with 5 nodes, 2 failures.",
+    "expected_source_doc_ids": ["distributed-systems"],
+    "difficulty": "hard",
+    "category": "reasoning",
+    "tags": ["distributed-systems", "raft", "consensus"]
+  },
+  {
+    "id": "eval_030",
+    "question": "What recipe should I follow to make a sourdough starter from scratch?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "cooking", "out-of-domain"]
+  },
+  {
+    "id": "eval_031",
+    "question": "What is the best programming language for machine learning?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "out-of-domain"]
+  },
+  {
+    "id": "eval_032",
+    "question": "How many calories are in a tablespoon of olive oil?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "cooking", "out-of-domain"]
+  },
+  {
+    "id": "eval_033",
+    "question": "What are the system requirements for running Kubernetes on a laptop?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "kubernetes", "out-of-domain"]
+  },
+  {
+    "id": "eval_034",
+    "question": "What is the current price of Bitcoin?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "out-of-domain", "real-time"]
+  },
+  {
+    "id": "eval_035",
+    "question": "How do I configure SSL certificates for a web server?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "medium",
+    "category": "negative",
+    "tags": ["negative", "ssl", "out-of-domain"]
+  },
+  {
+    "id": "eval_036",
+    "question": "What is the best way to center a div in CSS?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "css", "out-of-domain"]
+  },
+  {
+    "id": "eval_037",
+    "question": "How should I handle database consistency in a distributed microservices architecture?",
+    "expected_answer": "Use the Saga pattern for distributed transactions (sequence of local transactions with compensating transactions for rollback) or 2PC if atomic commits are required. At the data layer, consider isolation levels, optimistic vs pessimistic locking, and the CAP theorem tradeoffs when choosing between CP and AP systems.",
+    "expected_source_doc_ids": ["distributed-systems", "database-transactions", "postgres-indexing"],
+    "difficulty": "hard",
+    "category": "ambiguous",
+    "tags": ["distributed-systems", "database", "consistency", "multi-doc"]
+  },
+  {
+    "id": "eval_038",
+    "question": "What caching strategy should I use for frequently-read API responses?",
+    "expected_answer": "Both Redis (using strings or hashes with TTL) and API-level caching with rate limiting headers are relevant. Redis provides atomic operations and TTL-based expiration suitable for response caching. The API layer should use consistent cache-control headers.",
+    "expected_source_doc_ids": ["redis-data-structures", "api-design-rest"],
+    "difficulty": "medium",
+    "category": "ambiguous",
+    "tags": ["redis", "api", "caching", "multi-doc"]
+  },
+  {
+    "id": "eval_039",
+    "question": "What are the risks of running database queries without proper transaction isolation?",
+    "expected_answer": "Without appropriate isolation, several anomalies can occur: dirty reads (reading uncommitted data), non-repeatable reads (different values on re-read), phantom reads (new rows appearing in re-executed range queries), and lost updates (concurrent transactions overwriting each other's changes). The severity depends on the chosen isolation level and workload.",
+    "expected_source_doc_ids": ["database-transactions", "postgres-indexing"],
+    "difficulty": "hard",
+    "category": "ambiguous",
+    "tags": ["database", "transactions", "isolation", "multi-doc"]
+  },
+  {
+    "id": "eval_040",
+    "question": "How can I implement a distributed rate limiter for a multi-instance API?",
+    "expected_answer": "Use Redis for shared state across API instances. A sliding window counter can be implemented with Redis strings (INCR with TTL) or sorted sets (ZADD with score=timestamp, ZREMRANGEBYSCORE to expire entries). The API layer should return 429 Too Many Requests with X-RateLimit headers when limits are exceeded.",
+    "expected_source_doc_ids": ["redis-data-structures", "api-design-rest"],
+    "difficulty": "hard",
+    "category": "ambiguous",
+    "tags": ["redis", "api", "rate-limiting", "distributed", "multi-doc"]
+  },
+  {
+    "id": "eval_041",
+    "question": "How does optimistic locking in PostgreSQL prevent lost updates, and when should you use pessimistic locking instead?",
+    "expected_answer": "Optimistic locking records a version number at read time and verifies it before writing. If another transaction modified the row, the update affects 0 rows and the application retries. Pessimistic locking uses SELECT FOR UPDATE to hold an exclusive lock until commit. Use pessimistic locking for high-contention writes to avoid many retries; use optimistic for read-heavy workloads.",
+    "expected_source_doc_ids": ["database-transactions"],
+    "difficulty": "hard",
+    "category": "reasoning",
+    "tags": ["database", "locking", "concurrency"]
+  },
+  {
+    "id": "eval_042",
+    "question": "Why does Docker recommend user-defined bridge networks over the default bridge network for multi-container applications?",
+    "expected_answer": "User-defined bridges provide automatic DNS resolution by container name, which the default bridge network does not support. They also offer better isolation (only explicitly connected containers can communicate) and allow attaching/detaching containers without restart.",
+    "expected_source_doc_ids": ["docker-networking"],
+    "difficulty": "medium",
+    "category": "reasoning",
+    "tags": ["docker", "networking", "best-practices"]
+  },
+  {
+    "id": "eval_043",
+    "question": "What is the best way to bake a chocolate cake for a birthday party?",
+    "expected_answer": "This question is not answerable from the documents in this knowledge base.",
+    "expected_source_doc_ids": [],
+    "difficulty": "easy",
+    "category": "negative",
+    "tags": ["negative", "cooking", "out-of-domain"]
+  }
+]
