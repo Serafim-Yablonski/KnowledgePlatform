@@ -137,17 +137,19 @@ async def load_test_documents(
 
 async def setup_eval_workspace(
     session: AsyncSession,
-) -> uuid.UUID:
+) -> tuple[uuid.UUID, uuid.UUID]:
     """Create an isolated workspace for eval runs.
 
-    The workspace has no members — the eval runner accesses it directly via
-    the search repository, bypassing the membership check in WorkspaceService.
+    Returns (workspace_id, eval_user_id). The workspace has no members — the
+    eval runner accesses it directly via the search repository, bypassing the
+    membership check in WorkspaceService.
     """
+    user_id = await _get_eval_placeholder_user_id(session)
     workspace = Workspace(
         name="Eval Workspace",
         slug=f"eval-{uuid.uuid4().hex[:8]}",
         description="Isolated workspace for RAG evaluation. Safe to delete.",
-        created_by=await _get_eval_placeholder_user_id(session),
+        created_by=user_id,
         is_active=True,
     )
     session.add(workspace)
@@ -155,7 +157,14 @@ async def setup_eval_workspace(
     await session.refresh(workspace)
     await session.commit()
     logger.info("eval workspace created", workspace_id=str(workspace.id))
-    return workspace.id
+    return workspace.id, user_id
+
+
+async def cleanup_stale_eval_workspaces(session: AsyncSession) -> None:
+    """Delete any workspaces with slug matching 'eval-%' left by failed prior runs."""
+    await session.execute(sa.delete(Workspace).where(Workspace.slug.like("eval-%")))
+    await session.commit()
+    logger.warning("stale eval workspace cleanup ran")
 
 
 async def _get_eval_placeholder_user_id(session: AsyncSession) -> uuid.UUID:

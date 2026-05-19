@@ -9,19 +9,22 @@ from typing import Any, TypeVar, cast, get_type_hints
 
 T = TypeVar("T")
 
-_PREFIX = "nexus:response"
-
 
 class ResponseCache:
-    def __init__(self, redis_client: Any) -> None:  # redis.asyncio.Redis
+    def __init__(
+        self,
+        redis_client: Any,
+        key_prefix: str = "nexus:response",
+    ) -> None:
         self._redis = redis_client
+        self._prefix = key_prefix
 
     async def get(self, key: str) -> Any | None:
-        raw: str | None = await self._redis.get(f"{_PREFIX}:{key}")
+        raw: str | None = await self._redis.get(f"{self._prefix}:{key}")
         return json.loads(raw) if raw is not None else None
 
     async def set(self, key: str, value: Any, ttl: int) -> None:
-        await self._redis.set(f"{_PREFIX}:{key}", json.dumps(value), ex=ttl)
+        await self._redis.set(f"{self._prefix}:{key}", json.dumps(value), ex=ttl)
 
     async def get_or_set(
         self,

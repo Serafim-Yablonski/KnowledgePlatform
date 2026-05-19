@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import statistics
 import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
 import structlog
@@ -16,6 +18,7 @@ import structlog
 from src.ai.embeddings import EmbeddingService
 from src.ai.eval.fixtures import (
     cleanup_eval_workspace,
+    cleanup_stale_eval_workspaces,
     load_test_documents,
     setup_eval_workspace,
 )
@@ -33,8 +36,12 @@ from src.ai.eval.models import EvalCase, EvalCaseResult, EvalMetrics, EvalResult
 from src.core.cache import ResponseCache
 from src.core.config import get_settings
 from src.core.database import async_session_factory
+from src.domain.roles import WorkspaceRole
 from src.repositories.search import SQLAlchemySearchRepository
 from src.services.search import SearchService
+
+if TYPE_CHECKING:
+    from src.services.ai import AIService
 
 logger = structlog.get_logger(__name__)
 
@@ -86,6 +93,31 @@ def _git_commit() -> str:
         return "unknown"
 
 
+async def _judge_answer(
+    question: str,
+    answer: str,
+    source_chunks: list[str],
+) -> tuple[float, float]:
+    """Run the judge agent; return (faithfulness, relevance) or (0.0, 0.0) on error."""
+    from src.ai.agents.judge import judge_agent
+
+    chunks_text = (
+        "\n---\n".join(source_chunks) if source_chunks else "(no sources retrieved)"
+    )
+    prompt = (
+        f"Question: {question}\n\n"
+        f"Answer: {answer}\n\n"
+        f"Source chunks used by the system:\n{chunks_text}\n\n"
+        "Evaluate the faithfulness and relevance of the answer against the sources."
+    )
+    try:
+        result = await judge_agent.run(prompt)
+        return result.output.faithfulness, result.output.relevance
+    except Exception:
+        logger.warning("judge agent failed", question=question[:80], exc_info=True)
+        return 0.0, 0.0
+
+
 class EvalRunner:
     def __init__(
         self,
@@ -93,18 +125,21 @@ class EvalRunner:
         golden_dataset_path: Path,
         test_docs_dir: Path,
         embedding_service: EmbeddingService,
+        ai_service: AIService | None = None,
     ) -> None:
         self._search_service = search_service
         self._golden_dataset_path = golden_dataset_path
         self._test_docs_dir = test_docs_dir
         self._embedding_service = embedding_service
+        self._ai_service = ai_service
         self._workspace_id: uuid.UUID | None = None
+        self._eval_user_id: uuid.UUID | None = None
         self._slug_to_id: dict[str, uuid.UUID] = {}
 
     async def setup(self) -> None:
         """Create the eval workspace and load all test documents with embeddings."""
         async with async_session_factory() as session:
-            self._workspace_id = await setup_eval_workspace(session)
+            self._workspace_id, self._eval_user_id = await setup_eval_workspace(session)
 
         async with async_session_factory() as session:
             self._slug_to_id = await load_test_documents(
@@ -126,6 +161,7 @@ class EvalRunner:
         async with async_session_factory() as session:
             await cleanup_eval_workspace(self._workspace_id, session)
         self._workspace_id = None
+        self._eval_user_id = None
         self._slug_to_id = {}
 
     def _uuid_to_slug(self, doc_id: uuid.UUID) -> str:
@@ -155,6 +191,33 @@ class EvalRunner:
         rr = reciprocal_rank(retrieved_slugs, expected_slugs)
         correctly_rejected = case.is_negative and len(response.results) == 0
 
+        answer_text = ""
+        answer_faithfulness = 0.0
+        answer_relevance = 0.0
+        negative_handling = False
+
+        if self._ai_service is not None:
+            assert self._eval_user_id is not None
+            try:
+                answer = await self._ai_service.ask(
+                    workspace_id=self._workspace_id,
+                    user_id=self._eval_user_id,
+                    question=case.question,
+                    role=WorkspaceRole.VIEWER,
+                )
+                answer_text = answer.answer
+                faithfulness, relevance = await _judge_answer(
+                    question=case.question,
+                    answer=answer_text,
+                    source_chunks=retrieved_chunks,
+                )
+                answer_faithfulness = faithfulness
+                answer_relevance = relevance
+                if case.is_negative:
+                    negative_handling = answer.confidence <= 0.3
+            except Exception:
+                logger.warning("answer phase failed", case_id=case.id, exc_info=True)
+
         return EvalCaseResult(
             case_id=case.id,
             question=case.question,
@@ -162,12 +225,15 @@ class EvalRunner:
             expected_source_doc_ids=expected_slugs,
             retrieved_doc_ids=retrieved_slugs,
             retrieved_chunks=retrieved_chunks,
-            answer_text="",
+            answer_text=answer_text,
             latency_ms=latency_ms,
             precision_at_k=p_at_k,
             recall=r,
             reciprocal_rank=rr,
             correctly_rejected=correctly_rejected,
+            answer_faithfulness=answer_faithfulness,
+            answer_relevance=answer_relevance,
+            negative_handling=negative_handling,
         )
 
     async def run(self) -> EvalResults:
@@ -189,6 +255,16 @@ class EvalRunner:
         positive_results = [r for r in case_results if r.category != "negative"]
         negative_results = [r for r in case_results if r.category == "negative"]
 
+        faithfulness_scores = [
+            r.answer_faithfulness for r in positive_results if r.answer_text
+        ]
+        relevance_scores = [
+            r.answer_relevance for r in positive_results if r.answer_text
+        ]
+        neg_handling_flags = [
+            r.negative_handling for r in negative_results if r.answer_text
+        ]
+
         metrics = EvalMetrics(
             precision_at_k=aggregate_precision(
                 [r.precision_at_k for r in positive_results]
@@ -202,6 +278,17 @@ class EvalRunner:
             total_cases=len(case_results),
             negative_cases=len(negative_results),
             positive_cases=len(positive_results),
+            answer_faithfulness=(
+                statistics.mean(faithfulness_scores) if faithfulness_scores else 0.0
+            ),
+            answer_relevance=(
+                statistics.mean(relevance_scores) if relevance_scores else 0.0
+            ),
+            negative_handling_rate=(
+                sum(neg_handling_flags) / len(neg_handling_flags)
+                if neg_handling_flags
+                else 0.0
+            ),
         )
 
         return EvalResults(
@@ -226,11 +313,26 @@ async def _main() -> None:
         cache = ResponseCache(redis_client=redis_client)
 
         async with async_session_factory() as session:
+            await cleanup_stale_eval_workspaces(session)
+
+        async with async_session_factory() as session:
+            from src.repositories.document import SQLAlchemyDocumentRepository
+            from src.services.ai import AIService
+            from src.services.document import DocumentService
+
             search_repo = SQLAlchemySearchRepository(session)
             search_svc = SearchService(
                 search_repo=search_repo,
                 embedding_service=embedding_svc,
                 cache=cache,
+            )
+            doc_svc = DocumentService(
+                repo=SQLAlchemyDocumentRepository(session),
+                session=session,
+            )
+            ai_svc = AIService(
+                search_service=search_svc,
+                document_service=doc_svc,
             )
 
             runner = EvalRunner(
@@ -238,6 +340,7 @@ async def _main() -> None:
                 golden_dataset_path=_GOLDEN_DATASET_PATH,
                 test_docs_dir=_TEST_DOCS_DIR,
                 embedding_service=embedding_svc,
+                ai_service=ai_svc,
             )
 
             try:
@@ -254,16 +357,21 @@ async def _main() -> None:
         )
 
         m = results.metrics
-        print(
-            f"\nEval complete — {m.total_cases} cases "
-            f"({m.positive_cases} positive, {m.negative_cases} negative)"
+        logger.info(
+            "eval complete",
+            total_cases=m.total_cases,
+            positive_cases=m.positive_cases,
+            negative_cases=m.negative_cases,
+            precision_at_k=round(m.precision_at_k, 3),
+            recall=round(m.recall, 3),
+            mrr=round(m.mrr, 3),
+            negative_rejection_rate=round(m.negative_rejection_rate, 3),
+            p95_latency_ms=round(m.p95_latency_ms),
+            answer_faithfulness=round(m.answer_faithfulness, 3),
+            answer_relevance=round(m.answer_relevance, 3),
+            negative_handling_rate=round(m.negative_handling_rate, 3),
+            output_path=str(output_path),
         )
-        print(f"  precision@{_TOP_K}:           {m.precision_at_k:.3f}")
-        print(f"  recall:                {m.recall:.3f}")
-        print(f"  MRR:                   {m.mrr:.3f}")
-        print(f"  negative rejection:    {m.negative_rejection_rate:.3f}")
-        print(f"  p95 latency:           {m.p95_latency_ms:.0f}ms")
-        print(f"\nResults written to {output_path}")
 
     finally:
         await redis_client.aclose()
