@@ -4,6 +4,8 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.documents import ContentType, Cursor, DocumentStatus
+from src.domain.workspace import WorkspaceStats
+from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.schemas.document import DocumentUpdate
 
@@ -92,3 +94,25 @@ class SQLAlchemyDocumentRepository:
         else:
             next_cursor = None
         return rows, next_cursor
+
+    async def get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats:
+        row = await self._session.execute(
+            sa.select(
+                sa.func.count(Document.id.distinct()).label("document_count"),
+                sa.func.count(DocumentChunk.id).label("chunk_count"),
+                sa.func.coalesce(sa.func.sum(DocumentChunk.token_count), 0).label(
+                    "total_tokens"
+                ),
+                sa.func.max(Document.updated_at).label("last_updated"),
+            )
+            .select_from(Document)
+            .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
+            .where(Document.workspace_id == workspace_id)
+        )
+        data = row.one()
+        return WorkspaceStats(
+            document_count=int(data.document_count or 0),
+            chunk_count=int(data.chunk_count or 0),
+            total_tokens_indexed=int(data.total_tokens or 0),
+            last_document_updated_at=data.last_updated,
+        )

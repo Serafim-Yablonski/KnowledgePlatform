@@ -7,6 +7,13 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from src.domain.roles import WorkspaceRole
 
 
+class WorkspaceStatsResponse(BaseModel):
+    document_count: int
+    chunk_count: int
+    total_tokens_indexed: int
+    last_document_updated_at: datetime | None
+
+
 class WorkspaceCreate(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     description: Annotated[str, Field(max_length=500)] | None = None

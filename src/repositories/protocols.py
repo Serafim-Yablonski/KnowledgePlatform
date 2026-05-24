@@ -4,6 +4,7 @@ from typing import Protocol
 from src.domain.documents import ContentType, Cursor, DocumentStatus
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult
+from src.domain.workspace import WorkspaceStats
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
@@ -87,6 +88,8 @@ class DocumentRepositoryProtocol(Protocol):
         cursor: Cursor | None = None,
         status: DocumentStatus | None = None,
     ) -> tuple[list[Document], Cursor | None]: ...
+
+    async def get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats: ...
 
 
 class ChunkRepositoryProtocol(Protocol):

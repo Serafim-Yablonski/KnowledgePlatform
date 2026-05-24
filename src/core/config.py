@@ -101,6 +101,15 @@ class AppSettings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 50
 
 
+class MCPSettings(BaseSettings):
+    model_config = _ENV_CONFIG
+
+    # Bearer token auth reuses the JWT stack. API key is a simpler alternative
+    # for local development — set both variables to enable it.
+    MCP_API_KEY: str | None = None
+    MCP_API_KEY_USER_EMAIL: str | None = None
+
+
 _DEV_SECRET = "dev-secret-key-change-before-production"
 
 
@@ -111,6 +120,7 @@ class Settings(
     AISettings,
     ObservabilitySettings,
     AppSettings,
+    MCPSettings,
 ):
     model_config = _ENV_CONFIG
 

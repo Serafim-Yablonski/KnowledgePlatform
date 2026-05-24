@@ -82,6 +82,11 @@ def create_app() -> FastAPI:
     application.add_exception_handler(Exception, _unhandled_error_handler)
     application.include_router(health_router)
     application.include_router(v1_router)
+
+    from src.mcp_server.server import create_mcp_app
+
+    application.mount("/mcp", create_mcp_app())
+
     return application
 
 

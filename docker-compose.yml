@@ -45,13 +45,9 @@ services:
         condition: service_healthy
     env_file: .env
 
-  mcp-server:
-    build: .
-    # TODO: replace with real MCP server entrypoint once src/mcp_server/server.py is built
-    command: ["python", "-c", "print('MCP server not yet configured')"]
-    depends_on:
-      - app
-    env_file: .env
+  # MCP server is mounted at /mcp inside the main `app` container (port 8000).
+  # No separate service needed — it shares the same DB engine and Redis pool.
+  # Connect MCP clients to: http://localhost:8000/mcp
 
 volumes:
   postgres_data:
