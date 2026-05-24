@@ -166,6 +166,14 @@ class WorkspaceService:
 
         await self._repo.remove_member(workspace_id, target_user_id)
 
+    async def get_user_role(
+        self, actor: User, workspace_id: uuid.UUID
+    ) -> WorkspaceRole:
+        membership = await self._repo.get_membership(workspace_id, actor.id)
+        if membership is None:
+            raise ForbiddenError("Not a member of this workspace")
+        return membership.role
+
     async def list_members(
         self, actor: User, workspace_id: uuid.UUID
     ) -> list[WorkspaceMemberResponse]:

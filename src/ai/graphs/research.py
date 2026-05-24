@@ -45,7 +45,7 @@ def build_research_graph(
     builder: StateGraph[ResearchState] = StateGraph(ResearchState)
 
     builder.add_node("plan_research", plan_research)
-    # cast: LangGraph's _Node internal type is incompatible with Callable[..., Awaitable]
+    # cast: LangGraph's _Node type is incompatible with Callable[..., Awaitable]
     builder.add_node("retrieve_evidence", cast(Any, retrieve_node))
     builder.add_node("evaluate_sufficiency", evaluate_sufficiency)
     builder.add_node("synthesize_answer", cast(Any, synthesize_node))

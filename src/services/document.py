@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import IO
 
@@ -22,6 +23,7 @@ from src.models.user import User
 from src.models.workspace import Workspace
 from src.repositories.protocols import DocumentRepositoryProtocol
 from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
+from src.schemas.workspace import WorkspaceStatsResponse
 
 logger = structlog.get_logger(__name__)
 
@@ -147,6 +149,29 @@ class DocumentService:
             items=[DocumentResponse.model_validate(d) for d in docs],
             next_cursor=encode_cursor(next_cursor) if next_cursor else None,
             has_more=next_cursor is not None,
+        )
+
+    async def list_by_workspace_id(
+        self,
+        workspace_id: uuid.UUID,
+        limit: int = 50,
+    ) -> Sequence[DocumentResponse]:
+        """List documents by workspace ID without requiring an ORM Workspace object.
+
+        Caller is responsible for verifying workspace membership before calling this.
+        """
+        docs, _ = await self._repo.list_by_workspace(workspace_id, limit=limit)
+        return [DocumentResponse.model_validate(d) for d in docs]
+
+    async def get_workspace_stats(
+        self, workspace_id: uuid.UUID
+    ) -> WorkspaceStatsResponse:
+        stats = await self._repo.get_workspace_stats(workspace_id)
+        return WorkspaceStatsResponse(
+            document_count=stats.document_count,
+            chunk_count=stats.chunk_count,
+            total_tokens_indexed=stats.total_tokens_indexed,
+            last_document_updated_at=stats.last_document_updated_at,
         )
 
     async def update(

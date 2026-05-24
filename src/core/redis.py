@@ -53,6 +53,16 @@ def get_redis(request: Request) -> aioredis.Redis:
     return request.app.state.redis  # type: ignore[no-any-return]
 
 
+def get_async_redis_client() -> aioredis.Redis:
+    """Return the module-level async Redis client (initialized by init_redis).
+
+    Use this outside of FastAPI request context, e.g., in MCP tool functions.
+    """
+    if _async_client is None:
+        raise RuntimeError("Redis not initialized — call init_redis() first")
+    return _async_client
+
+
 # ---------------------------------------------------------------------------
 # Async cache helpers (FastAPI / coroutines)
 # ---------------------------------------------------------------------------
