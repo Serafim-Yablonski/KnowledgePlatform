@@ -18,6 +18,7 @@ from src.services.search import SearchService
 
 if TYPE_CHECKING:
     from src.services.ai import AIService
+    from src.services.research import ResearchService
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -119,3 +120,28 @@ def get_search_service(
         embedding_service=embedding_svc,
         cache=ResponseCache(redis),
     )
+
+
+def get_research_service(
+    session: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+) -> ResearchService:
+    from src.ai.embeddings import EmbeddingService  # noqa: PLC0415
+    from src.core.cache import ResponseCache  # noqa: PLC0415
+    from src.core.config import get_settings  # noqa: PLC0415
+    from src.repositories.search import SQLAlchemySearchRepository  # noqa: PLC0415
+    from src.services.research import ResearchService  # noqa: PLC0415
+
+    cfg = get_settings()
+    embedding_svc = EmbeddingService(
+        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
+        model=cfg.EMBEDDING_MODEL,
+        dimensions=cfg.EMBEDDING_DIMENSIONS,
+        redis_client=redis,
+    )
+    search_svc = SearchService(
+        search_repo=SQLAlchemySearchRepository(session),
+        embedding_service=embedding_svc,
+        cache=ResponseCache(redis, key_prefix="nexus:research_search"),
+    )
+    return ResearchService(search_service=search_svc, redis_client=redis)

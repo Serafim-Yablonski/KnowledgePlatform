@@ -1,3 +1,4 @@
+import contextlib
 import functools
 from collections.abc import Awaitable, Callable
 from typing import Any, ParamSpec, TypeVar
@@ -18,8 +19,12 @@ def setup_observability(app: FastAPI, *, token: str | None = None) -> None:
     else:
         logfire.configure(send_to_logfire=False)
     logfire.instrument_fastapi(app)
-    logfire.instrument_asyncpg()
-    logfire.instrument_celery()
+    # asyncpg and celery instrumentation require optional OTel packages that may
+    # not be available for all Python versions — degrade gracefully when missing.
+    with contextlib.suppress(RuntimeError):
+        logfire.instrument_asyncpg()
+    with contextlib.suppress(RuntimeError):
+        logfire.instrument_celery()
 
 
 def traced(

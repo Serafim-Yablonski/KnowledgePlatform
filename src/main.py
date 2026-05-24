@@ -6,6 +6,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from src.ai.graphs.checkpointer import setup_checkpointer
 from src.api.health import router as health_router
 from src.api.v1 import router as v1_router
 from src.core.config import get_settings
@@ -29,8 +30,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.engine = engine
     app.state.redis = redis_client
 
-    logger.info("startup complete", environment=cfg.ENVIRONMENT)
-    yield
+    async with setup_checkpointer() as checkpointer:
+        app.state.checkpointer = checkpointer
+        logger.info("startup complete", environment=cfg.ENVIRONMENT)
+        yield
 
     await engine.dispose()
     await close_redis()

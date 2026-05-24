@@ -40,7 +40,7 @@ def _ask_url(workspace_id: str) -> str:
 def _stub_ai_service(answer: str = "Test answer", confidence: float = 0.9) -> MagicMock:
     import uuid
 
-    from src.ai.agents.question import SourceReference
+    from src.schemas.ai import SourceReference
 
     response = AnswerResponse(
         answer=answer,
