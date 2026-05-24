@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 
 import pytest
+from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import NullPool
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -13,6 +14,7 @@ from testcontainers.postgres import PostgresContainer
 
 from src.core.config import get_settings
 from src.core.dependencies import get_db
+from src.core.redis import get_redis
 from src.main import app
 
 
@@ -91,10 +93,16 @@ async def db_session(test_engine: AsyncEngine) -> AsyncGenerator[AsyncSession]:
 
 @pytest.fixture
 async def async_client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
+    # ASGITransport does not trigger the FastAPI lifespan, so app.state.redis is
+    # never populated. Override get_redis with an in-memory fake so rate limiting
+    # and caching work without a real Redis process.
+    fake_redis = FakeRedis()
+
     async def _override_get_db() -> AsyncGenerator[AsyncSession]:
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_redis] = lambda: fake_redis
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -102,6 +110,7 @@ async def async_client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
             yield client
     finally:
         app.dependency_overrides.clear()
+        await fake_redis.aclose()
 
 
 @pytest.fixture
