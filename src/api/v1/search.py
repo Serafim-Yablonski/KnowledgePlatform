@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from typing import cast
 
 from fastapi import APIRouter, Depends
@@ -25,7 +24,6 @@ _search_rate_limit = rate_limit("search", 20, 60)
     dependencies=[Depends(_search_rate_limit)],
 )
 async def search_documents(
-    workspace_id: uuid.UUID,
     body: SearchRequest,
     workspace: Workspace = Depends(get_current_workspace),
     service: SearchService = Depends(get_search_service),

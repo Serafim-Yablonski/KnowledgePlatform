@@ -48,6 +48,4 @@ class ApiKeyService:
         target = next((k for k in keys if k.id == key_id), None)
         if target is None:
             raise NotFoundError("API key not found")
-        if target.user_id != requesting_user_id:
-            raise ForbiddenError("Cannot deactivate another user's API key")
         await self._repo.deactivate(key_id, requesting_user_id)

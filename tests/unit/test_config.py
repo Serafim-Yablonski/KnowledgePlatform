@@ -7,12 +7,12 @@ from src.core.config import DatabaseSettings, Settings
 from src.core.security import hash_password, verify_password
 
 
-def test_verify_password_returns_false_for_overlong_input() -> None:
-    hashed = hash_password("normal_password")
+async def test_verify_password_returns_false_for_overlong_input() -> None:
+    hashed = await hash_password("normal_password")
     # bcrypt 4+ raises ValueError for passwords > 72 bytes; verify_password must
     # catch it and return False rather than propagating the exception.
     long_password = "a" * 73
-    assert verify_password(long_password, hashed) is False
+    assert await verify_password(long_password, hashed) is False
 
 
 def test_production_rejects_default_secret_key() -> None:

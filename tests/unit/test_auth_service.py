@@ -176,6 +176,63 @@ async def test_get_current_user_rejects_refresh_token() -> None:
 
 
 # ---------------------------------------------------------------------------
+# refresh
+# ---------------------------------------------------------------------------
+
+
+async def test_refresh_success() -> None:
+    from src.core.security import create_refresh_token
+
+    service, repo = _make_service()
+    user_data = UserCreate(email="frank@example.com", password="secret99")
+    response = await service.register(user_data)
+    token = create_refresh_token(response.id)
+
+    result = await service.refresh(token)
+
+    assert isinstance(result, TokenResponse)
+    assert result.access_token
+    assert result.refresh_token
+    assert result.token_type == "bearer"
+
+
+async def test_refresh_rejects_access_token() -> None:
+    service, _ = _make_service()
+    token = create_access_token(uuid.uuid4())
+    with pytest.raises(ForbiddenError, match="Invalid token type"):
+        await service.refresh(token)
+
+
+async def test_refresh_rejects_invalid_token() -> None:
+    service, _ = _make_service()
+    with pytest.raises(ForbiddenError):
+        await service.refresh("not.a.token")
+
+
+async def test_refresh_rejects_unknown_user() -> None:
+    from src.core.security import create_refresh_token
+
+    service, _ = _make_service()
+    token = create_refresh_token(uuid.uuid4())
+    with pytest.raises(ForbiddenError, match="User not found or inactive"):
+        await service.refresh(token)
+
+
+async def test_refresh_rejects_inactive_user() -> None:
+    from src.core.security import create_refresh_token
+
+    service, repo = _make_service()
+    user_data = UserCreate(email="grace@example.com", password="secret99")
+    response = await service.register(user_data)
+    user = await repo.get_by_id(response.id)
+    assert user is not None
+    await repo.update(user, is_active=False)
+    token = create_refresh_token(response.id)
+    with pytest.raises(ForbiddenError, match="User not found or inactive"):
+        await service.refresh(token)
+
+
+# ---------------------------------------------------------------------------
 # password never stored in plaintext
 # ---------------------------------------------------------------------------
 

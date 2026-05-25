@@ -116,7 +116,7 @@ class TestAuthenticateRequest:
             # Make the token look like a JWT (has two dots) so the JWT path is taken.
             patch("src.mcp_server.auth._looks_like_jwt", return_value=True),
             patch("src.mcp_server.auth.get_session") as mock_gs,
-            patch("src.mcp_server.auth.SQLAlchemyUserRepository"),
+            patch("src.repositories.user.SQLAlchemyUserRepository"),  # inline import
             patch("src.mcp_server.auth.AuthService") as mock_auth_svc_cls,
         ):
             session = MagicMock()
@@ -164,6 +164,57 @@ class TestAuthenticateRequest:
             mock_settings.MCP_API_KEY_USER_EMAIL = "admin@example.com"
 
             with pytest.raises(UnauthorizedError):
+                await _authenticate_request(request)
+
+    @pytest.mark.asyncio
+    async def test_db_api_key_revoked_raises_forbidden(self) -> None:
+        """Bearer without dots → DB API key path; revoked key raises ForbiddenError."""
+        request = MagicMock()
+        request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+
+        with (
+            patch("src.mcp_server.auth._looks_like_jwt", return_value=False),
+            patch("src.mcp_server.auth.get_session") as mock_gs,
+        ):
+            session = MagicMock()
+
+            @asynccontextmanager
+            async def _fake() -> AsyncGenerator[MagicMock]:
+                yield session
+
+            mock_gs.return_value = _fake()
+
+            from src.repositories.api_key import SQLAlchemyApiKeyRepository
+
+            with (
+                patch.object(
+                    SQLAlchemyApiKeyRepository,
+                    "get_by_hash",
+                    new=AsyncMock(return_value=None),
+                ),
+                pytest.raises(ForbiddenError, match="Invalid or revoked"),
+            ):
+                await _authenticate_request(request)
+
+    @pytest.mark.asyncio
+    async def test_db_api_key_db_error_propagates(self) -> None:
+        """A DB error during API key auth propagates rather than being masked as 403."""
+        request = MagicMock()
+        request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+
+        with (
+            patch("src.mcp_server.auth._looks_like_jwt", return_value=False),
+            patch("src.mcp_server.auth.get_session") as mock_gs,
+        ):
+
+            @asynccontextmanager
+            async def _failing() -> AsyncGenerator[MagicMock]:
+                raise RuntimeError("DB unavailable")
+                yield  # noqa: RET508
+
+            mock_gs.return_value = _failing()
+
+            with pytest.raises(RuntimeError, match="DB unavailable"):
                 await _authenticate_request(request)
 
     @pytest.mark.asyncio

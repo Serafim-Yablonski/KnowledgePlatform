@@ -4,6 +4,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import logfire
 import structlog
 from langgraph.config import get_config
 from pydantic_ai import Agent
@@ -15,6 +16,7 @@ from src.ai.graphs.state import (
     ResearchState,
 )
 from src.core.config import get_settings
+from src.core.observability import set_llm_span_attrs
 from src.schemas.search import SearchResponse
 from src.services.search import SearchService
 
@@ -72,7 +74,15 @@ _synthesize_agent: Agent[None, str] = Agent(
 
 
 async def plan_research(state: ResearchState) -> dict[str, object]:
-    result = await _plan_agent.run(f"Research topic: {state['topic']}")
+    with logfire.span("research_plan", workspace_id=state["workspace_id"]) as span:
+        result = await _plan_agent.run(f"Research topic: {state['topic']}")
+        usage = result.usage()
+        set_llm_span_attrs(
+            span,
+            get_settings().LLM_MODEL,
+            usage.request_tokens or 0,
+            usage.response_tokens or 0,
+        )
     logger.info("research plan created", queries=result.output.queries)
     return {"plan": result.output, "iteration_count": 0, "gap_queries": []}
 
@@ -141,9 +151,21 @@ async def evaluate_sufficiency(state: ResearchState) -> dict[str, object]:
         f"Iteration: {state['iteration_count']} of {state['max_iterations']}"
     )
 
-    result = await _evaluate_agent.run(prompt)
-    ev = result.output
+    with logfire.span(
+        "research_evaluate",
+        workspace_id=state["workspace_id"],
+        iteration=state["iteration_count"],
+    ) as span:
+        result = await _evaluate_agent.run(prompt)
+        usage = result.usage()
+        set_llm_span_attrs(
+            span,
+            get_settings().LLM_MODEL,
+            usage.request_tokens or 0,
+            usage.response_tokens or 0,
+        )
 
+    ev = result.output
     force_sufficient = (
         ev.sufficient or state["iteration_count"] >= state["max_iterations"]
     )
@@ -183,11 +205,22 @@ def make_synthesize_node(
         )
 
         full_text = ""
-        async with _synthesize_agent.run_stream(prompt) as stream_result:
-            async for chunk in stream_result.stream_text(delta=True):
-                full_text += chunk
-                await redis_client.rpush(stream_key, chunk)
-                await redis_client.publish(stream_key, chunk)
+        with logfire.span(
+            "research_synthesize", workspace_id=state["workspace_id"]
+        ) as span:
+            async with _synthesize_agent.run_stream(prompt) as stream_result:
+                async for chunk in stream_result.stream_text(delta=True):
+                    full_text += chunk
+                    await redis_client.rpush(stream_key, chunk)
+                    await redis_client.publish(stream_key, chunk)
+            usage = stream_result.usage()
+            set_llm_span_attrs(
+                span,
+                get_settings().LLM_STRONG_MODEL,
+                usage.request_tokens or 0,
+                usage.response_tokens or 0,
+            )
+            span.set_attribute("synthesis_length", len(full_text))
 
         await redis_client.rpush(stream_key, "__DONE__")
         await redis_client.publish(stream_key, "__DONE__")

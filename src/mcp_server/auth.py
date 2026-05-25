@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import hashlib
 import secrets
+import uuid
 from typing import TYPE_CHECKING
 
 import structlog
@@ -17,7 +18,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from src.core.config import settings
 from src.core.database import get_session
 from src.core.exceptions import AppError, ForbiddenError, UnauthorizedError
-from src.repositories.user import SQLAlchemyUserRepository
 from src.services.auth import AuthService
 
 logger = structlog.get_logger(__name__)
@@ -33,7 +33,7 @@ _current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar(
 _MCP_SESSION_HEADER = "mcp-session-id"
 
 
-async def _update_last_used(key_id: object) -> None:
+async def _update_last_used(key_id: uuid.UUID) -> None:
     """Fire-and-forget coroutine: update last_used_at in a fresh session."""
     from datetime import UTC, datetime
 
@@ -57,6 +57,8 @@ async def _update_last_used(key_id: object) -> None:
 
 async def _authenticate_jwt(token: str) -> User:
     async with get_session() as session:
+        from src.repositories.user import SQLAlchemyUserRepository
+
         repo = SQLAlchemyUserRepository(session)
         service = AuthService(repo)
         return await service.get_current_user(token)
@@ -92,13 +94,8 @@ async def _authenticate_request(request: Request) -> User:
             # "Invalid or revoked API key".
             return await _authenticate_jwt(token)
 
-        try:
-            async with get_session() as session:
-                return await _authenticate_db_api_key(token, session)
-        except AppError:
-            raise
-        except Exception:
-            raise ForbiddenError("Invalid or revoked API key") from None
+        async with get_session() as session:
+            return await _authenticate_db_api_key(token, session)
 
     # Legacy static API key (env-var pair) — kept for backward compatibility.
     api_key_header = request.headers.get("X-API-Key", "")
@@ -111,6 +108,8 @@ async def _authenticate_request(request: Request) -> User:
         if not settings.MCP_API_KEY_USER_EMAIL:
             raise ForbiddenError("API key user email not configured")
         async with get_session() as session:
+            from src.repositories.user import SQLAlchemyUserRepository
+
             repo = SQLAlchemyUserRepository(session)
             user = await repo.get_by_email(settings.MCP_API_KEY_USER_EMAIL)
             if user is None or not user.is_active:

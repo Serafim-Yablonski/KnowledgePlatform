@@ -29,6 +29,8 @@ class McpSessionState:
 
 
 # Module-level store: session_id → state.  One entry per live MCP session.
+# Capped to prevent unbounded memory growth under repeated unauthenticated probes.
+_MAX_SESSIONS = 10_000
 _sessions: dict[str, McpSessionState] = {}
 
 # Set by MCPAuthMiddleware per HTTP request so tool functions can call
@@ -44,6 +46,10 @@ def get_current_session_id() -> str | None:
 
 def get_or_create_session_state(session_id: str, user: User) -> McpSessionState:
     if session_id not in _sessions:
+        if len(_sessions) >= _MAX_SESSIONS:
+            # Evict oldest entry (dicts preserve insertion order in Python 3.7+).
+            oldest = next(iter(_sessions))
+            del _sessions[oldest]
         _sessions[session_id] = McpSessionState(user=user)
     return _sessions[session_id]
 

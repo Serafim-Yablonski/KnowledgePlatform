@@ -70,6 +70,9 @@ class EmbeddingService:
             cache_misses = len(miss_indices)
             span.set_attribute("cache_hits", cache_hits)
             span.set_attribute("cache_misses", cache_misses)
+            # Gemini charges per character; total_chars on cache-miss texts is
+            # the direct cost input for a dashboard query.
+            span.set_attribute("total_chars", sum(len(t) for t in miss_texts))
 
             if miss_texts:
                 api_start = time.monotonic()

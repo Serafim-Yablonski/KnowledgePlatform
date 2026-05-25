@@ -18,7 +18,7 @@ class AuthService:
         self._repo = user_repo
 
     async def register(self, data: UserCreate) -> UserResponse:
-        hashed = hash_password(data.password)
+        hashed = await hash_password(data.password)
         try:
             user = await self._repo.create(data, hashed)
         except IntegrityError as exc:
@@ -27,10 +27,24 @@ class AuthService:
 
     async def login(self, data: UserLogin) -> TokenResponse:
         user = await self._repo.get_by_email(data.email)
-        if user is None or not verify_password(data.password, user.hashed_password):
+        if user is None or not await verify_password(
+            data.password, user.hashed_password
+        ):
             raise ForbiddenError("Invalid credentials")
         if not user.is_active:
             raise ForbiddenError("Invalid credentials")
+        return TokenResponse(
+            access_token=create_access_token(user.id),
+            refresh_token=create_refresh_token(user.id),
+        )
+
+    async def refresh(self, refresh_token: str) -> TokenResponse:
+        payload = decode_token(refresh_token)
+        if payload.type != "refresh":
+            raise ForbiddenError("Invalid token type")
+        user = await self._repo.get_by_id(payload.sub)
+        if user is None or not user.is_active:
+            raise ForbiddenError("User not found or inactive")
         return TokenResponse(
             access_token=create_access_token(user.id),
             refresh_token=create_refresh_token(user.id),

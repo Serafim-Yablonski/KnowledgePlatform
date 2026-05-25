@@ -9,7 +9,7 @@ import structlog
 
 from src.ai.graphs.research import build_research_graph
 from src.ai.graphs.state import ResearchState
-from src.core.exceptions import ForbiddenError, NotFoundError
+from src.core.exceptions import NotFoundError
 from src.schemas.research import (
     ResearchPlanResponse,
     ResearchStatusResponse,
@@ -102,7 +102,7 @@ class ResearchService:
             raise NotFoundError(f"Research thread {thread_id!r} not found")
 
         if snapshot.values.get("workspace_id") != str(workspace_id):
-            raise ForbiddenError("Research thread does not belong to this workspace")
+            raise NotFoundError(f"Research thread {thread_id!r} not found")
 
         return snapshot
 

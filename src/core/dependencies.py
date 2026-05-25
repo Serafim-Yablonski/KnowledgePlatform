@@ -122,6 +122,31 @@ def get_search_service(
     )
 
 
+def get_auth_service(session: AsyncSession = Depends(get_db)) -> Any:
+    from src.repositories.user import SQLAlchemyUserRepository
+    from src.services.auth import AuthService
+
+    return AuthService(SQLAlchemyUserRepository(session))
+
+
+def get_api_key_service(session: AsyncSession = Depends(get_db)) -> Any:
+    from src.repositories.api_key import SQLAlchemyApiKeyRepository
+    from src.services.api_key import ApiKeyService
+
+    return ApiKeyService(SQLAlchemyApiKeyRepository(session))
+
+
+def get_workspace_service(session: AsyncSession = Depends(get_db)) -> Any:
+    from src.repositories.user import SQLAlchemyUserRepository
+    from src.repositories.workspace import SQLAlchemyWorkspaceRepository
+    from src.services.workspace import WorkspaceService
+
+    return WorkspaceService(
+        workspace_repo=SQLAlchemyWorkspaceRepository(session),
+        user_repo=SQLAlchemyUserRepository(session),
+    )
+
+
 def get_research_service(
     session: AsyncSession = Depends(get_db),
     redis: Any = Depends(get_redis),

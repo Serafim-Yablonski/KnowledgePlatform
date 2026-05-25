@@ -6,11 +6,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from fastapi import Depends, Response
+from redis.exceptions import RedisError
 
 from src.core.exceptions import RateLimitError
 from src.core.redis import get_redis
 from src.models.user import User
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -47,12 +51,23 @@ class SlidingWindowRateLimiter:
         pipe.zcard(key)
         pipe.zrange(key, 0, 0, withscores=True)  # oldest entry for retry_after
         pipe.expire(key, self._window_seconds + 1)
-        results = await pipe.execute()
+        try:
+            results = await pipe.execute()
+        except RedisError:
+            logger.warning("rate_limit_redis_unavailable", key_prefix=self._key_prefix)
+            return RateLimitResult(
+                remaining=self._max_requests,
+                reset_at=datetime.fromtimestamp(now + self._window_seconds, tz=UTC),
+                limit=self._max_requests,
+            )
 
         count: int = results[2]
         oldest_entries: list[tuple[str, float]] = results[3]
 
         if count > self._max_requests:
+            # Remove the just-added member so a rejected request doesn't inflate
+            # the window and permanently lock out the caller.
+            await self._redis.zrem(key, member)
             if oldest_entries:
                 oldest_ts: float = oldest_entries[0][1]
                 retry_after = max(1, int(oldest_ts + self._window_seconds - now) + 1)
