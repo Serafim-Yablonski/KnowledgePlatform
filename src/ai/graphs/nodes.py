@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -89,12 +88,13 @@ def make_retrieve_node(
         queries = state["gap_queries"] if state["gap_queries"] else plan.queries
         workspace_id = uuid.UUID(state["workspace_id"])
 
-        responses: list[SearchResponse] = await asyncio.gather(
-            *[
-                search_service.search(workspace_id=workspace_id, query=q)
-                for q in queries
-            ]
-        )
+        # Sequential: all queries share one AsyncSession; asyncio.gather would
+        # cause concurrent operations on the same connection (InvalidRequestError).
+        responses: list[SearchResponse] = []
+        for q in queries:
+            responses.append(
+                await search_service.search(workspace_id=workspace_id, query=q)
+            )
 
         seen: set[tuple[str, str]] = set()
         new_findings: list[Finding] = []

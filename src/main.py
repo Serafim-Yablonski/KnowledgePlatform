@@ -30,10 +30,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.engine = engine
     app.state.redis = redis_client
 
+    from src.mcp_server.server import get_mcp_session_manager
+
     async with setup_checkpointer() as checkpointer:
         app.state.checkpointer = checkpointer
-        logger.info("startup complete", environment=cfg.ENVIRONMENT)
-        yield
+        # StreamableHTTPSessionManager requires an anyio task group; mount()
+        # does not invoke sub-app lifespans, so we start it here explicitly.
+        async with get_mcp_session_manager().run():
+            logger.info("startup complete", environment=cfg.ENVIRONMENT)
+            yield
 
     await engine.dispose()
     await close_redis()
@@ -85,7 +90,9 @@ def create_app() -> FastAPI:
 
     from src.mcp_server.server import create_mcp_app
 
-    application.mount("/mcp", create_mcp_app())
+    # Mount at "/" so FastMCP's inner route "/mcp" becomes "http://host/mcp".
+    # Explicit routes (health, v1) added above via include_router take priority.
+    application.mount("/", create_mcp_app())
 
     return application
 

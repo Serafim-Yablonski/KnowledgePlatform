@@ -113,6 +113,8 @@ class TestAuthenticateRequest:
         expected_user = _make_user()
 
         with (
+            # Make the token look like a JWT (has two dots) so the JWT path is taken.
+            patch("src.mcp_server.auth._looks_like_jwt", return_value=True),
             patch("src.mcp_server.auth.get_session") as mock_gs,
             patch("src.mcp_server.auth.SQLAlchemyUserRepository"),
             patch("src.mcp_server.auth.AuthService") as mock_auth_svc_cls,

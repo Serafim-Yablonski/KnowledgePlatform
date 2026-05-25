@@ -1,5 +1,5 @@
 .PHONY: run test test-unit test-int lint typecheck eval eval-compare eval-baseline \
-        migrate revision ci docker-build clean seed install
+        migrate revision ci docker-build clean seed install mcp-config
 
 # ─── Development ──────────────────────────────────────────────────────────────
 
@@ -45,11 +45,11 @@ eval-baseline:
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 migrate:
-	uv run alembic upgrade head
+	docker compose run --rm app .venv/bin/alembic upgrade head
 
 # Usage: make revision MESSAGE="add user table"
 revision:
-	uv run alembic revision --autogenerate -m "$(MESSAGE)"
+	docker compose run --rm app .venv/bin/alembic revision --autogenerate -m "$(MESSAGE)"
 
 # ─── CI (mirrors GitHub Actions pipeline) ────────────────────────────────────
 
@@ -73,3 +73,6 @@ clean:
 
 seed:
 	@echo "not implemented yet"
+
+mcp-config:
+	uv run python scripts/generate_mcp_config.py
