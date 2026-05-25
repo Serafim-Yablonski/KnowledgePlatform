@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 env:
-  UV_VERSION: "0.7"
+  PYTHON_VERSION: "3.14"
 
 jobs:
   lint:
@@ -14,10 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v4
         with:
-          version: ${{ env.UV_VERSION }}
+          version: "latest"
           enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
         run: uv sync --extra dev
@@ -34,10 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v4
         with:
-          version: ${{ env.UV_VERSION }}
+          version: "latest"
           enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
         run: uv sync --extra dev
@@ -51,10 +53,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v4
         with:
-          version: ${{ env.UV_VERSION }}
+          version: "latest"
           enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
         run: uv sync --extra dev
