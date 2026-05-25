@@ -5,6 +5,7 @@ from src.domain.documents import ContentType, Cursor, DocumentStatus
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult
 from src.domain.workspace import WorkspaceStats
+from src.models.api_key import ApiKey
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
@@ -110,3 +111,21 @@ class SearchRepositoryProtocol(Protocol):
         top_k: int,
         min_score: float,
     ) -> list[SearchResult]: ...
+
+
+class ApiKeyRepositoryProtocol(Protocol):
+    async def create(
+        self,
+        user_id: uuid.UUID,
+        key_hash: str,
+        prefix: str,
+        name: str,
+    ) -> ApiKey: ...
+
+    async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
+
+    async def list_for_user(self, user_id: uuid.UUID) -> list[ApiKey]: ...
+
+    async def count_active_for_user(self, user_id: uuid.UUID) -> int: ...
+
+    async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None: ...

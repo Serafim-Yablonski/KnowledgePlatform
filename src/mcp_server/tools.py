@@ -269,11 +269,96 @@ async def get_research_status(
 
 
 # ---------------------------------------------------------------------------
+# Session-scoped workspace tools
+# ---------------------------------------------------------------------------
+
+
+async def list_workspaces() -> list[dict[str, Any]]:
+    from src.mcp_server.auth import get_mcp_user
+    from src.mcp_server.session import (
+        get_current_session_id,
+        get_or_create_session_state,
+    )
+
+    user = get_mcp_user()
+    session_id = get_current_session_id() or str(user.id)
+    get_or_create_session_state(session_id, user)
+
+    async with get_session() as session:
+        workspace_svc = _make_workspace_service(session)
+        workspaces = await workspace_svc.list_for_user(user)
+        results = []
+        for ws in workspaces:
+            role = await workspace_svc.get_user_role(user, ws.id)
+            results.append(
+                {
+                    "id": str(ws.id),
+                    "name": ws.name,
+                    "slug": ws.slug,
+                    "role": str(role),
+                    "member_count": ws.member_count,
+                }
+            )
+    return results
+
+
+async def set_active_workspace(
+    workspace_id: Annotated[
+        str,
+        Field(description="The workspace ID from list_workspaces"),
+    ],
+) -> dict[str, Any]:
+    from src.mcp_server.auth import get_mcp_user
+    from src.mcp_server.session import (
+        get_current_session_id,
+        get_or_create_session_state,
+    )
+
+    user = get_mcp_user()
+    ws_uuid = _parse_workspace_id(workspace_id)
+    session_id = get_current_session_id() or str(user.id)
+
+    async with get_session() as session:
+        workspace_svc = _make_workspace_service(session)
+        # get_user_role raises ForbiddenError if the user is not a member
+        role = await workspace_svc.get_user_role(user, ws_uuid)
+        ws = await workspace_svc.get_by_id(user, ws_uuid)
+
+    state = get_or_create_session_state(session_id, user)
+    state.active_workspace_id = ws_uuid
+    state.active_workspace_name = ws.name
+    state.active_workspace_role = role
+
+    return {
+        "active_workspace_id": str(ws_uuid),
+        "name": ws.name,
+        "role": str(role),
+        "member_count": ws.member_count,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
 
 def register_tools(mcp: FastMCP) -> None:
+    mcp.add_tool(
+        list_workspaces,
+        description=(
+            "List all workspaces you have access to. Call this first to discover "
+            "available workspaces, then use set_active_workspace to select one. "
+            "All subsequent search, ask, and research calls will use the active "
+            "workspace."
+        ),
+    )
+    mcp.add_tool(
+        set_active_workspace,
+        description=(
+            "Set the active workspace for this session. Must be called after "
+            "list_workspaces before any search, ask, or research operations."
+        ),
+    )
     mcp.add_tool(
         search_documents,
         description=(

@@ -20,7 +20,6 @@ def _inject_otel_context(
 def setup_logging(*, environment: str = "development") -> None:
     shared_processors: list[structlog.types.Processor] = [
         structlog.processors.add_log_level,
-        structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         _inject_otel_context,
         structlog.processors.StackInfoRenderer(),
@@ -48,7 +47,10 @@ def setup_logging(*, environment: str = "development") -> None:
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             renderer,
         ],
-        foreign_pre_chain=shared_processors,
+        foreign_pre_chain=[
+            structlog.stdlib.add_logger_name,  # safe here — stdlib loggers have .name
+            *shared_processors,
+        ],
     )
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)

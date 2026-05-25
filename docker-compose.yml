@@ -1,8 +1,10 @@
 services:
   postgres:
-    image: postgres:18
+    image: pgvector/pgvector:pg18
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-knowledge_platform}"]
       interval: 10s
@@ -30,9 +32,18 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - uploads_data:/data/uploads
     ports:
       - "8000:8000"
     env_file: .env
+    # Override host-oriented URLs from .env with Docker service names.
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 
   celery-worker:
@@ -43,7 +54,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - uploads_data:/data/uploads
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
 
   # MCP server is mounted at /mcp inside the main `app` container (port 8000).
   # No separate service needed — it shares the same DB engine and Redis pool.
@@ -51,3 +69,4 @@ services:
 
 volumes:
   postgres_data:
+  uploads_data:
