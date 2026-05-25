@@ -1,5 +1,6 @@
 """Unit tests for the AppError exception handler and unhandled exception handler."""
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.core.exceptions import (
@@ -11,11 +12,13 @@ from src.core.exceptions import (
     RateLimitError,
     UnauthorizedError,
 )
-from src.main import create_app
+from src.main import _app_error_handler, _unhandled_error_handler
 
 
 def _client_raising(exc: Exception) -> TestClient:
-    application = create_app()
+    application = FastAPI()
+    application.add_exception_handler(AppError, _app_error_handler)
+    application.add_exception_handler(Exception, _unhandled_error_handler)
 
     @application.get("/_test/raise")
     async def _raise() -> None:

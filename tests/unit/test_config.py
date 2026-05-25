@@ -17,7 +17,11 @@ def test_verify_password_returns_false_for_overlong_input() -> None:
 
 def test_production_rejects_default_secret_key() -> None:
     with pytest.raises(ValidationError, match="SECRET_KEY must be changed"):
-        Settings(ENVIRONMENT="production")
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="dev-secret-key-change-before-production",
+            POSTGRES_PASSWORD="strong-db-password",
+        )
 
 
 def test_production_rejects_default_db_password() -> None:

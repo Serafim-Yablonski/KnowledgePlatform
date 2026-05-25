@@ -70,7 +70,7 @@ async def _authenticate_db_api_key(raw_key: str, session: AsyncSession) -> User:
     repo = SQLAlchemyApiKeyRepository(session)
     api_key = await repo.get_by_hash(key_hash)
     if not api_key or not api_key.is_active:
-        raise UnauthorizedError("Invalid or revoked API key")
+        raise ForbiddenError("Invalid or revoked API key")
     asyncio.create_task(_update_last_used(api_key.id))
     return api_key.user
 
@@ -92,8 +92,13 @@ async def _authenticate_request(request: Request) -> User:
             # "Invalid or revoked API key".
             return await _authenticate_jwt(token)
 
-        async with get_session() as session:
-            return await _authenticate_db_api_key(token, session)
+        try:
+            async with get_session() as session:
+                return await _authenticate_db_api_key(token, session)
+        except AppError:
+            raise
+        except Exception:
+            raise ForbiddenError("Invalid or revoked API key")
 
     # Legacy static API key (env-var pair) — kept for backward compatibility.
     api_key_header = request.headers.get("X-API-Key", "")
