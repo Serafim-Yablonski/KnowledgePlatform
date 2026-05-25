@@ -5,7 +5,8 @@ from typing import Any, cast
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import RetryPolicy, interrupt
+from pydantic_ai.exceptions import ModelHTTPError
 
 from src.ai.graphs.nodes import (
     evaluate_sufficiency,
@@ -15,6 +16,18 @@ from src.ai.graphs.nodes import (
 )
 from src.ai.graphs.state import ResearchState
 from src.services.search import SearchService
+
+
+def _is_retryable(exc: Exception) -> bool:
+    return isinstance(exc, ModelHTTPError) and exc.status_code in (429, 503)
+
+
+_llm_retry = RetryPolicy(
+    max_attempts=3,
+    initial_interval=1.0,
+    backoff_factor=2.0,
+    retry_on=_is_retryable,
+)
 
 
 def _should_continue(state: ResearchState) -> str:
@@ -44,11 +57,15 @@ def build_research_graph(
 
     builder: StateGraph[ResearchState] = StateGraph(ResearchState)
 
-    builder.add_node("plan_research", plan_research)
+    builder.add_node("plan_research", plan_research, retry_policy=_llm_retry)
     # cast: LangGraph's _Node type is incompatible with Callable[..., Awaitable]
     builder.add_node("retrieve_evidence", cast(Any, retrieve_node))
-    builder.add_node("evaluate_sufficiency", evaluate_sufficiency)
-    builder.add_node("synthesize_answer", cast(Any, synthesize_node))
+    builder.add_node(
+        "evaluate_sufficiency", evaluate_sufficiency, retry_policy=_llm_retry
+    )
+    builder.add_node(
+        "synthesize_answer", cast(Any, synthesize_node), retry_policy=_llm_retry
+    )
     builder.add_node("human_review", human_review)
 
     builder.add_edge(START, "plan_research")

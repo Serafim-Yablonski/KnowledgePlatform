@@ -19,8 +19,19 @@ from src.services.search import SearchService
 logger = structlog.get_logger(__name__)
 
 _running_tasks: dict[str, asyncio.Task[Any]] = {}
+_task_errors: dict[str, str] = {}
 
 _STREAM_SENTINEL = "__DONE__"
+
+
+def _safe_error(exc: BaseException) -> str:
+    from pydantic_ai.exceptions import ModelHTTPError  # noqa: PLC0415
+
+    if isinstance(exc, ModelHTTPError):
+        return f"LLM service error (HTTP {exc.status_code}). Please retry."
+    return f"Research failed: {type(exc).__name__}"
+
+
 _STREAM_TIMEOUT = 300.0  # 5-minute ceiling for synthesis streaming
 
 
@@ -74,6 +85,7 @@ class ResearchService:
                     thread_id=thread_id,
                     exc_info=exc,
                 )
+                _task_errors[thread_id] = _safe_error(exc)
 
         task.add_done_callback(_on_done)
 
@@ -135,6 +147,7 @@ class ResearchService:
             findings_count=len(findings),
             synthesis=synthesis,
             human_approved=human_approved,
+            error=_task_errors.get(thread_id),
         )
 
     async def stream_synthesis(

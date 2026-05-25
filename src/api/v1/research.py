@@ -41,7 +41,6 @@ _review_rate_limit = rate_limit("ai_research_review", 10, 60)
     dependencies=[Depends(_start_rate_limit)],
 )
 async def start_research(
-    workspace_id: uuid.UUID,  # noqa: ARG001
     body: ResearchStartRequest,
     workspace: Workspace = Depends(get_current_workspace),
     user: User = Depends(get_current_user),
@@ -58,7 +57,6 @@ async def start_research(
 
 @router.get("/{thread_id}", response_model=ResearchStatusResponse)
 async def get_research_status(
-    workspace_id: uuid.UUID,  # noqa: ARG001
     thread_id: uuid.UUID,
     workspace: Workspace = Depends(get_current_workspace),
     service: ResearchService = Depends(get_research_service),
@@ -71,7 +69,6 @@ async def get_research_status(
     dependencies=[Depends(_stream_rate_limit)],
 )
 async def stream_research(
-    workspace_id: uuid.UUID,  # noqa: ARG001
     thread_id: uuid.UUID,
     workspace: Workspace = Depends(get_current_workspace),
     service: ResearchService = Depends(get_research_service),
@@ -97,7 +94,6 @@ async def stream_research(
     dependencies=[Depends(_review_rate_limit)],
 )
 async def review_research(
-    workspace_id: uuid.UUID,  # noqa: ARG001
     thread_id: uuid.UUID,
     body: ResearchReviewRequest,
     workspace: Workspace = Depends(get_current_workspace),
