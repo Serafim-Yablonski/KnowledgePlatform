@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import uuid
-
 from fastapi import APIRouter, Depends, Request
 
 from src.core.dependencies import (
@@ -30,8 +28,6 @@ _ask_rate_limit = rate_limit("ai_ask", 20, 60)
     dependencies=[Depends(_ask_rate_limit)],
 )
 async def ask_question(
-    # For routing only — use workspace.id (auth-verified by get_current_workspace).
-    workspace_id: uuid.UUID,  # noqa: ARG001
     body: AskRequest,
     request: Request,
     workspace: Workspace = Depends(get_current_workspace),

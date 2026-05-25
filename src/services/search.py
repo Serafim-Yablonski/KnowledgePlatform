@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 
@@ -36,9 +37,12 @@ class SearchService:
         top_k: int = 5,
         min_score: float = 0.3,
     ) -> SearchResponse:
+        query_hash = hashlib.sha256(query.encode()).hexdigest()[:16]
+
         with logfire.span(
             "search",
             workspace_id=str(workspace_id),
+            query_hash=query_hash,
             query_length=len(query),
             top_k=top_k,
             min_score=min_score,

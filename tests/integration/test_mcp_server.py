@@ -313,7 +313,7 @@ class TestWorkspaceResources:
         finally:
             _current_user.reset(token)
 
-        docs = json.loads(raw)
+        docs = raw
         assert isinstance(docs, list)
         assert len(docs) == 1
         assert docs[0]["title"] == "Sample Doc"
@@ -364,7 +364,7 @@ class TestWorkspaceResources:
         finally:
             _current_user.reset(token)
 
-        data = json.loads(raw)
+        data = raw
         assert data["document_count"] == 3
         assert data["chunk_count"] == 42
         assert data["total_tokens_indexed"] == 15000

@@ -1,0 +1,210 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: ruff format check
+        run: uv run ruff format --check src/ tests/
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: mypy --strict src/
+        run: uv run mypy --strict src/
+
+  test-unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/unit -x --cov=src --cov-report=xml --cov-report=term-missing
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage.xml
+
+  test-integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run integration tests
+        run: uv run pytest tests/integration -x
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy
+          # testcontainers-python starts its own pgvector/pgvector:pg18 container.
+          # DOCKER_HOST is auto-detected on Linux; no override needed here.
+
+  test-api:
+    name: API tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run API tests
+        run: uv run pytest tests/api -x
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy
+
+  test-ai:
+    name: AI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run AI tests
+        run: uv run pytest tests/ai -x
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy
+
+  eval:
+    name: Eval (main only)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [lint, typecheck, test-unit, test-integration, test-api, test-ai]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run eval
+        run: uv run python -m src.ai.eval.runner
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Compare against baseline
+        run: uv run python -m src.ai.eval.compare results/baseline.json results/current.json
+
+      - name: Upload eval results
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.sha }}
+          path: results/current.json
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [lint, typecheck, test-unit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t knowledge-platform:ci .
+
+      - name: Verify image starts
+        run: |
+          docker run --rm -d \
+            --name kp-ci-test \
+            -e DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/knowledge_platform \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e SECRET_KEY=ci-test-secret-key \
+            -e GOOGLE_API_KEY=dummy \
+            -e ANTHROPIC_API_KEY=dummy \
+            -p 8000:8000 \
+            knowledge-platform:ci
+          sleep 5
+          docker logs kp-ci-test 2>&1 | tail -20 || true
+          docker stop kp-ci-test || true

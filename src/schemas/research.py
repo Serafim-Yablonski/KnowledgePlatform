@@ -35,6 +35,7 @@ class ResearchStatusResponse(BaseModel):
     findings_count: int
     synthesis: str | None
     human_approved: bool = False
+    error: str | None = None
 
 
 class ResearchReviewRequest(BaseModel):
