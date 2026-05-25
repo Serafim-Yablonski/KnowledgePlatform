@@ -98,7 +98,7 @@ async def _authenticate_request(request: Request) -> User:
         except AppError:
             raise
         except Exception:
-            raise ForbiddenError("Invalid or revoked API key")
+            raise ForbiddenError("Invalid or revoked API key") from None
 
     # Legacy static API key (env-var pair) — kept for backward compatibility.
     api_key_header = request.headers.get("X-API-Key", "")
