@@ -1,5 +1,5 @@
 .PHONY: run test test-unit test-int lint typecheck eval eval-compare eval-baseline \
-        migrate revision ci docker-build clean seed install mcp-config
+        migrate revision ci docker-build clean seed install mcp-config trace-demo
 
 # ─── Development ──────────────────────────────────────────────────────────────
 
@@ -76,3 +76,8 @@ seed:
 
 mcp-config:
 	uv run python scripts/generate_mcp_config.py
+
+# ─── Observability demo ───────────────────────────────────────────────────────
+
+trace-demo:
+	uv run python scripts/trace_demo.py
