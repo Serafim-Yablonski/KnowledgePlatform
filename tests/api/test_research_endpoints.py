@@ -245,6 +245,66 @@ class TestRateLimit:
         assert resp.status_code == 429
 
 
+async def _register_and_token(client: AsyncClient, email: str) -> str:
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "password123", "display_name": "Test"},
+    )
+    resp = await client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "password123"},
+    )
+    return resp.json()["access_token"]  # type: ignore[no-any-return]
+
+
+class TestAuthGuards:
+    @pytest.mark.asyncio
+    async def test_unauthenticated_start_research_returns_403(
+        self,
+        async_client: AsyncClient,
+    ) -> None:
+        owner_token = await _register_and_token(
+            async_client, "owner_research_unauth@example.com"
+        )
+        create_resp = await async_client.post(
+            "/api/v1/workspaces",
+            headers={"Authorization": f"Bearer {owner_token}"},
+            json={"name": "auth-guard-ws"},
+        )
+        workspace_id = create_resp.json()["id"]
+
+        resp = await async_client.post(
+            f"/api/v1/workspaces/{workspace_id}/ai/research",
+            json={"topic": "test"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_non_member_cannot_start_research_returns_403(
+        self,
+        async_client: AsyncClient,
+    ) -> None:
+        owner_token = await _register_and_token(
+            async_client, "owner_research_member@example.com"
+        )
+        stranger_token = await _register_and_token(
+            async_client, "stranger_research@example.com"
+        )
+        create_resp = await async_client.post(
+            "/api/v1/workspaces",
+            headers={"Authorization": f"Bearer {owner_token}"},
+            json={"name": "member-guard-ws"},
+        )
+        workspace_id = create_resp.json()["id"]
+
+        resp = await async_client.post(
+            f"/api/v1/workspaces/{workspace_id}/ai/research",
+            json={"topic": "test"},
+            headers={"Authorization": f"Bearer {stranger_token}"},
+        )
+        assert resp.status_code == 403
+
+
 async def _get_workspace_id(client: AsyncClient) -> uuid.UUID:
     """Create a workspace and return its id."""
     resp = await client.post(

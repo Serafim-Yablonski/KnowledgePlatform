@@ -5,16 +5,12 @@ from sqlalchemy.exc import IntegrityError
 from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from src.domain.roles import PERMISSIONS, ROLE_RANK, WorkspaceRole
 from src.domain.slug import generate_slug
+from src.domain.workspace import WorkspaceInfo, WorkspaceMember
 from src.models.user import User
+from src.models.workspace import Workspace, WorkspaceMembership
 from src.repositories.protocols import (
     UserRepositoryProtocol,
     WorkspaceRepositoryProtocol,
-)
-from src.schemas.workspace import (
-    AddMemberRequest,
-    WorkspaceCreate,
-    WorkspaceMemberResponse,
-    WorkspaceResponse,
 )
 
 
@@ -27,20 +23,36 @@ class WorkspaceService:
         self._repo = workspace_repo
         self._user_repo = user_repo
 
-    async def create(self, actor: User, data: WorkspaceCreate) -> WorkspaceResponse:
-        slug = generate_slug(data.name)
+    async def get_workspace_for_user(
+        self, workspace_id: uuid.UUID, user_id: uuid.UUID
+    ) -> tuple[Workspace, WorkspaceMembership]:
+        membership = await self._repo.get_membership(workspace_id, user_id)
+        if membership is None:
+            raise ForbiddenError("Not a member of this workspace")
+        workspace = await self._repo.get_by_id(workspace_id)
+        if workspace is None:
+            raise ForbiddenError("Not a member of this workspace")
+        return workspace, membership
+
+    async def create(
+        self,
+        actor: User,
+        name: str,
+        description: str | None = None,
+    ) -> WorkspaceInfo:
+        slug = generate_slug(name)
         workspace = await self._repo.create(
-            name=data.name,
+            name=name,
             slug=slug,
             created_by_id=actor.id,
-            description=data.description,
+            description=description,
         )
         await self._repo.add_member(
             workspace_id=workspace.id,
             user_id=actor.id,
             role=WorkspaceRole.OWNER,
         )
-        return WorkspaceResponse(
+        return WorkspaceInfo(
             id=workspace.id,
             name=workspace.name,
             slug=workspace.slug,
@@ -50,9 +62,7 @@ class WorkspaceService:
             member_count=1,
         )
 
-    async def get_by_id(
-        self, actor: User, workspace_id: uuid.UUID
-    ) -> WorkspaceResponse:
+    async def get_by_id(self, actor: User, workspace_id: uuid.UUID) -> WorkspaceInfo:
         membership = await self._repo.get_membership(workspace_id, actor.id)
         if membership is None:
             raise ForbiddenError("Not a member of this workspace")
@@ -60,7 +70,7 @@ class WorkspaceService:
         if workspace is None:
             raise NotFoundError("Workspace not found")
         count = await self._repo.count_members(workspace_id)
-        return WorkspaceResponse(
+        return WorkspaceInfo(
             id=workspace.id,
             name=workspace.name,
             slug=workspace.slug,
@@ -70,13 +80,13 @@ class WorkspaceService:
             member_count=count,
         )
 
-    async def list_for_user(self, actor: User) -> list[WorkspaceResponse]:
+    async def list_for_user(self, actor: User) -> list[WorkspaceInfo]:
         workspaces = await self._repo.list_for_user(actor.id)
-        result: list[WorkspaceResponse] = []
+        result: list[WorkspaceInfo] = []
         for ws in workspaces:
             count = await self._repo.count_members(ws.id)
             result.append(
-                WorkspaceResponse(
+                WorkspaceInfo(
                     id=ws.id,
                     name=ws.name,
                     slug=ws.slug,
@@ -92,18 +102,19 @@ class WorkspaceService:
         self,
         actor: User,
         workspace_id: uuid.UUID,
-        data: AddMemberRequest,
-    ) -> WorkspaceMemberResponse:
+        user_email: str,
+        role: WorkspaceRole = WorkspaceRole.MEMBER,
+    ) -> WorkspaceMember:
         membership = await self._repo.get_membership(workspace_id, actor.id)
         if membership is None or "manage_members" not in PERMISSIONS[membership.role]:
             raise ForbiddenError("Insufficient permissions to add members")
 
         # Prevent privilege escalation: a role can only be granted if the actor
         # holds an equal or higher rank (e.g. ADMIN cannot make someone OWNER).
-        if ROLE_RANK[data.role] > ROLE_RANK[membership.role]:
+        if ROLE_RANK[role] > ROLE_RANK[membership.role]:
             raise ForbiddenError("Cannot grant a role higher than your own")
 
-        target = await self._user_repo.get_by_email(data.user_email)
+        target = await self._user_repo.get_by_email(user_email)
         # Return the same error regardless of whether the email is unknown or
         # already a member — prevents leaking which emails are registered to
         # ADMIN-level callers who have manage_members permission.
@@ -117,13 +128,13 @@ class WorkspaceService:
             new_membership = await self._repo.add_member(
                 workspace_id=workspace_id,
                 user_id=target.id,
-                role=data.role,
+                role=role,
                 invited_by_id=actor.id,
             )
         except IntegrityError as exc:
             raise ConflictError("Invitation could not be sent") from exc
 
-        return WorkspaceMemberResponse(
+        return WorkspaceMember(
             user_id=target.id,
             email=target.email,
             display_name=target.display_name,
@@ -172,13 +183,13 @@ class WorkspaceService:
 
     async def list_members(
         self, actor: User, workspace_id: uuid.UUID
-    ) -> list[WorkspaceMemberResponse]:
+    ) -> list[WorkspaceMember]:
         membership = await self._repo.get_membership(workspace_id, actor.id)
         if membership is None:
             raise ForbiddenError("Not a member of this workspace")
         members = await self._repo.list_members(workspace_id)
         return [
-            WorkspaceMemberResponse(
+            WorkspaceMember(
                 user_id=m.user_id,
                 email=m.user.email,
                 display_name=m.user.display_name,

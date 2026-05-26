@@ -77,9 +77,9 @@ async def test_upload_over_size_limit_returns_422(async_client: AsyncClient) -> 
     token = await _register_and_token(async_client, "big@example.com")
     ws_id = await _create_workspace(async_client, token, "Big File WS")
 
-    from src.domain.documents import MAX_UPLOAD_SIZE_BYTES
+    from src.core.config import get_settings
 
-    oversized = b"x" * (MAX_UPLOAD_SIZE_BYTES + 1)
+    oversized = b"x" * (get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
     resp = await async_client.post(
         _docs_url(ws_id),
         headers=_auth(token),
@@ -129,6 +129,35 @@ async def test_non_member_cannot_upload(async_client: AsyncClient) -> None:
         files=_pdf_file(),
     )
     assert resp.status_code == 403
+
+
+async def test_non_member_cannot_read_update_or_delete(
+    async_client: AsyncClient,
+) -> None:
+    token_owner = await _register_and_token(async_client, "owner_idor@example.com")
+    token_stranger = await _register_and_token(
+        async_client, "stranger_idor@example.com"
+    )
+    ws_id = await _create_workspace(async_client, token_owner, "Owner IDOR WS")
+
+    upload_resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token_owner),
+        data={"title": "Secret Doc"},
+        files=_pdf_file(),
+    )
+    assert upload_resp.status_code == 201
+    doc_id = upload_resp.json()["id"]
+    doc_url = f"{_docs_url(ws_id)}/{doc_id}"
+
+    get_resp = await async_client.get(doc_url, headers=_auth(token_stranger))
+    assert get_resp.status_code == 403
+    patch_resp = await async_client.patch(
+        doc_url, headers=_auth(token_stranger), json={"title": "Hacked"}
+    )
+    assert patch_resp.status_code == 403
+    delete_resp = await async_client.delete(doc_url, headers=_auth(token_stranger))
+    assert delete_resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------

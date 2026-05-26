@@ -26,7 +26,7 @@ class EvaluationResult(BaseModel):
     sufficient: bool
     gaps: Annotated[
         list[Annotated[str, Field(max_length=200)]],
-        Field(max_length=10, description="Specific search queries to fill missing evidence"),
+        Field(max_length=10, description="Search queries to fill missing evidence"),
     ] = []
     reasoning: str
 

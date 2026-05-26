@@ -10,10 +10,7 @@ import structlog
 from src.ai.graphs.research import build_research_graph
 from src.ai.graphs.state import ResearchState
 from src.core.exceptions import ForbiddenError, NotFoundError
-from src.schemas.research import (
-    ResearchPlanResponse,
-    ResearchStatusResponse,
-)
+from src.domain.research import ResearchPlan, ResearchStatus
 from src.services.search import SearchService
 
 logger = structlog.get_logger(__name__)
@@ -119,7 +116,7 @@ class ResearchService:
         workspace_id: uuid.UUID,
         user_id: uuid.UUID,
         thread_id: str,
-    ) -> ResearchStatusResponse:
+    ) -> ResearchStatus:
         snapshot = await self._verify_ownership(workspace_id, user_id, thread_id)
 
         values = snapshot.values
@@ -129,9 +126,9 @@ class ResearchService:
         synthesis: str | None = values.get("synthesis")
         human_approved: bool = values.get("human_approved", False)
 
-        plan_response: ResearchPlanResponse | None = None
+        plan: ResearchPlan | None = None
         if plan_data is not None:
-            plan_response = ResearchPlanResponse(
+            plan = ResearchPlan(
                 queries=plan_data.queries,
                 scope=plan_data.scope,
                 expected_sections=plan_data.expected_sections,
@@ -140,19 +137,19 @@ class ResearchService:
         has_interrupt = any(bool(task.interrupts) for task in snapshot.tasks)
 
         if has_interrupt:
-            status = "awaiting_review"
+            run_status = "awaiting_review"
         elif snapshot.next == ():
-            status = "completed" if synthesis else "failed"
+            run_status = "completed" if synthesis else "failed"
         elif thread_id in _running_tasks and not _running_tasks[thread_id].done():
-            status = "running"
+            run_status = "running"
         else:
-            status = "failed"
+            run_status = "failed"
 
-        return ResearchStatusResponse(
+        return ResearchStatus(
             thread_id=thread_id,
-            status=status,  # type: ignore[arg-type]
+            status=run_status,  # type: ignore[arg-type]
             topic=topic,
-            plan=plan_response,
+            plan=plan,
             findings_count=len(findings),
             synthesis=synthesis,
             human_approved=human_approved,

@@ -7,14 +7,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.domain.search import SearchResult
-from src.schemas.search import SearchResponse
+from src.domain.search import SearchResult, SearchResults
 from src.services.search import SearchService
 
 
 def _make_service(
     repo_results: list[SearchResult] | None = None,
-    cached_response: SearchResponse | None = None,
+    cached_response: SearchResults | None = None,
 ) -> tuple[SearchService, MagicMock, MagicMock, MagicMock]:
     embedding_svc = MagicMock()
     embedding_svc.embed_query = AsyncMock(return_value=[0.1] * 768)
@@ -59,7 +58,7 @@ class TestSearchService:
 
         response = await service.search(workspace_id=ws_id, query="test query")
 
-        assert isinstance(response, SearchResponse)
+        assert isinstance(response, SearchResults)
         assert len(response.results) == 1
         assert response.query == "test query"
         assert response.total_results == 1
@@ -112,12 +111,12 @@ class TestSearchService:
     @pytest.mark.asyncio
     async def test_cache_hit_skips_repo(self) -> None:
         ws_id = uuid.uuid4()
-        cached = SearchResponse(results=[], query="cached query", total_results=0)
+        cached = SearchResults(results=[], query="cached query", total_results=0)
         service, emb, repo, cache = _make_service(cached_response=cached)
 
         response = await service.search(workspace_id=ws_id, query="cached query")
 
-        assert isinstance(response, SearchResponse)
+        assert isinstance(response, SearchResults)
         repo.search_similar.assert_not_awaited()
         emb.embed_query.assert_not_awaited()
 
@@ -141,7 +140,7 @@ class TestSearchService:
         repo_call_count_after_first = repo.search_similar.await_count
 
         # Simulate cache now returning the stored result
-        cached_resp = SearchResponse(results=[], query="q", total_results=0)
+        cached_resp = SearchResults(results=[], query="q", total_results=0)
         cache.get = AsyncMock(return_value=cached_resp.model_dump(mode="json"))
 
         # Second call: cache hit

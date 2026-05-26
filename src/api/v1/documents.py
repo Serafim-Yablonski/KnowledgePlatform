@@ -8,7 +8,7 @@ from src.core.dependencies import (
     get_current_workspace,
     get_document_service,
 )
-from src.domain.documents import DocumentStatus
+from src.domain.documents import DocumentStatus, DocumentUpdateInput, encode_cursor
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
@@ -29,9 +29,10 @@ async def upload_document(
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    return await service.create(
+    doc = await service.create(
         actor, workspace, request.state.workspace_role, title, file
     )
+    return DocumentResponse.model_validate(doc)
 
 
 @router.get("", response_model=PaginatedResponse[DocumentResponse])
@@ -43,7 +44,12 @@ async def list_documents(
     doc_status: DocumentStatus | None = Query(default=None, alias="status"),
     service: DocumentService = Depends(get_document_service),
 ) -> PaginatedResponse[DocumentResponse]:
-    return await service.list(actor, workspace, cursor, limit, doc_status)
+    page = await service.list(actor, workspace, cursor, limit, doc_status)
+    return PaginatedResponse(
+        items=[DocumentResponse.model_validate(d) for d in page.items],
+        next_cursor=encode_cursor(page.next_cursor) if page.next_cursor else None,
+        has_more=page.has_more,
+    )
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
@@ -53,7 +59,8 @@ async def get_document(
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    return await service.get(actor, workspace, document_id)
+    doc = await service.get(actor, workspace, document_id)
+    return DocumentResponse.model_validate(doc)
 
 
 @router.patch("/{document_id}", response_model=DocumentResponse)
@@ -65,9 +72,11 @@ async def update_document(
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    return await service.update(
-        actor, workspace, request.state.workspace_role, document_id, data
+    domain_data = DocumentUpdateInput(title=data.title)
+    doc = await service.update(
+        actor, workspace, request.state.workspace_role, document_id, domain_data
     )
+    return DocumentResponse.model_validate(doc)
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

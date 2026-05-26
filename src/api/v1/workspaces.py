@@ -26,7 +26,16 @@ async def create_workspace(
     actor: User = Depends(get_current_user),
     service: WorkspaceService = Depends(get_workspace_service),
 ) -> WorkspaceResponse:
-    return await service.create(actor, data)
+    info = await service.create(actor, data.name, data.description)
+    return WorkspaceResponse(
+        id=info.id,
+        name=info.name,
+        slug=info.slug,
+        description=info.description,
+        is_active=info.is_active,
+        created_at=info.created_at,
+        member_count=info.member_count,
+    )
 
 
 @router.get("", response_model=list[WorkspaceResponse])
@@ -34,7 +43,19 @@ async def list_workspaces(
     actor: User = Depends(get_current_user),
     service: WorkspaceService = Depends(get_workspace_service),
 ) -> list[WorkspaceResponse]:
-    return await service.list_for_user(actor)
+    infos = await service.list_for_user(actor)
+    return [
+        WorkspaceResponse(
+            id=ws.id,
+            name=ws.name,
+            slug=ws.slug,
+            description=ws.description,
+            is_active=ws.is_active,
+            created_at=ws.created_at,
+            member_count=ws.member_count,
+        )
+        for ws in infos
+    ]
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
@@ -43,7 +64,16 @@ async def get_workspace(
     actor: User = Depends(get_current_user),
     service: WorkspaceService = Depends(get_workspace_service),
 ) -> WorkspaceResponse:
-    return await service.get_by_id(actor, workspace.id)
+    info = await service.get_by_id(actor, workspace.id)
+    return WorkspaceResponse(
+        id=info.id,
+        name=info.name,
+        slug=info.slug,
+        description=info.description,
+        is_active=info.is_active,
+        created_at=info.created_at,
+        member_count=info.member_count,
+    )
 
 
 @router.post(
@@ -57,7 +87,14 @@ async def add_member(
     actor: User = Depends(get_current_user),
     service: WorkspaceService = Depends(get_workspace_service),
 ) -> WorkspaceMemberResponse:
-    return await service.add_member(actor, workspace.id, data)
+    member = await service.add_member(actor, workspace.id, data.user_email, data.role)
+    return WorkspaceMemberResponse(
+        user_id=member.user_id,
+        email=member.email,
+        display_name=member.display_name,
+        role=member.role,
+        joined_at=member.joined_at,
+    )
 
 
 @router.delete(
@@ -82,4 +119,14 @@ async def list_members(
     actor: User = Depends(get_current_user),
     service: WorkspaceService = Depends(get_workspace_service),
 ) -> list[WorkspaceMemberResponse]:
-    return await service.list_members(actor, workspace.id)
+    members = await service.list_members(actor, workspace.id)
+    return [
+        WorkspaceMemberResponse(
+            user_id=m.user_id,
+            email=m.email,
+            display_name=m.display_name,
+            role=m.role,
+            joined_at=m.joined_at,
+        )
+        for m in members
+    ]

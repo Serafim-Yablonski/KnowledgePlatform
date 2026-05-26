@@ -19,7 +19,10 @@ from src.services.search import SearchService
 
 if TYPE_CHECKING:
     from src.services.ai import AIService
+    from src.services.api_key import ApiKeyService
+    from src.services.auth import AuthService
     from src.services.research import ResearchService
+    from src.services.workspace import WorkspaceService
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -56,25 +59,6 @@ def get_document_service(
         session=session,
         cache=ResponseCache(redis),
     )
-
-
-async def get_current_workspace(
-    workspace_id: uuid.UUID,
-    request: Request,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_db),
-) -> Workspace:
-    from src.repositories.workspace import SQLAlchemyWorkspaceRepository
-
-    repo = SQLAlchemyWorkspaceRepository(session)
-    membership = await repo.get_membership(workspace_id, user.id)
-    if membership is None:
-        raise ForbiddenError("Not a member of this workspace")
-    request.state.workspace_role = membership.role
-    workspace = await repo.get_by_id(workspace_id)
-    if workspace is None:
-        raise ForbiddenError("Not a member of this workspace")
-    return workspace
 
 
 def get_ai_service(
@@ -131,21 +115,21 @@ def get_search_service(
     )
 
 
-def get_auth_service(session: AsyncSession = Depends(get_db)) -> Any:
+def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthService:
     from src.repositories.user import SQLAlchemyUserRepository
     from src.services.auth import AuthService
 
     return AuthService(SQLAlchemyUserRepository(session))
 
 
-def get_api_key_service(session: AsyncSession = Depends(get_db)) -> Any:
+def get_api_key_service(session: AsyncSession = Depends(get_db)) -> ApiKeyService:
     from src.repositories.api_key import SQLAlchemyApiKeyRepository
     from src.services.api_key import ApiKeyService
 
     return ApiKeyService(SQLAlchemyApiKeyRepository(session))
 
 
-def get_workspace_service(session: AsyncSession = Depends(get_db)) -> Any:
+def get_workspace_service(session: AsyncSession = Depends(get_db)) -> WorkspaceService:
     from src.repositories.user import SQLAlchemyUserRepository
     from src.repositories.workspace import SQLAlchemyWorkspaceRepository
     from src.services.workspace import WorkspaceService
@@ -154,6 +138,17 @@ def get_workspace_service(session: AsyncSession = Depends(get_db)) -> Any:
         workspace_repo=SQLAlchemyWorkspaceRepository(session),
         user_repo=SQLAlchemyUserRepository(session),
     )
+
+
+async def get_current_workspace(
+    workspace_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    service: WorkspaceService = Depends(get_workspace_service),
+) -> Workspace:
+    workspace, membership = await service.get_workspace_for_user(workspace_id, user.id)
+    request.state.workspace_role = membership.role
+    return workspace
 
 
 def get_research_service(

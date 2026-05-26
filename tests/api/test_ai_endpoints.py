@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from httpx import AsyncClient
 
-from src.ai.agents.question import AnswerResponse
+from src.domain.ai import Answer, SourceReference
 
 _REGISTER = "/api/v1/auth/register"
 _LOGIN = "/api/v1/auth/login"
@@ -40,9 +40,7 @@ def _ask_url(workspace_id: str) -> str:
 def _stub_ai_service(answer: str = "Test answer", confidence: float = 0.9) -> MagicMock:
     import uuid
 
-    from src.schemas.ai import SourceReference
-
-    response = AnswerResponse(
+    response = Answer(
         answer=answer,
         sources=[
             SourceReference(

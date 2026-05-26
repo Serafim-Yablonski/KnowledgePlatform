@@ -27,7 +27,8 @@ async def register(
     data: UserCreate,
     service: AuthService = Depends(get_auth_service),
 ) -> UserResponse:
-    return await service.register(data)
+    user = await service.register(data.email, data.password, data.display_name)
+    return UserResponse.model_validate(user)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -35,7 +36,10 @@ async def login(
     data: UserLogin,
     service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    return await service.login(data)
+    pair = await service.login(data.email, data.password)
+    return TokenResponse(
+        access_token=pair.access_token, refresh_token=pair.refresh_token
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -43,7 +47,10 @@ async def refresh(
     body: RefreshRequest,
     service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    return await service.refresh(body.refresh_token)
+    pair = await service.refresh(body.refresh_token)
+    return TokenResponse(
+        access_token=pair.access_token, refresh_token=pair.refresh_token
+    )
 
 
 @router.get("/me", response_model=UserResponse)

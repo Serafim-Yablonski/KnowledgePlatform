@@ -10,8 +10,8 @@ from src.ai.agents.question import WorkspaceDeps, agent
 from src.core.config import get_settings
 from src.core.exceptions import ForbiddenError
 from src.core.observability import set_llm_span_attrs
+from src.domain.ai import Answer
 from src.domain.roles import PERMISSIONS, WorkspaceRole
-from src.schemas.ai import AnswerResponse
 from src.services.document import DocumentService
 from src.services.search import SearchService
 
@@ -33,7 +33,7 @@ class AIService:
         user_id: uuid.UUID,
         question: str,
         role: WorkspaceRole,
-    ) -> AnswerResponse:
+    ) -> Answer:
         if "read" not in PERMISSIONS[role]:
             raise ForbiddenError("Insufficient permissions")
 

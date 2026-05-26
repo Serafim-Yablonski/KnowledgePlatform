@@ -42,9 +42,8 @@ def extract_text(self: Task, document_id: str) -> None:
             if doc is None:
                 logger.warning("document not found, skipping", document_id=document_id)
                 return
-            # Skip documents that finished successfully; allow re-entry from any
-            # other status so retries aren't blocked by a stuck PROCESSING state.
-            if doc.status == DocumentStatus.READY:
+            # Skip if already done or if another worker is already processing this doc.
+            if doc.status in (DocumentStatus.READY, DocumentStatus.PROCESSING):
                 return
 
             file_path = doc.file_path

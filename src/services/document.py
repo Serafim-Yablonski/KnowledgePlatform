@@ -13,18 +13,18 @@ from src.core.config import settings
 from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
 from src.domain.documents import (
     ALLOWED_CONTENT_TYPES,
-    MAX_UPLOAD_SIZE_BYTES,
     Cursor,
+    DocumentPage,
     DocumentStatus,
+    DocumentUpdateInput,
     decode_cursor,
-    encode_cursor,
 )
 from src.domain.roles import PERMISSIONS, WorkspaceRole
+from src.domain.workspace import WorkspaceStats
+from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.repositories.protocols import DocumentRepositoryProtocol
-from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
-from src.schemas.workspace import WorkspaceStatsResponse
 
 logger = structlog.get_logger(__name__)
 
@@ -57,13 +57,13 @@ def _require_permission(role: WorkspaceRole, permission: str) -> None:
 
 
 def _write_file(src: IO[bytes], dest_path: Path) -> int:
-    """Stream src to dest_path in chunks, enforcing MAX_UPLOAD_SIZE_BYTES."""
+    """Stream src to dest_path in chunks, enforcing the configured upload size limit."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     with dest_path.open("wb") as dest:
         while chunk := src.read(_CHUNK):
             total += len(chunk)
-            if total > MAX_UPLOAD_SIZE_BYTES:
+            if total > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
                 dest_path.unlink(missing_ok=True)
                 raise InputValidationError(
                     f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB"
@@ -90,10 +90,11 @@ class DocumentService:
         role: WorkspaceRole,
         title: str,
         file: UploadFile,
-    ) -> DocumentResponse:
+    ) -> Document:
         _require_permission(role, "create_document")
         # Fast-fail if Content-Length header already indicates oversized payload.
-        if file.size is not None and file.size > MAX_UPLOAD_SIZE_BYTES:
+        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        if file.size is not None and file.size > max_bytes:
             raise InputValidationError(
                 f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB"
             )
@@ -106,8 +107,6 @@ class DocumentService:
         await _validate_magic_bytes(file, content_type_str)
         content_type = ALLOWED_CONTENT_TYPES[content_type_str]
 
-        # Validate filename before touching the DB so a bad name can't leave an orphaned row.
-        # workspace.id and doc.id are server-controlled UUIDs; only filename is user-supplied.
         filename = Path(file.filename or "upload").name or "upload"
         _probe = (
             Path(settings.UPLOAD_DIR)
@@ -147,26 +146,26 @@ class DocumentService:
         extract_text.delay(str(doc.id))
         await self._session.refresh(doc)
 
-        return DocumentResponse.model_validate(doc)
+        return doc
 
     async def _get_by_id(
         self,
         workspace_id: uuid.UUID,
         document_id: uuid.UUID,
-    ) -> DocumentResponse:
+    ) -> Document:
         """Fetch a document scoped to a workspace. Caller must verify membership."""
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace_id:
             raise NotFoundError("Document not found")
-        return DocumentResponse.model_validate(doc)
+        return doc
 
     async def get(
         self, user: User, workspace: Workspace, document_id: uuid.UUID
-    ) -> DocumentResponse:
+    ) -> Document:
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace.id:
             raise NotFoundError("Document not found")
-        return DocumentResponse.model_validate(doc)
+        return doc
 
     async def list(
         self,
@@ -175,14 +174,17 @@ class DocumentService:
         cursor_str: str | None,
         limit: int,
         status: DocumentStatus | None = None,
-    ) -> PaginatedResponse[DocumentResponse]:
-        cursor: Cursor | None = decode_cursor(cursor_str) if cursor_str else None
+    ) -> DocumentPage[Document]:
+        try:
+            cursor: Cursor | None = decode_cursor(cursor_str) if cursor_str else None
+        except ValueError as exc:
+            raise InputValidationError("Invalid pagination cursor") from exc
         docs, next_cursor = await self._repo.list_by_workspace(
             workspace.id, limit=limit, cursor=cursor, status=status
         )
-        return PaginatedResponse(
-            items=[DocumentResponse.model_validate(d) for d in docs],
-            next_cursor=encode_cursor(next_cursor) if next_cursor else None,
+        return DocumentPage(
+            items=list(docs),
+            next_cursor=next_cursor,
             has_more=next_cursor is not None,
         )
 
@@ -190,22 +192,14 @@ class DocumentService:
         self,
         workspace_id: uuid.UUID,
         limit: int = 50,
-    ) -> Sequence[DocumentResponse]:
+    ) -> Sequence[Document]:
         """List documents by workspace ID. Caller must verify workspace membership."""
         docs, _ = await self._repo.list_by_workspace(workspace_id, limit=limit)
-        return [DocumentResponse.model_validate(d) for d in docs]
+        return docs
 
-    async def _get_workspace_stats(
-        self, workspace_id: uuid.UUID
-    ) -> WorkspaceStatsResponse:
+    async def _get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats:
         """Return aggregate stats for a workspace. Caller must verify membership."""
-        stats = await self._repo.get_workspace_stats(workspace_id)
-        return WorkspaceStatsResponse(
-            document_count=stats.document_count,
-            chunk_count=stats.chunk_count,
-            total_tokens_indexed=stats.total_tokens_indexed,
-            last_document_updated_at=stats.last_document_updated_at,
-        )
+        return await self._repo.get_workspace_stats(workspace_id)
 
     async def update(
         self,
@@ -213,8 +207,8 @@ class DocumentService:
         workspace: Workspace,
         role: WorkspaceRole,
         document_id: uuid.UUID,
-        data: DocumentUpdate,
-    ) -> DocumentResponse:
+        data: DocumentUpdateInput,
+    ) -> Document:
         _require_permission(role, "update_document")
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace.id:
@@ -223,7 +217,7 @@ class DocumentService:
         await self._session.commit()
         if self._cache is not None:
             await self._cache.delete_pattern(f"search:{workspace.id}:*")
-        return DocumentResponse.model_validate(doc)
+        return doc
 
     async def delete(
         self,

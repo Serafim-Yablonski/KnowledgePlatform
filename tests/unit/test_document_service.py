@@ -9,19 +9,19 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.core.config import get_settings
 from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
 from src.domain.documents import (
     ALLOWED_CONTENT_TYPES,
-    MAX_UPLOAD_SIZE_BYTES,
     ContentType,
     Cursor,
     DocumentStatus,
+    DocumentUpdateInput,
 )
 from src.domain.roles import WorkspaceRole
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
-from src.schemas.document import DocumentUpdate
 from src.services.document import DocumentService
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ class StubDocumentRepository:
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
         return self._store.get(document_id)
 
-    async def update(self, document: Document, data: DocumentUpdate) -> Document:
+    async def update(self, document: Document, data: DocumentUpdateInput) -> Document:
         if data.title is not None:
             document.title = data.title
         document.version += 1
@@ -182,7 +182,7 @@ async def test_file_too_large_raises_validation_error(tmp_path: Path) -> None:
     service, _ = _make_service()
     user = _make_user()
     workspace = _make_workspace()
-    upload = _make_upload_file(size=MAX_UPLOAD_SIZE_BYTES + 1)
+    upload = _make_upload_file(size=get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
 
     with pytest.raises(InputValidationError, match="exceeds maximum size"):
         await service.create(user, workspace, WorkspaceRole.MEMBER, "My Doc", upload)
@@ -241,7 +241,11 @@ async def test_viewer_cannot_update_document() -> None:
 
     with pytest.raises(ForbiddenError):
         await service.update(
-            user, workspace, WorkspaceRole.VIEWER, doc.id, DocumentUpdate(title="X")
+            user,
+            workspace,
+            WorkspaceRole.VIEWER,
+            doc.id,
+            DocumentUpdateInput(title="X"),
         )
 
 
@@ -330,7 +334,7 @@ async def test_update_increments_version() -> None:
     original_version = doc.version
 
     result = await service.update(
-        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdate(title="New")
+        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdateInput(title="New")
     )
     assert result.version == original_version + 1
     assert result.title == "New"

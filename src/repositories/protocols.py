@@ -1,7 +1,12 @@
 import uuid
 from typing import Protocol
 
-from src.domain.documents import ContentType, Cursor, DocumentStatus
+from src.domain.documents import (
+    ContentType,
+    Cursor,
+    DocumentStatus,
+    DocumentUpdateInput,
+)
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult
 from src.domain.user import UserCreationInput
@@ -11,7 +16,6 @@ from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
-from src.schemas.document import DocumentUpdate
 
 
 class UserRepositoryProtocol(Protocol):
@@ -79,7 +83,9 @@ class DocumentRepositoryProtocol(Protocol):
 
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None: ...
 
-    async def update(self, document: Document, data: DocumentUpdate) -> Document: ...
+    async def update(
+        self, document: Document, data: DocumentUpdateInput
+    ) -> Document: ...
 
     async def delete(self, document: Document) -> None: ...
 

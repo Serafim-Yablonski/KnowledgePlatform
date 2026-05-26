@@ -149,7 +149,8 @@ class EmbeddingService:
 
             if response.status_code >= 500:
                 last_exc = RuntimeError(
-                    f"Embedding API server error {response.status_code}: {response.text}"
+                    f"Embedding API server error {response.status_code}: "
+                    f"{response.text}"
                 )
                 if attempt < 2:
                     await asyncio.sleep(1)

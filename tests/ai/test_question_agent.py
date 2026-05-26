@@ -11,17 +11,18 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.test import TestModel
 
 from src.ai.agents.question import WorkspaceDeps, agent
-from src.schemas.ai import AnswerResponse, SourceReference
-from src.schemas.search import SearchResponse, SearchResultItem
+from src.domain.ai import Answer, SourceReference
+from src.domain.search import SearchResult, SearchResults
 
 _NOT_FOUND = "I could not find information about this in the workspace documents."
 
 
 def _make_search_response(
     results: list[dict],  # type: ignore[type-arg]
-) -> SearchResponse:
+) -> SearchResults:
     items = [
-        SearchResultItem(
+        SearchResult(
+            chunk_id=uuid.uuid4(),
             chunk_text=r["chunk_text"],
             document_id=r["document_id"],
             document_title=r.get("title", "Test Doc"),
@@ -29,7 +30,7 @@ def _make_search_response(
         )
         for r in results
     ]
-    return SearchResponse(results=items, query="test", total_results=len(items))
+    return SearchResults(results=items, query="test", total_results=len(items))
 
 
 def _make_deps(
@@ -104,7 +105,7 @@ class TestQuestionAgent:
         ):
             result = await agent.run("What is X?", deps=deps)
 
-        assert isinstance(result.output, AnswerResponse)
+        assert isinstance(result.output, Answer)
         assert result.output.answer == "This is the answer."
         assert result.output.confidence == pytest.approx(0.8)
         assert result.output.reasoning == "Based on document content."
@@ -185,7 +186,7 @@ class TestQuestionAgent:
         ):
             result = await agent.run("Something obscure?", deps=deps)
 
-        assert isinstance(result.output, AnswerResponse)
+        assert isinstance(result.output, Answer)
         assert result.output.sources == []
 
     @pytest.mark.asyncio
