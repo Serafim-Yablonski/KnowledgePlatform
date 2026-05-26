@@ -114,6 +114,17 @@ def _parse_workspace_id(workspace_id: str) -> uuid.UUID:
         raise InputValidationError(f"Invalid workspace_id: {workspace_id!r}") from exc
 
 
+async def _mcp_rate_limit(
+    user_id: uuid.UUID, key_prefix: str, max_requests: int, window_seconds: int
+) -> None:
+    from src.core.rate_limit import SlidingWindowRateLimiter  # noqa: PLC0415
+
+    limiter = SlidingWindowRateLimiter(
+        get_async_redis_client(), key_prefix, max_requests, window_seconds
+    )
+    await limiter.check(str(user_id))
+
+
 # ---------------------------------------------------------------------------
 # Tool functions (module-level so tests can import and call them directly)
 # ---------------------------------------------------------------------------
@@ -133,6 +144,7 @@ async def search_documents(
     ] = 5,
 ) -> list[dict[str, Any]]:
     user = get_mcp_user()
+    await _mcp_rate_limit(user.id, "mcp_search", 20, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
     redis = get_async_redis_client()
     async with get_session() as session:
@@ -166,6 +178,7 @@ async def ask_question(
     ],
 ) -> dict[str, Any]:
     user = get_mcp_user()
+    await _mcp_rate_limit(user.id, "mcp_ask", 10, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
     redis = get_async_redis_client()
     async with get_session() as session:
@@ -216,6 +229,7 @@ async def start_research(
     ] = 3,
 ) -> dict[str, Any]:
     user = get_mcp_user()
+    await _mcp_rate_limit(user.id, "mcp_research_start", 5, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
     redis = get_async_redis_client()
     async with get_session() as session:
@@ -249,7 +263,7 @@ async def get_research_status(
         await workspace_svc.get_user_role(user, ws_uuid)
         research_svc = _make_research_service(session, redis)
         status = await research_svc.get_status(
-            workspace_id=ws_uuid, thread_id=thread_id
+            workspace_id=ws_uuid, user_id=user.id, thread_id=thread_id
         )
     result: dict[str, Any] = {
         "thread_id": status.thread_id,

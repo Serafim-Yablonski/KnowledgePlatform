@@ -4,13 +4,13 @@ from typing import Protocol
 from src.domain.documents import ContentType, Cursor, DocumentStatus
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult
+from src.domain.user import UserCreationInput
 from src.domain.workspace import WorkspaceStats
 from src.models.api_key import ApiKey
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
-from src.schemas.auth import UserCreate
 from src.schemas.document import DocumentUpdate
 
 
@@ -19,7 +19,7 @@ class UserRepositoryProtocol(Protocol):
 
     async def get_by_email(self, email: str) -> User | None: ...
 
-    async def create(self, data: UserCreate, hashed_password: str) -> User: ...
+    async def create(self, data: UserCreationInput, hashed_password: str) -> User: ...
 
     async def update(self, user: User, *, is_active: bool | None = None) -> User: ...
 
@@ -62,6 +62,8 @@ class WorkspaceRepositoryProtocol(Protocol):
     ) -> list[WorkspaceMembership]: ...
 
     async def count_members(self, workspace_id: uuid.UUID) -> int: ...
+
+    async def count_owners_for_update(self, workspace_id: uuid.UUID) -> int: ...
 
 
 class DocumentRepositoryProtocol(Protocol):

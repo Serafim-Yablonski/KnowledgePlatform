@@ -8,6 +8,7 @@ import structlog
 from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.cache import ResponseCache
 from src.core.config import settings
 from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
 from src.domain.documents import (
@@ -28,6 +29,26 @@ from src.schemas.workspace import WorkspaceStatsResponse
 logger = structlog.get_logger(__name__)
 
 _CHUNK = 65536
+
+_MAGIC_BYTES: dict[str, bytes] = {
+    "application/pdf": b"%PDF",
+}
+_TEXT_TYPES = {"text/plain", "text/markdown"}
+
+
+async def _validate_magic_bytes(file: UploadFile, content_type_str: str) -> None:
+    header = await file.read(8)
+    await file.seek(0)
+    expected = _MAGIC_BYTES.get(content_type_str)
+    if expected and not header.startswith(expected):
+        raise InputValidationError("File content does not match declared Content-Type")
+    if content_type_str in _TEXT_TYPES:
+        try:
+            header.decode("utf-8")
+        except UnicodeDecodeError:
+            raise InputValidationError(
+                "File content does not match declared Content-Type"
+            ) from None
 
 
 def _require_permission(role: WorkspaceRole, permission: str) -> None:
@@ -52,9 +73,15 @@ def _write_file(src: IO[bytes], dest_path: Path) -> int:
 
 
 class DocumentService:
-    def __init__(self, repo: DocumentRepositoryProtocol, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        repo: DocumentRepositoryProtocol,
+        session: AsyncSession,
+        cache: ResponseCache | None = None,
+    ) -> None:
         self._repo = repo
         self._session = session
+        self._cache = cache
 
     async def create(
         self,
@@ -76,9 +103,21 @@ class DocumentService:
                 f"Unsupported file type: {content_type_str!r}. "
                 f"Allowed: {', '.join(ALLOWED_CONTENT_TYPES)}"
             )
+        await _validate_magic_bytes(file, content_type_str)
         content_type = ALLOWED_CONTENT_TYPES[content_type_str]
 
-        # Flush to get the server-generated ID, then build the real path.
+        # Validate filename before touching the DB so a bad name can't leave an orphaned row.
+        # workspace.id and doc.id are server-controlled UUIDs; only filename is user-supplied.
+        filename = Path(file.filename or "upload").name or "upload"
+        _probe = (
+            Path(settings.UPLOAD_DIR)
+            / "00000000-0000-0000-0000-000000000000"
+            / "00000000-0000-0000-0000-000000000000"
+            / filename
+        )
+        if not _probe.resolve().is_relative_to(Path(settings.UPLOAD_DIR).resolve()):
+            raise InputValidationError("Invalid filename")
+
         doc = await self._repo.create(
             workspace_id=workspace.id,
             title=title,
@@ -88,14 +127,9 @@ class DocumentService:
             uploaded_by=user.id,
         )
 
-        # Basename-only filename prevents path traversal via "../../" sequences.
-        filename = Path(file.filename or "upload").name or "upload"
         file_path = (
             Path(settings.UPLOAD_DIR) / str(workspace.id) / str(doc.id) / filename
         )
-        upload_root = Path(settings.UPLOAD_DIR).resolve()
-        if not file_path.resolve().is_relative_to(upload_root):
-            raise InputValidationError("Invalid filename")
 
         # Offload blocking I/O to a thread; _write_file also enforces the size limit
         # for streaming uploads where Content-Length is absent.
@@ -115,11 +149,12 @@ class DocumentService:
 
         return DocumentResponse.model_validate(doc)
 
-    async def get_by_id(
+    async def _get_by_id(
         self,
         workspace_id: uuid.UUID,
         document_id: uuid.UUID,
     ) -> DocumentResponse:
+        """Fetch a document scoped to a workspace. Caller must verify membership."""
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace_id:
             raise NotFoundError("Document not found")
@@ -151,21 +186,19 @@ class DocumentService:
             has_more=next_cursor is not None,
         )
 
-    async def list_by_workspace_id(
+    async def _list_by_workspace_id(
         self,
         workspace_id: uuid.UUID,
         limit: int = 50,
     ) -> Sequence[DocumentResponse]:
-        """List documents by workspace ID without requiring an ORM Workspace object.
-
-        Caller is responsible for verifying workspace membership before calling this.
-        """
+        """List documents by workspace ID. Caller must verify workspace membership."""
         docs, _ = await self._repo.list_by_workspace(workspace_id, limit=limit)
         return [DocumentResponse.model_validate(d) for d in docs]
 
-    async def get_workspace_stats(
+    async def _get_workspace_stats(
         self, workspace_id: uuid.UUID
     ) -> WorkspaceStatsResponse:
+        """Return aggregate stats for a workspace. Caller must verify membership."""
         stats = await self._repo.get_workspace_stats(workspace_id)
         return WorkspaceStatsResponse(
             document_count=stats.document_count,
@@ -187,6 +220,9 @@ class DocumentService:
         if doc is None or doc.workspace_id != workspace.id:
             raise NotFoundError("Document not found")
         doc = await self._repo.update(doc, data)
+        await self._session.commit()
+        if self._cache is not None:
+            await self._cache.delete_pattern(f"search:{workspace.id}:*")
         return DocumentResponse.model_validate(doc)
 
     async def delete(
@@ -204,6 +240,9 @@ class DocumentService:
         # Delete the DB record first — a consistent DB with an orphaned file is better
         # than a deleted file with a stale DB row pointing at nothing.
         await self._repo.delete(doc)
+        await self._session.commit()
+        if self._cache is not None:
+            await self._cache.delete_pattern(f"search:{workspace.id}:*")
         if file_path:
             try:
                 Path(file_path).unlink(missing_ok=True)

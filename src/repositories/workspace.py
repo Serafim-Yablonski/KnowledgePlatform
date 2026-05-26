@@ -113,3 +113,15 @@ class SQLAlchemyWorkspaceRepository:
             .where(WorkspaceMembership.workspace_id == workspace_id)
         )
         return int(result or 0)
+
+    async def count_owners_for_update(self, workspace_id: uuid.UUID) -> int:
+        result = await self._session.scalar(
+            select(func.count())
+            .select_from(WorkspaceMembership)
+            .where(
+                WorkspaceMembership.workspace_id == workspace_id,
+                WorkspaceMembership.role == WorkspaceRole.OWNER,
+            )
+            .with_for_update()
+        )
+        return int(result or 0)

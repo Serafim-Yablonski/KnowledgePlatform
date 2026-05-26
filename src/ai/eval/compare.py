@@ -11,6 +11,7 @@ from pathlib import Path
 from src.ai.eval.models import EvalResults
 
 _REGRESSION_THRESHOLD = 0.05
+_LATENCY_REGRESSION_MS = 50.0
 _HIGHER_IS_BETTER = {
     "precision_at_k",
     "recall",
@@ -68,9 +69,7 @@ def compare_metrics(
         bval = getattr(b, name)
         cval = getattr(c, name)
         delta = cval - bval
-        # For latency, a large positive delta (got slower) is a regression.
-        # We use threshold as an absolute ms cutoff for latency.
-        regressed = delta > threshold * 1000
+        regressed = delta > _LATENCY_REGRESSION_MS
         comparisons.append(
             MetricComparison(
                 name=name, baseline=bval, current=cval, delta=delta, regressed=regressed

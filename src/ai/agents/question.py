@@ -8,6 +8,7 @@ from pydantic import Field
 from pydantic_ai import Agent, RunContext
 
 from src.core.config import get_settings
+from src.core.exceptions import NotFoundError
 from src.schemas.ai import AnswerResponse
 from src.services.document import DocumentService
 from src.services.search import SearchService
@@ -88,7 +89,12 @@ async def get_document_details(
         doc_uuid = uuid.UUID(document_id)
     except ValueError:
         return {"error": f"Invalid document ID: {document_id!r}"}
-    doc = await ctx.deps.document_service.get_by_id(ctx.deps.workspace_id, doc_uuid)
+    try:
+        doc = await ctx.deps.document_service._get_by_id(
+            ctx.deps.workspace_id, doc_uuid
+        )
+    except NotFoundError:
+        return {"error": f"Document {document_id!r} not found"}
     return {
         "title": doc.title,
         "content_type": doc.content_type.value,

@@ -15,12 +15,13 @@ async def test_verify_password_returns_false_for_overlong_input() -> None:
     assert await verify_password(long_password, hashed) is False
 
 
-def test_production_rejects_default_secret_key() -> None:
-    with pytest.raises(ValidationError, match="SECRET_KEY must be changed"):
+def test_rejects_default_secret_key_in_any_environment() -> None:
+    with pytest.raises(
+        ValidationError, match="SECRET_KEY must be set to a strong random value"
+    ):
         Settings(
-            ENVIRONMENT="production",
+            ENVIRONMENT="development",
             SECRET_KEY="dev-secret-key-change-before-production",
-            POSTGRES_PASSWORD="strong-db-password",
         )
 
 

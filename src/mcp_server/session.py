@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextvars
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -31,7 +32,7 @@ class McpSessionState:
 # Module-level store: session_id → state.  One entry per live MCP session.
 # Capped to prevent unbounded memory growth under repeated unauthenticated probes.
 _MAX_SESSIONS = 10_000
-_sessions: dict[str, McpSessionState] = {}
+_sessions: OrderedDict[str, McpSessionState] = OrderedDict()
 
 # Set by MCPAuthMiddleware per HTTP request so tool functions can call
 # get_current_session_id() without needing a Context parameter.
@@ -45,11 +46,12 @@ def get_current_session_id() -> str | None:
 
 
 def get_or_create_session_state(session_id: str, user: User) -> McpSessionState:
-    if session_id not in _sessions:
+    if session_id in _sessions:
+        _sessions.move_to_end(session_id)
+    else:
         if len(_sessions) >= _MAX_SESSIONS:
-            # Evict oldest entry (dicts preserve insertion order in Python 3.7+).
-            oldest = next(iter(_sessions))
-            del _sessions[oldest]
+            # Evict least-recently-used entry (front of the OrderedDict).
+            _sessions.popitem(last=False)
         _sessions[session_id] = McpSessionState(user=user)
     return _sessions[session_id]
 
@@ -61,6 +63,7 @@ def get_session_state(session_id: str) -> McpSessionState:
             f"No session state found for session {session_id!r}. "
             "This should not happen — the auth middleware creates state on first use."
         )
+    _sessions.move_to_end(session_id)
     return state
 
 

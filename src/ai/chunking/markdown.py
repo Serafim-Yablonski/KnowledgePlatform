@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import re
+from typing import Any
 
 import tiktoken
 
@@ -97,7 +96,7 @@ class MarkdownChunker:
         self._max_tokens = max_tokens
         self._overlap_tokens = overlap_tokens
 
-    def chunk(self, text: str, metadata: dict) -> list[ChunkData]:  # type: ignore[type-arg]
+    def chunk(self, text: str, metadata: dict[str, Any]) -> list[ChunkData]:
         if not text.strip():
             return []
 

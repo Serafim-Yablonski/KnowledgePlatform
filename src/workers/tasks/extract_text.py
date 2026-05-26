@@ -7,6 +7,7 @@ from pathlib import Path
 import logfire
 import structlog
 from celery import Task
+from pypdf.errors import PdfReadError
 
 from src.domain.documents import ContentType, DocumentStatus
 from src.models.document import Document
@@ -41,8 +42,9 @@ def extract_text(self: Task, document_id: str) -> None:
             if doc is None:
                 logger.warning("document not found, skipping", document_id=document_id)
                 return
-            # Guard against concurrent duplicate runs and already-processed docs.
-            if doc.status in (DocumentStatus.READY, DocumentStatus.PROCESSING):
+            # Skip documents that finished successfully; allow re-entry from any
+            # other status so retries aren't blocked by a stuck PROCESSING state.
+            if doc.status == DocumentStatus.READY:
                 return
 
             file_path = doc.file_path
@@ -61,7 +63,7 @@ def extract_text(self: Task, document_id: str) -> None:
                 doc.status = DocumentStatus.READY
                 session.commit()
                 extraction_succeeded = True
-            except Exception as exc:
+            except (OSError, UnicodeDecodeError, PdfReadError) as exc:
                 logger.error(
                     "text extraction failed",
                     document_id=document_id,

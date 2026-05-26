@@ -51,13 +51,13 @@ class SQLAlchemyDocumentRepository:
         if data.title is not None:
             document.title = data.title
         document.version += 1
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(document)
         return document
 
     async def delete(self, document: Document) -> None:
         await self._session.delete(document)
-        await self._session.commit()
+        await self._session.flush()
 
     async def list_by_workspace(
         self,

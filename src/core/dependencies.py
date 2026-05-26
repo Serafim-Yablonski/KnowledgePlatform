@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+import redis.asyncio as aioredis
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,10 +44,18 @@ async def get_current_user(
     return await service.get_current_user(credentials.credentials)
 
 
-def get_document_service(session: AsyncSession = Depends(get_db)) -> DocumentService:
+def get_document_service(
+    session: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> DocumentService:
+    from src.core.cache import ResponseCache
     from src.repositories.document import SQLAlchemyDocumentRepository
 
-    return DocumentService(repo=SQLAlchemyDocumentRepository(session), session=session)
+    return DocumentService(
+        repo=SQLAlchemyDocumentRepository(session),
+        session=session,
+        cache=ResponseCache(redis),
+    )
 
 
 async def get_current_workspace(

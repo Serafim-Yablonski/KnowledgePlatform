@@ -9,7 +9,7 @@ import structlog
 
 from src.ai.graphs.research import build_research_graph
 from src.ai.graphs.state import ResearchState
-from src.core.exceptions import NotFoundError
+from src.core.exceptions import ForbiddenError, NotFoundError
 from src.schemas.research import (
     ResearchPlanResponse,
     ResearchStatusResponse,
@@ -86,14 +86,19 @@ class ResearchService:
                     exc_info=exc,
                 )
                 _task_errors[thread_id] = _safe_error(exc)
+                asyncio.get_event_loop().call_later(
+                    3600, _task_errors.pop, thread_id, None
+                )
 
         task.add_done_callback(_on_done)
 
         logger.info("research started", thread_id=thread_id, topic=topic)
         return thread_id
 
-    async def _verify_ownership(self, workspace_id: uuid.UUID, thread_id: str) -> Any:
-        """Load checkpoint state and assert it belongs to workspace_id."""
+    async def _verify_ownership(
+        self, workspace_id: uuid.UUID, user_id: uuid.UUID, thread_id: str
+    ) -> Any:
+        """Load checkpoint state and assert it belongs to workspace_id and user_id."""
         graph = build_research_graph(self._search, self._redis)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = await graph.aget_state(config)
@@ -104,14 +109,18 @@ class ResearchService:
         if snapshot.values.get("workspace_id") != str(workspace_id):
             raise NotFoundError(f"Research thread {thread_id!r} not found")
 
+        if snapshot.values.get("user_id") != str(user_id):
+            raise ForbiddenError("Access denied to this research thread")
+
         return snapshot
 
     async def get_status(
         self,
         workspace_id: uuid.UUID,
+        user_id: uuid.UUID,
         thread_id: str,
     ) -> ResearchStatusResponse:
-        snapshot = await self._verify_ownership(workspace_id, thread_id)
+        snapshot = await self._verify_ownership(workspace_id, user_id, thread_id)
 
         values = snapshot.values
         topic: str = values.get("topic", "")
@@ -153,9 +162,10 @@ class ResearchService:
     async def stream_synthesis(
         self,
         workspace_id: uuid.UUID,
+        user_id: uuid.UUID,
         thread_id: str,
     ) -> AsyncGenerator[str]:
-        await self._verify_ownership(workspace_id, thread_id)
+        await self._verify_ownership(workspace_id, user_id, thread_id)
 
         stream_key = f"research:stream:{thread_id}"
 
@@ -202,13 +212,14 @@ class ResearchService:
     async def review(
         self,
         workspace_id: uuid.UUID,
+        user_id: uuid.UUID,
         thread_id: str,
         approved: bool,
         feedback: str | None,
     ) -> None:
         from langgraph.types import Command  # noqa: PLC0415
 
-        await self._verify_ownership(workspace_id, thread_id)
+        await self._verify_ownership(workspace_id, user_id, thread_id)
 
         graph = build_research_graph(self._search, self._redis)
         config = {"configurable": {"thread_id": thread_id}}

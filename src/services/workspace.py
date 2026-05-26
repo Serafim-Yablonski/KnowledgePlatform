@@ -156,11 +156,7 @@ class WorkspaceService:
             raise ForbiddenError("Cannot remove a member with a higher role")
 
         if target_membership.role == WorkspaceRole.OWNER:
-            # NOTE: this count + delete is not atomic — a concurrent request
-            # could pass the guard and leave the workspace ownerless. A proper
-            # fix requires SELECT ... FOR UPDATE or application-level locking.
-            all_members = await self._repo.list_members(workspace_id)
-            owner_count = sum(1 for m in all_members if m.role == WorkspaceRole.OWNER)
+            owner_count = await self._repo.count_owners_for_update(workspace_id)
             if owner_count <= 1:
                 raise ConflictError("Cannot remove the last owner of a workspace")
 

@@ -78,7 +78,13 @@ def mock_session_ctx():
 
 @pytest.fixture
 def mock_redis():
-    with patch("src.mcp_server.tools.get_async_redis_client", return_value=MagicMock()):
+    redis_mock = MagicMock()
+    pipe_mock = MagicMock()
+    # pipeline() is sync; only execute() is awaited. Return count=1 so the rate
+    # limiter always passes in tests (well under any per-user limit).
+    pipe_mock.execute = AsyncMock(return_value=[1, 0, 1, [], 1])
+    redis_mock.pipeline.return_value = pipe_mock
+    with patch("src.mcp_server.tools.get_async_redis_client", return_value=redis_mock):
         yield
 
 

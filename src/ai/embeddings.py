@@ -148,16 +148,13 @@ class EmbeddingService:
                 continue
 
             if response.status_code >= 500:
-                if attempt == 0:
-                    await asyncio.sleep(1)
-                    code = response.status_code
-                    last_exc = RuntimeError(
-                        f"Embedding API server error {code}: {response.text}"
-                    )
-                    continue
-                raise RuntimeError(
-                    f"Embedding API server error {response.status_code}: {response.text}"  # noqa: E501
+                last_exc = RuntimeError(
+                    f"Embedding API server error {response.status_code}: {response.text}"
                 )
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+                raise last_exc
 
             # 4xx errors are not retried.
             raise RuntimeError(

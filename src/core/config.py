@@ -132,15 +132,19 @@ class Settings(
 
     @model_validator(mode="after")
     def _reject_dev_secrets_in_production(self) -> Self:
-        if self.ENVIRONMENT in ("production", "staging"):
-            if self.SECRET_KEY == _DEV_SECRET:
-                raise ValueError(
-                    "SECRET_KEY must be changed before deploying to production"
-                )
-            if self.POSTGRES_PASSWORD == "password":
-                raise ValueError(
-                    "POSTGRES_PASSWORD must be changed before deploying to production"
-                )
+        if self.SECRET_KEY == _DEV_SECRET:
+            raise ValueError(
+                "SECRET_KEY must be set to a strong random value. "
+                "Generate one with: "
+                "python -c 'import secrets; print(secrets.token_hex(32))'"
+            )
+        if (
+            self.ENVIRONMENT in ("production", "staging")
+            and self.POSTGRES_PASSWORD == "password"
+        ):
+            raise ValueError(
+                "POSTGRES_PASSWORD must be changed before deploying to production"
+            )
         return self
 
 

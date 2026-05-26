@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -71,18 +71,29 @@ def _make_document(workspace_id: uuid.UUID, uploaded_by: uuid.UUID) -> Document:
     return doc
 
 
+_MIME_DEFAULT_CONTENT: dict[str, bytes] = {
+    "application/pdf": b"%PDF-1.4 fake content for tests",
+    "text/plain": b"Hello, this is plain text.",
+    "text/markdown": b"# Hello\nThis is markdown.",
+}
+
+
 def _make_upload_file(
     *,
     size: int = 1024,
     content_type: str = "application/pdf",
     filename: str = "test.pdf",
-    content: bytes = b"fake pdf content",
+    content: bytes | None = None,
 ) -> Any:
+    if content is None:
+        content = _MIME_DEFAULT_CONTENT.get(content_type, b"fake content")
     f = MagicMock()
     f.size = size
     f.content_type = content_type
     f.filename = filename
     f.file = io.BytesIO(content)
+    f.read = AsyncMock(return_value=content[:8])
+    f.seek = AsyncMock()
     return f
 
 

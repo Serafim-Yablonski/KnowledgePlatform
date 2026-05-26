@@ -8,6 +8,7 @@ from src.core.security import (
     hash_password,
     verify_password,
 )
+from src.domain.user import UserCreationInput
 from src.models.user import User
 from src.repositories.protocols import UserRepositoryProtocol
 from src.schemas.auth import TokenResponse, UserCreate, UserLogin, UserResponse
@@ -19,8 +20,11 @@ class AuthService:
 
     async def register(self, data: UserCreate) -> UserResponse:
         hashed = await hash_password(data.password)
+        creation_input = UserCreationInput(
+            email=data.email, display_name=data.display_name
+        )
         try:
-            user = await self._repo.create(data, hashed)
+            user = await self._repo.create(creation_input, hashed)
         except IntegrityError as exc:
             raise ConflictError("Email already registered") from exc
         return UserResponse.model_validate(user)

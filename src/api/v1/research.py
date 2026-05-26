@@ -5,6 +5,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
@@ -23,6 +24,8 @@ from src.schemas.research import (
     ResearchStatusResponse,
 )
 from src.services.research import ResearchService
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/ai/research",
@@ -59,9 +62,12 @@ async def start_research(
 async def get_research_status(
     thread_id: uuid.UUID,
     workspace: Workspace = Depends(get_current_workspace),
+    user: User = Depends(get_current_user),
     service: ResearchService = Depends(get_research_service),
 ) -> ResearchStatusResponse:
-    return await service.get_status(workspace_id=workspace.id, thread_id=str(thread_id))
+    return await service.get_status(
+        workspace_id=workspace.id, user_id=user.id, thread_id=str(thread_id)
+    )
 
 
 @router.get(
@@ -71,11 +77,19 @@ async def get_research_status(
 async def stream_research(
     thread_id: uuid.UUID,
     workspace: Workspace = Depends(get_current_workspace),
+    user: User = Depends(get_current_user),
     service: ResearchService = Depends(get_research_service),
 ) -> StreamingResponse:
+    logger.info(
+        "stream_research_started",
+        user_id=str(user.id),
+        workspace_id=str(workspace.id),
+        thread_id=str(thread_id),
+    )
+
     async def _generate() -> AsyncGenerator[str]:
         async for token in service.stream_synthesis(
-            workspace_id=workspace.id, thread_id=str(thread_id)
+            workspace_id=workspace.id, user_id=user.id, thread_id=str(thread_id)
         ):
             if token == "__DONE__":
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -97,10 +111,12 @@ async def review_research(
     thread_id: uuid.UUID,
     body: ResearchReviewRequest,
     workspace: Workspace = Depends(get_current_workspace),
+    user: User = Depends(get_current_user),
     service: ResearchService = Depends(get_research_service),
 ) -> dict[str, Any]:
     await service.review(
         workspace_id=workspace.id,
+        user_id=user.id,
         thread_id=str(thread_id),
         approved=body.approved,
         feedback=body.feedback,

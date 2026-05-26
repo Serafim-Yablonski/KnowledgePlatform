@@ -147,7 +147,9 @@ async def evaluate_sufficiency(state: ResearchState) -> dict[str, object]:
     )
     prompt = (
         f"Research plan sections: {plan.expected_sections if plan else []}\n\n"
-        f"Findings so far ({len(findings)} total):\n{findings_summary}\n\n"
+        f"<untrusted_content>\n"
+        f"Findings so far ({len(findings)} total):\n{findings_summary}\n"
+        f"</untrusted_content>\n\n"
         f"Iteration: {state['iteration_count']} of {state['max_iterations']}"
     )
 
@@ -199,9 +201,11 @@ def make_synthesize_node(
             for f in findings
         )
         prompt = (
-            f"Topic: {state['topic']}\n\n"
             f"Expected sections: {plan.expected_sections if plan else []}\n\n"
-            f"Findings:\n{findings_text}"
+            f"<untrusted_content>\n"
+            f"Topic: {state['topic']}\n\n"
+            f"Findings:\n{findings_text}\n"
+            f"</untrusted_content>"
         )
 
         full_text = ""

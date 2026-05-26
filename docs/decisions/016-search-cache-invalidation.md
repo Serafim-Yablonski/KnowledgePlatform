@@ -1,0 +1,11 @@
+# 016. Search Result Cache Invalidation Strategy
+Status: Accepted | Date: 2026-05-26
+
+## Context
+Search results are cached in Redis for 300 s (key: `nexus:response:search:{workspace_id}:{query_hash}:{top_k}:{min_score}`). Without invalidation, deleting or updating a document leaves ghost chunks in cached results for up to 5 minutes — users clicking them receive 404s. The cache key contains no document ID because a single result set ranks chunks from many documents, making per-document targeting impossible without a reverse index.
+
+## Decision
+Workspace-scope invalidation on every document mutation. `ResponseCache.delete_pattern(pattern)` runs a Redis `SCAN`+`DEL` loop matching `{prefix}:{pattern}` — called by `DocumentService.update()` and `DocumentService.delete()` with pattern `search:{workspace_id}:*` after the DB commit. `ResponseCache` is injected as an optional dependency (`cache: ResponseCache | None = None`) so callers outside the request path (eval runner, MCP tools) incur no Redis dependency. The three Redis key namespaces for search — `nexus:response` (API search), `nexus:ai_search` (AI service internal), `nexus:research_search` (research pipeline) — each have their own `ResponseCache` instance; the API-facing one is the only one wired into `DocumentService` since the others are short-lived pipeline caches not user-visible.
+
+## Consequences
+Workspace-wide flush is a blunt instrument: one document change evicts all cached queries for that workspace, even queries that returned no chunks from the changed document. This is acceptable because document mutations are rare relative to reads and entries rebuild cheaply (one embedding + one pgvector scan). The one rejected alternative worth noting: a workspace **version counter** stored in Redis, incremented on each mutation and embedded in the cache key, would achieve zero-latency self-expiry without a scan. It is more complex to implement (an extra Redis read on every cache set/get) and premature at this scale. If workspace mutation rate ever makes workspace-wide flushes measurable in latency, the version-counter approach is the right upgrade path.

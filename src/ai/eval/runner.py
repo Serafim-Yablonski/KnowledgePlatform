@@ -12,8 +12,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
 import redis.asyncio as aioredis
 import structlog
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 
 from src.ai.embeddings import EmbeddingService
 from src.ai.eval.fixtures import (
@@ -37,6 +39,7 @@ from src.core.cache import ResponseCache
 from src.core.config import get_settings
 from src.core.database import async_session_factory
 from src.domain.roles import WorkspaceRole
+from src.repositories.protocols import SearchRepositoryProtocol
 from src.repositories.search import SQLAlchemySearchRepository
 from src.services.search import SearchService
 
@@ -113,7 +116,7 @@ async def _judge_answer(
     try:
         result = await judge_agent.run(prompt)
         return result.output.faithfulness, result.output.relevance
-    except Exception:
+    except UnexpectedModelBehavior, httpx.HTTPError:
         logger.warning("judge agent failed", question=question[:80], exc_info=True)
         return 0.0, 0.0
 
@@ -215,7 +218,8 @@ class EvalRunner:
                 answer_relevance = relevance
                 if case.is_negative:
                     negative_handling = answer.confidence <= 0.3
-            except Exception:
+                    correctly_rejected = negative_handling
+            except UnexpectedModelBehavior, httpx.HTTPError:
                 logger.warning("answer phase failed", case_id=case.id, exc_info=True)
 
         return EvalCaseResult(
@@ -320,7 +324,7 @@ async def _main() -> None:
             from src.services.ai import AIService
             from src.services.document import DocumentService
 
-            search_repo = SQLAlchemySearchRepository(session)
+            search_repo: SearchRepositoryProtocol = SQLAlchemySearchRepository(session)
             search_svc = SearchService(
                 search_repo=search_repo,
                 embedding_service=embedding_svc,
