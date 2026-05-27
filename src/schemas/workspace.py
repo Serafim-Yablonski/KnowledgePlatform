@@ -8,6 +8,8 @@ from src.domain.roles import WorkspaceRole
 
 
 class WorkspaceStatsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     document_count: int
     chunk_count: int
     total_tokens_indexed: int

@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from httpx import AsyncClient
 
+from tests.api.conftest import UserFactory
+
 
 class TestApiKeyLifecycle:
     @pytest.mark.asyncio
@@ -74,13 +76,15 @@ class TestApiKeyLifecycle:
         key_id = create_resp.json()["id"]
 
         # Register and log in as a second user
+        other_data = UserFactory()
+        other_email: str = other_data["email"]
         await async_client.post(
             "/api/v1/auth/register",
-            json={"email": "other@example.com", "password": "password123"},
+            json={"email": other_email, "password": "password123"},
         )
         login_resp = await async_client.post(
             "/api/v1/auth/login",
-            json={"email": "other@example.com", "password": "password123"},
+            json={"email": other_email, "password": "password123"},
         )
         other_token = login_resp.json()["access_token"]
         async_client.headers["Authorization"] = f"Bearer {other_token}"

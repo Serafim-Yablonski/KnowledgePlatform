@@ -4,8 +4,9 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
-from src.core.exceptions import ConflictError, ForbiddenError
+from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from src.domain.roles import WorkspaceRole
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
@@ -409,3 +410,85 @@ async def test_get_workspace_for_user_unknown_workspace_raises_forbidden() -> No
 
     with pytest.raises(ForbiddenError):
         await service.get_workspace_for_user(uuid.uuid4(), user.id)
+
+
+async def test_get_by_id_workspace_inconsistency_raises_not_found() -> None:
+    """Membership exists but workspace row deleted — get_by_id raises NotFoundError."""
+    service, ws_repo, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+    ws_repo._workspaces.pop(created.id)
+
+    with pytest.raises(NotFoundError):
+        await service.get_by_id(owner, created.id)
+
+
+async def test_get_workspace_for_user_workspace_inconsistency_raises_forbidden() -> (
+    None
+):
+    """Membership exists but workspace deleted raises ForbiddenError."""
+    service, ws_repo, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+    ws_repo._workspaces.pop(created.id)
+
+    with pytest.raises(ForbiddenError):
+        await service.get_workspace_for_user(created.id, owner.id)
+
+
+# ---------------------------------------------------------------------------
+# remove_member — not found path
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_member_target_not_found_raises_not_found() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(NotFoundError):
+        await service.remove_member(owner, created.id, uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# add_member — IntegrityError race condition path
+# ---------------------------------------------------------------------------
+
+
+async def test_add_member_integrity_error_raises_conflict() -> None:
+    new_user = _make_user("new@example.com")
+    service, ws_repo, _ = _make_service(extra_users=[new_user])
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    async def _raise(*args: object, **kwargs: object) -> WorkspaceMembership:
+        raise IntegrityError(None, None, None)
+
+    ws_repo.add_member = _raise  # type: ignore[method-assign]
+
+    with pytest.raises(ConflictError):
+        await service.add_member(owner, created.id, "new@example.com")
+
+
+# ---------------------------------------------------------------------------
+# get_user_role
+# ---------------------------------------------------------------------------
+
+
+async def test_get_user_role_returns_role() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    role = await service.get_user_role(owner, created.id)
+    assert role == WorkspaceRole.OWNER
+
+
+async def test_get_user_role_not_member_raises_forbidden() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    stranger = _make_user("stranger@example.com")
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(ForbiddenError):
+        await service.get_user_role(stranger, created.id)

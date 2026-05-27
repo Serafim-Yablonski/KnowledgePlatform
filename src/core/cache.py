@@ -75,7 +75,7 @@ def cached(ttl: int, key_template: str) -> Callable[..., Any]:
         sig = inspect.signature(method)
         try:
             hints = get_type_hints(method)
-        except NameError, AttributeError:
+        except (NameError, AttributeError):  # fmt: skip
             hints = {}
         return_type = hints.get("return")
 

@@ -225,7 +225,7 @@ make trace-demo    # seed data, ask a question, start research
 | [005](docs/decisions/005-cursor-pagination.md) | Cursor-based pagination | `(created_at, id)` composite cursor; no OFFSET |
 | [006](docs/decisions/006-logfire-observability.md) | Logfire over self-hosted Jaeger | Standard OTel instrumentation; swap exporter without code changes |
 | [007](docs/decisions/007-celery-sync-db.md) | Celery sync DB engine | Separate `create_engine` (psycopg3 sync) for Celery workers |
-| [008](docs/decisions/008-embedding-provider.md) | Embedding provider & cache | Gemini `text-embedding-005`; Redis 24-hour cache keyed on model+dims |
+| [008](docs/decisions/008-embedding-provider.md) | Embedding provider & cache | Gemini `gemini-embedding-001`; Redis 24-hour cache keyed on model+dims |
 | [009](docs/decisions/009-sliding-window-rate-limit.md) | Sliding-window rate limiting | Redis sorted-set implementation; no fixed-window burst |
 | [010](docs/decisions/010-pydanticai-over-langchain.md) | PydanticAI over LangChain | Typed deps injection, `TestModel` for zero-API-call tests |
 | [011](docs/decisions/011-langgraph-checkpointer.md) | LangGraph PostgreSQL checkpointer | `AsyncPostgresSaver` for crash recovery; Redis pub/sub for SSE streaming |

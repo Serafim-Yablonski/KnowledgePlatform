@@ -245,7 +245,11 @@ class TestRateLimit:
         assert resp.status_code == 429
 
 
-async def _register_and_token(client: AsyncClient, email: str) -> str:
+async def _register_and_token(client: AsyncClient) -> tuple[str, str]:
+    from tests.api.conftest import UserFactory
+
+    data = UserFactory()
+    email: str = data["email"]
     await client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": "password123", "display_name": "Test"},
@@ -254,18 +258,16 @@ async def _register_and_token(client: AsyncClient, email: str) -> str:
         "/api/v1/auth/login",
         json={"email": email, "password": "password123"},
     )
-    return resp.json()["access_token"]  # type: ignore[no-any-return]
+    return resp.json()["access_token"], email  # type: ignore[no-any-return]
 
 
 class TestAuthGuards:
     @pytest.mark.asyncio
-    async def test_unauthenticated_start_research_returns_403(
+    async def test_unauthenticated_start_research_returns_401(
         self,
         async_client: AsyncClient,
     ) -> None:
-        owner_token = await _register_and_token(
-            async_client, "owner_research_unauth@example.com"
-        )
+        owner_token, _ = await _register_and_token(async_client)
         create_resp = await async_client.post(
             "/api/v1/workspaces",
             headers={"Authorization": f"Bearer {owner_token}"},
@@ -277,19 +279,15 @@ class TestAuthGuards:
             f"/api/v1/workspaces/{workspace_id}/ai/research",
             json={"topic": "test"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_non_member_cannot_start_research_returns_403(
         self,
         async_client: AsyncClient,
     ) -> None:
-        owner_token = await _register_and_token(
-            async_client, "owner_research_member@example.com"
-        )
-        stranger_token = await _register_and_token(
-            async_client, "stranger_research@example.com"
-        )
+        owner_token, _ = await _register_and_token(async_client)
+        stranger_token, _ = await _register_and_token(async_client)
         create_resp = await async_client.post(
             "/api/v1/workspaces",
             headers={"Authorization": f"Bearer {owner_token}"},

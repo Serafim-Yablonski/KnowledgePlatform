@@ -50,4 +50,4 @@ class TokenPayload(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: Annotated[str, Field(max_length=2048)]
+    refresh_token: Annotated[str, Field(min_length=1, max_length=2048)]

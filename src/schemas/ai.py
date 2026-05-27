@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SourceReference(BaseModel):
@@ -14,6 +14,8 @@ class SourceReference(BaseModel):
 
 
 class AnswerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     answer: Annotated[str, Field(max_length=10000)]
     sources: list[SourceReference]
     confidence: float = Field(

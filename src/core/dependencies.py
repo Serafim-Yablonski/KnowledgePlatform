@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_session
-from src.core.exceptions import ForbiddenError
+from src.core.exceptions import ForbiddenError, UnauthorizedError
 from src.core.redis import get_redis
 from src.models.user import User
 from src.models.workspace import Workspace
@@ -37,7 +37,7 @@ async def get_current_user(
     session: AsyncSession = Depends(get_db),
 ) -> User:
     if credentials is None:
-        raise ForbiddenError("Missing authentication token")
+        raise UnauthorizedError("Missing authentication token")
 
     from src.repositories.user import SQLAlchemyUserRepository
     from src.services.auth import AuthService
