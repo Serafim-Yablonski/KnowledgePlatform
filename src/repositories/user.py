@@ -4,8 +4,8 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.user import UserCreationInput
 from src.models.user import User
-from src.schemas.auth import UserCreate
 
 
 class SQLAlchemyUserRepository:
@@ -23,7 +23,7 @@ class SQLAlchemyUserRepository:
         )
         return result.first()
 
-    async def create(self, data: UserCreate, hashed_password: str) -> User:
+    async def create(self, data: UserCreationInput, hashed_password: str) -> User:
         user = User(
             email=data.email,
             hashed_password=hashed_password,

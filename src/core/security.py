@@ -1,21 +1,28 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
-from jose import JWTError, jwt
+import jwt
 
 from src.core.config import settings
 from src.core.exceptions import ForbiddenError
 from src.schemas.auth import TokenPayload
 
 
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+async def hash_password(plain: str) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+    )
 
 
-def verify_password(plain: str, hashed: str) -> bool:
+async def verify_password(plain: str, hashed: str) -> bool:
+    loop = asyncio.get_running_loop()
     try:
-        return bool(bcrypt.checkpw(plain.encode(), hashed.encode()))
+        return await loop.run_in_executor(
+            None, lambda: bool(bcrypt.checkpw(plain.encode(), hashed.encode()))
+        )
     except ValueError:
         return False
 
@@ -52,5 +59,5 @@ def decode_token(token: str) -> TokenPayload:
             token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
         )
         return TokenPayload.model_validate(raw)
-    except JWTError as exc:
+    except jwt.PyJWTError as exc:
         raise ForbiddenError("Invalid or expired token") from exc

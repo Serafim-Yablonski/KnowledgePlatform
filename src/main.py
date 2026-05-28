@@ -24,7 +24,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     cfg = get_settings()
 
     setup_logging(environment=cfg.ENVIRONMENT)
-    setup_observability(app, token=cfg.LOGFIRE_TOKEN or None)
+    setup_observability(
+        app, token=cfg.LOGFIRE_TOKEN or None, environment=cfg.ENVIRONMENT
+    )
 
     redis_client = await init_redis()
     app.state.engine = engine
@@ -50,13 +52,16 @@ async def _app_error_handler(request: Request, exc: Exception) -> JSONResponse:
     headers: dict[str, str] = {}
     if isinstance(err, RateLimitError):
         headers["Retry-After"] = str(err.retry_after)
+    # Only surface structured field errors on validation responses; strip the
+    # free-form errors dict from all other codes to avoid leaking internals.
+    errors = err.errors if err.status_code == 422 else None
     return JSONResponse(
         status_code=err.status_code,
         content={
             "error": {
                 "code": err.status_code,
                 "message": err.detail,
-                "errors": err.errors,
+                "errors": errors,
             }
         },
         headers=headers or None,

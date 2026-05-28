@@ -9,8 +9,8 @@ import structlog
 
 from src.ai.embeddings import EmbeddingService
 from src.core.cache import ResponseCache, cached
+from src.domain.search import SearchResults
 from src.repositories.protocols import SearchRepositoryProtocol
-from src.schemas.search import SearchResponse, SearchResultItem
 
 logger = structlog.get_logger(__name__)
 
@@ -36,7 +36,7 @@ class SearchService:
         query: str,
         top_k: int = 5,
         min_score: float = 0.3,
-    ) -> SearchResponse:
+    ) -> SearchResults:
         query_hash = hashlib.sha256(query.encode()).hexdigest()[:16]
 
         with logfire.span(
@@ -72,17 +72,4 @@ class SearchService:
             search_latency_ms=search_latency_ms,
         )
 
-        return SearchResponse(
-            results=[
-                SearchResultItem(
-                    chunk_text=r.chunk_text,
-                    document_id=r.document_id,
-                    document_title=r.document_title,
-                    score=r.score,
-                    chunk_metadata=r.chunk_metadata,
-                )
-                for r in results
-            ],
-            query=query,
-            total_results=len(results),
-        )
+        return SearchResults(results=results, query=query, total_results=len(results))

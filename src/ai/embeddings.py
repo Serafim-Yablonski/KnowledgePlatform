@@ -70,6 +70,9 @@ class EmbeddingService:
             cache_misses = len(miss_indices)
             span.set_attribute("cache_hits", cache_hits)
             span.set_attribute("cache_misses", cache_misses)
+            # Gemini charges per character; total_chars on cache-miss texts is
+            # the direct cost input for a dashboard query.
+            span.set_attribute("total_chars", sum(len(t) for t in miss_texts))
 
             if miss_texts:
                 api_start = time.monotonic()
@@ -145,16 +148,14 @@ class EmbeddingService:
                 continue
 
             if response.status_code >= 500:
-                if attempt == 0:
-                    await asyncio.sleep(1)
-                    code = response.status_code
-                    last_exc = RuntimeError(
-                        f"Embedding API server error {code}: {response.text}"
-                    )
-                    continue
-                raise RuntimeError(
-                    f"Embedding API server error {response.status_code}: {response.text}"  # noqa: E501
+                last_exc = RuntimeError(
+                    f"Embedding API server error {response.status_code}: "
+                    f"{response.text}"
                 )
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+                raise last_exc
 
             # 4xx errors are not retried.
             raise RuntimeError(

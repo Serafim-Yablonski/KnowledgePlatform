@@ -5,23 +5,24 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.core.cache import ResponseCache
+from src.core.config import get_settings
 from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
 from src.domain.documents import (
     ALLOWED_CONTENT_TYPES,
-    MAX_UPLOAD_SIZE_BYTES,
     ContentType,
     Cursor,
     DocumentStatus,
+    DocumentUpdateInput,
 )
 from src.domain.roles import WorkspaceRole
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
-from src.schemas.document import DocumentUpdate
 from src.services.document import DocumentService
 
 # ---------------------------------------------------------------------------
@@ -71,18 +72,29 @@ def _make_document(workspace_id: uuid.UUID, uploaded_by: uuid.UUID) -> Document:
     return doc
 
 
+_MIME_DEFAULT_CONTENT: dict[str, bytes] = {
+    "application/pdf": b"%PDF-1.4 fake content for tests",
+    "text/plain": b"Hello, this is plain text.",
+    "text/markdown": b"# Hello\nThis is markdown.",
+}
+
+
 def _make_upload_file(
     *,
     size: int = 1024,
     content_type: str = "application/pdf",
     filename: str = "test.pdf",
-    content: bytes = b"fake pdf content",
+    content: bytes | None = None,
 ) -> Any:
+    if content is None:
+        content = _MIME_DEFAULT_CONTENT.get(content_type, b"fake content")
     f = MagicMock()
     f.size = size
     f.content_type = content_type
     f.filename = filename
     f.file = io.BytesIO(content)
+    f.read = AsyncMock(return_value=content[:8])
+    f.seek = AsyncMock()
     return f
 
 
@@ -123,7 +135,7 @@ class StubDocumentRepository:
     async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
         return self._store.get(document_id)
 
-    async def update(self, document: Document, data: DocumentUpdate) -> Document:
+    async def update(self, document: Document, data: DocumentUpdateInput) -> Document:
         if data.title is not None:
             document.title = data.title
         document.version += 1
@@ -171,7 +183,7 @@ async def test_file_too_large_raises_validation_error(tmp_path: Path) -> None:
     service, _ = _make_service()
     user = _make_user()
     workspace = _make_workspace()
-    upload = _make_upload_file(size=MAX_UPLOAD_SIZE_BYTES + 1)
+    upload = _make_upload_file(size=get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
 
     with pytest.raises(InputValidationError, match="exceeds maximum size"):
         await service.create(user, workspace, WorkspaceRole.MEMBER, "My Doc", upload)
@@ -230,7 +242,11 @@ async def test_viewer_cannot_update_document() -> None:
 
     with pytest.raises(ForbiddenError):
         await service.update(
-            user, workspace, WorkspaceRole.VIEWER, doc.id, DocumentUpdate(title="X")
+            user,
+            workspace,
+            WorkspaceRole.VIEWER,
+            doc.id,
+            DocumentUpdateInput(title="X"),
         )
 
 
@@ -319,7 +335,211 @@ async def test_update_increments_version() -> None:
     original_version = doc.version
 
     result = await service.update(
-        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdate(title="New")
+        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdateInput(title="New")
     )
     assert result.version == original_version + 1
     assert result.title == "New"
+
+
+# ---------------------------------------------------------------------------
+# _validate_magic_bytes — binary content in text file
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_magic_bytes_wrong_pdf_header_raises() -> None:
+    service, _ = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    upload = _make_upload_file(
+        content_type="application/pdf",
+        content=b"not a real pdf file",
+    )
+    with pytest.raises(InputValidationError, match="does not match"):
+        await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+
+
+async def test_validate_magic_bytes_binary_in_text_file_raises() -> None:
+    service, _ = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    upload = _make_upload_file(
+        content_type="text/plain",
+        content=b"\x80\x81\x82\x83",  # invalid UTF-8 continuation bytes
+    )
+
+    with pytest.raises(InputValidationError, match="does not match"):
+        await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+
+
+# ---------------------------------------------------------------------------
+# create — path traversal guard
+# ---------------------------------------------------------------------------
+
+
+async def test_create_path_traversal_filename_raises() -> None:
+    service, _ = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    upload = _make_upload_file(content_type="text/plain", filename="safe.txt")
+
+    with (
+        patch("pathlib.Path.is_relative_to", return_value=False),
+        pytest.raises(InputValidationError, match="Invalid filename"),
+    ):
+        await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+
+
+# ---------------------------------------------------------------------------
+# create — _write_file size exceeded mid-stream
+# ---------------------------------------------------------------------------
+
+
+async def test_write_file_size_exceeded_cleanup(tmp_path: Path) -> None:
+    """_write_file raises InputValidationError when size limit is exceeded streaming."""
+    import src.services.document as svc_mod
+
+    repo = StubDocumentRepository()
+    service = DocumentService(repo=repo, session=MockSession())  # type: ignore[arg-type]
+    user = _make_user()
+    workspace = _make_workspace()
+
+    # file.size = None bypasses the fast-fail header check; MAX_UPLOAD_SIZE_MB = 0
+    # means even one byte exceeds the limit inside _write_file.
+    upload = _make_upload_file(size=None, content_type="text/plain", content=b"hi")  # type: ignore[arg-type]
+
+    original_dir = svc_mod.settings.UPLOAD_DIR
+    original_max = svc_mod.settings.MAX_UPLOAD_SIZE_MB
+    svc_mod.settings.UPLOAD_DIR = str(tmp_path)  # type: ignore[assignment]
+    svc_mod.settings.MAX_UPLOAD_SIZE_MB = 0  # type: ignore[assignment]
+    try:
+        with pytest.raises(InputValidationError, match="exceeds maximum size"):
+            await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+    finally:
+        svc_mod.settings.UPLOAD_DIR = original_dir  # type: ignore[assignment]
+        svc_mod.settings.MAX_UPLOAD_SIZE_MB = original_max  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# update — cache invalidation
+# ---------------------------------------------------------------------------
+
+
+async def test_update_with_cache_invalidates_pattern() -> None:
+    repo = StubDocumentRepository()
+    cache = MagicMock(spec=ResponseCache)
+    cache.delete_pattern = AsyncMock()
+    service = DocumentService(repo=repo, session=MockSession(), cache=cache)  # type: ignore[arg-type]
+
+    user = _make_user()
+    workspace = _make_workspace()
+    doc = _make_document(workspace.id, user.id)
+    repo._store[doc.id] = doc
+
+    await service.update(
+        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdateInput(title="X")
+    )
+
+    cache.delete_pattern.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# delete — OSError on file removal is suppressed
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_oserror_is_suppressed() -> None:
+    service, repo = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    doc = _make_document(workspace.id, user.id)
+    doc.file_path = "/some/path/file.pdf"
+    repo._store[doc.id] = doc
+
+    with patch("pathlib.Path.unlink", side_effect=OSError("disk full")):
+        await service.delete(user, workspace, WorkspaceRole.OWNER, doc.id)
+
+    assert await repo.get_by_id(doc.id) is None
+
+
+# ---------------------------------------------------------------------------
+# _get_by_id — private helper coverage
+# ---------------------------------------------------------------------------
+
+
+async def test_private_get_by_id_found_returns_doc() -> None:
+    service, repo = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    doc = _make_document(workspace.id, user.id)
+    repo._store[doc.id] = doc
+
+    result = await service._get_by_id(workspace.id, doc.id)
+    assert result.id == doc.id
+
+
+async def test_private_get_by_id_missing_raises_not_found() -> None:
+    service, _ = _make_service()
+    with pytest.raises(NotFoundError):
+        await service._get_by_id(uuid.uuid4(), uuid.uuid4())
+
+
+async def test_private_get_by_id_wrong_workspace_raises_not_found() -> None:
+    service, repo = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    doc = _make_document(workspace.id, user.id)
+    repo._store[doc.id] = doc
+
+    with pytest.raises(NotFoundError):
+        await service._get_by_id(uuid.uuid4(), doc.id)
+
+
+# ---------------------------------------------------------------------------
+# _list_by_workspace_id — private helper coverage
+# ---------------------------------------------------------------------------
+
+
+async def test_private_get_workspace_stats() -> None:
+    from src.domain.workspace import WorkspaceStats
+
+    repo = StubDocumentRepository()
+    service = DocumentService(repo=repo, session=MockSession())  # type: ignore[arg-type]
+
+    async def _stats(wid: uuid.UUID) -> WorkspaceStats:
+        return WorkspaceStats(
+            document_count=3,
+            chunk_count=0,
+            total_tokens_indexed=0,
+            last_document_updated_at=None,
+        )
+
+    repo.get_workspace_stats = _stats  # type: ignore[attr-defined]
+
+    result = await service._get_workspace_stats(uuid.uuid4())
+    assert result.document_count == 3
+
+
+async def test_update_nonexistent_document_raises_not_found() -> None:
+    service, _ = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+
+    with pytest.raises(NotFoundError):
+        await service.update(
+            user,
+            workspace,
+            WorkspaceRole.MEMBER,
+            uuid.uuid4(),
+            DocumentUpdateInput(title="X"),
+        )
+
+
+async def test_private_list_by_workspace_id_returns_docs() -> None:
+    service, repo = _make_service()
+    user = _make_user()
+    workspace = _make_workspace()
+    doc = _make_document(workspace.id, user.id)
+    repo._store[doc.id] = doc
+
+    result = await service._list_by_workspace_id(workspace.id)
+    assert len(result) == 1

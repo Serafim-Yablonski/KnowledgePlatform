@@ -18,7 +18,7 @@ class UserCreate(BaseModel):
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: Annotated[str, Field(max_length=128)]
+    password: Annotated[str, Field(min_length=1, max_length=128)]
 
     @field_validator("email", mode="after")
     @classmethod
@@ -50,4 +50,4 @@ class TokenPayload(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: Annotated[str, Field(max_length=2048)]
+    refresh_token: Annotated[str, Field(min_length=1, max_length=2048)]

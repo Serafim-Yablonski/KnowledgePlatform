@@ -4,6 +4,8 @@ import io
 
 from httpx import AsyncClient
 
+from tests.api.conftest import UserFactory
+
 _REGISTER = "/api/v1/auth/register"
 _LOGIN = "/api/v1/auth/login"
 _WORKSPACES = "/api/v1/workspaces"
@@ -15,11 +17,13 @@ _WORKSPACES = "/api/v1/workspaces"
 
 
 async def _register_and_token(
-    client: AsyncClient, email: str, password: str = "password123"
-) -> str:
+    client: AsyncClient, password: str = "password123"
+) -> tuple[str, str]:
+    data = UserFactory()
+    email: str = data["email"]
     await client.post(_REGISTER, json={"email": email, "password": password})
     resp = await client.post(_LOGIN, json={"email": email, "password": password})
-    return resp.json()["access_token"]  # type: ignore[no-any-return]
+    return resp.json()["access_token"], email  # type: ignore[no-any-return]
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -50,7 +54,7 @@ def _pdf_file(content: bytes = b"%PDF-1.4 fake") -> dict[str, object]:
 async def test_upload_pdf_returns_201_with_pending_status(
     async_client: AsyncClient, tmp_path: object
 ) -> None:
-    token = await _register_and_token(async_client, "uploader@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token)
 
     resp = await async_client.post(
@@ -74,12 +78,12 @@ async def test_upload_pdf_returns_201_with_pending_status(
 
 
 async def test_upload_over_size_limit_returns_422(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "big@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "Big File WS")
 
-    from src.domain.documents import MAX_UPLOAD_SIZE_BYTES
+    from src.core.config import get_settings
 
-    oversized = b"x" * (MAX_UPLOAD_SIZE_BYTES + 1)
+    oversized = b"x" * (get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
     resp = await async_client.post(
         _docs_url(ws_id),
         headers=_auth(token),
@@ -90,7 +94,7 @@ async def test_upload_over_size_limit_returns_422(async_client: AsyncClient) -> 
 
 
 async def test_upload_unsupported_mime_returns_422(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "mime@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "MIME WS")
 
     resp = await async_client.post(
@@ -114,12 +118,12 @@ async def test_upload_requires_auth(async_client: AsyncClient) -> None:
         data={"title": "Doc"},
         files=_pdf_file(),
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 async def test_non_member_cannot_upload(async_client: AsyncClient) -> None:
-    token_owner = await _register_and_token(async_client, "owner_doc@example.com")
-    token_stranger = await _register_and_token(async_client, "stranger_doc@example.com")
+    token_owner, _ = await _register_and_token(async_client)
+    token_stranger, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token_owner, "Owner WS")
 
     resp = await async_client.post(
@@ -131,13 +135,40 @@ async def test_non_member_cannot_upload(async_client: AsyncClient) -> None:
     assert resp.status_code == 403
 
 
+async def test_non_member_cannot_read_update_or_delete(
+    async_client: AsyncClient,
+) -> None:
+    token_owner, _ = await _register_and_token(async_client)
+    token_stranger, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token_owner, "Owner IDOR WS")
+
+    upload_resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token_owner),
+        data={"title": "Secret Doc"},
+        files=_pdf_file(),
+    )
+    assert upload_resp.status_code == 201
+    doc_id = upload_resp.json()["id"]
+    doc_url = f"{_docs_url(ws_id)}/{doc_id}"
+
+    get_resp = await async_client.get(doc_url, headers=_auth(token_stranger))
+    assert get_resp.status_code == 403
+    patch_resp = await async_client.patch(
+        doc_url, headers=_auth(token_stranger), json={"title": "Hacked"}
+    )
+    assert patch_resp.status_code == 403
+    delete_resp = await async_client.delete(doc_url, headers=_auth(token_stranger))
+    assert delete_resp.status_code == 403
+
+
 # ---------------------------------------------------------------------------
 # Full CRUD cycle
 # ---------------------------------------------------------------------------
 
 
 async def test_full_crud_cycle(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "crud@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "CRUD WS")
     url = _docs_url(ws_id)
 
@@ -189,7 +220,7 @@ async def test_full_crud_cycle(async_client: AsyncClient) -> None:
 async def test_pagination_follow_cursors_retrieves_all(
     async_client: AsyncClient,
 ) -> None:
-    token = await _register_and_token(async_client, "pages@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "Paged WS")
     url = _docs_url(ws_id)
 
@@ -225,7 +256,7 @@ async def test_pagination_follow_cursors_retrieves_all(
 async def test_list_returns_has_more_false_when_no_more_pages(
     async_client: AsyncClient,
 ) -> None:
-    token = await _register_and_token(async_client, "hasmore@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "HasMore WS")
     url = _docs_url(ws_id)
 
@@ -252,7 +283,7 @@ async def test_list_returns_has_more_false_when_no_more_pages(
 
 
 async def test_status_filter_query_param(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "statusfilter@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "Status WS")
     url = _docs_url(ws_id)
 
@@ -285,8 +316,8 @@ async def test_status_filter_query_param(async_client: AsyncClient) -> None:
 
 async def test_viewer_cannot_upload_update_or_delete(async_client: AsyncClient) -> None:
     """VIEWER role lacks create/update/delete document permissions."""
-    token_owner = await _register_and_token(async_client, "owner_rbac@example.com")
-    token_viewer = await _register_and_token(async_client, "viewer_rbac@example.com")
+    token_owner, _ = await _register_and_token(async_client)
+    token_viewer, viewer_email = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token_owner, "RBAC WS")
     url = _docs_url(ws_id)
 
@@ -304,7 +335,7 @@ async def test_viewer_cannot_upload_update_or_delete(async_client: AsyncClient) 
     await async_client.post(
         f"{_WORKSPACES}/{ws_id}/members",
         headers=_auth(token_owner),
-        json={"user_email": "viewer_rbac@example.com", "role": "viewer"},
+        json={"user_email": viewer_email, "role": "viewer"},
     )
 
     # VIEWER cannot upload
@@ -339,7 +370,7 @@ async def test_viewer_cannot_upload_update_or_delete(async_client: AsyncClient) 
 
 
 async def test_invalid_cursor_returns_422(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "cursor422@example.com")
+    token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token, "Cursor WS")
 
     resp = await async_client.get(

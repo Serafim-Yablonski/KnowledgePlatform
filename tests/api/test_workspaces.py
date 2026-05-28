@@ -3,6 +3,8 @@
 import pytest
 from httpx import AsyncClient
 
+from tests.api.conftest import UserFactory
+
 _REGISTER = "/api/v1/auth/register"
 _LOGIN = "/api/v1/auth/login"
 _WORKSPACES = "/api/v1/workspaces"
@@ -14,11 +16,13 @@ _WORKSPACES = "/api/v1/workspaces"
 
 
 async def _register_and_token(
-    client: AsyncClient, email: str, password: str = "password123"
-) -> str:
+    client: AsyncClient, password: str = "password123"
+) -> tuple[str, str]:
+    data = UserFactory()
+    email: str = data["email"]
     await client.post(_REGISTER, json={"email": email, "password": password})
     resp = await client.post(_LOGIN, json={"email": email, "password": password})
-    return resp.json()["access_token"]  # type: ignore[no-any-return]
+    return resp.json()["access_token"], email  # type: ignore[no-any-return]
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -31,7 +35,7 @@ def _auth(token: str) -> dict[str, str]:
 
 
 async def test_create_workspace_returns_201(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "owner@example.com")
+    token, _ = await _register_and_token(async_client)
     resp = await async_client.post(
         _WORKSPACES, json={"name": "My Team"}, headers=_auth(token)
     )
@@ -45,11 +49,11 @@ async def test_create_workspace_returns_201(async_client: AsyncClient) -> None:
 
 async def test_create_workspace_unauthenticated(async_client: AsyncClient) -> None:
     resp = await async_client.post(_WORKSPACES, json={"name": "Team"})
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 async def test_create_workspace_name_too_long(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "owner2@example.com")
+    token, _ = await _register_and_token(async_client)
     resp = await async_client.post(
         _WORKSPACES, json={"name": "x" * 101}, headers=_auth(token)
     )
@@ -59,7 +63,7 @@ async def test_create_workspace_name_too_long(async_client: AsyncClient) -> None
 async def test_slug_uniqueness_two_workspaces_same_name(
     async_client: AsyncClient,
 ) -> None:
-    token = await _register_and_token(async_client, "slug@example.com")
+    token, _ = await _register_and_token(async_client)
     r1 = await async_client.post(
         _WORKSPACES, json={"name": "Engineering"}, headers=_auth(token)
     )
@@ -77,8 +81,8 @@ async def test_slug_uniqueness_two_workspaces_same_name(
 
 
 async def test_list_workspaces_returns_only_own(async_client: AsyncClient) -> None:
-    token_a = await _register_and_token(async_client, "a@example.com")
-    token_b = await _register_and_token(async_client, "b@example.com")
+    token_a, _ = await _register_and_token(async_client)
+    token_b, _ = await _register_and_token(async_client)
 
     await async_client.post(
         _WORKSPACES, json={"name": "A Team"}, headers=_auth(token_a)
@@ -105,7 +109,7 @@ async def test_list_workspaces_returns_only_own(async_client: AsyncClient) -> No
 
 
 async def test_get_workspace_as_member(async_client: AsyncClient) -> None:
-    token = await _register_and_token(async_client, "detail@example.com")
+    token, _ = await _register_and_token(async_client)
     create_resp = await async_client.post(
         _WORKSPACES, json={"name": "Detail WS"}, headers=_auth(token)
     )
@@ -116,8 +120,8 @@ async def test_get_workspace_as_member(async_client: AsyncClient) -> None:
 
 
 async def test_get_workspace_non_member_forbidden(async_client: AsyncClient) -> None:
-    token_owner = await _register_and_token(async_client, "owner3@example.com")
-    token_stranger = await _register_and_token(async_client, "stranger@example.com")
+    token_owner, _ = await _register_and_token(async_client)
+    token_stranger, _ = await _register_and_token(async_client)
     create_resp = await async_client.post(
         _WORKSPACES, json={"name": "Private WS"}, headers=_auth(token_owner)
     )
@@ -135,8 +139,8 @@ async def test_get_workspace_non_member_forbidden(async_client: AsyncClient) -> 
 
 async def test_full_member_flow(async_client: AsyncClient) -> None:
     """Create workspace → add member → member can access → remove → access denied."""
-    token_owner = await _register_and_token(async_client, "flow_owner@example.com")
-    token_member = await _register_and_token(async_client, "flow_member@example.com")
+    token_owner, _ = await _register_and_token(async_client)
+    token_member, member_email = await _register_and_token(async_client)
 
     # Create workspace as owner
     ws_resp = await async_client.post(
@@ -148,7 +152,7 @@ async def test_full_member_flow(async_client: AsyncClient) -> None:
     # Add member
     add_resp = await async_client.post(
         f"{_WORKSPACES}/{ws_id}/members",
-        json={"user_email": "flow_member@example.com"},
+        json={"user_email": member_email},
         headers=_auth(token_owner),
     )
     assert add_resp.status_code == 201
@@ -164,9 +168,7 @@ async def test_full_member_flow(async_client: AsyncClient) -> None:
     members_resp = await async_client.get(
         f"{_WORKSPACES}/{ws_id}/members", headers=_auth(token_owner)
     )
-    member_entry = next(
-        m for m in members_resp.json() if m["email"] == "flow_member@example.com"
-    )
+    member_entry = next(m for m in members_resp.json() if m["email"] == member_email)
     member_user_id = member_entry["user_id"]
 
     # Remove the member
@@ -184,9 +186,9 @@ async def test_full_member_flow(async_client: AsyncClient) -> None:
 
 
 async def test_member_cannot_add_new_members(async_client: AsyncClient) -> None:
-    token_owner = await _register_and_token(async_client, "perm_owner@example.com")
-    token_member = await _register_and_token(async_client, "perm_member@example.com")
-    await _register_and_token(async_client, "perm_target@example.com")
+    token_owner, _ = await _register_and_token(async_client)
+    token_member, member_email = await _register_and_token(async_client)
+    _, target_email = await _register_and_token(async_client)
 
     ws_resp = await async_client.post(
         _WORKSPACES, json={"name": "Perm WS"}, headers=_auth(token_owner)
@@ -195,21 +197,21 @@ async def test_member_cannot_add_new_members(async_client: AsyncClient) -> None:
 
     await async_client.post(
         f"{_WORKSPACES}/{ws_id}/members",
-        json={"user_email": "perm_member@example.com"},
+        json={"user_email": member_email},
         headers=_auth(token_owner),
     )
 
     # Member tries to add someone — should be 403
     resp = await async_client.post(
         f"{_WORKSPACES}/{ws_id}/members",
-        json={"user_email": "perm_target@example.com"},
+        json={"user_email": target_email},
         headers=_auth(token_member),
     )
     assert resp.status_code == 403
 
 
 async def test_cannot_remove_last_owner(async_client: AsyncClient) -> None:
-    token_owner = await _register_and_token(async_client, "solo_owner@example.com")
+    token_owner, _ = await _register_and_token(async_client)
     ws_resp = await async_client.post(
         _WORKSPACES, json={"name": "Solo WS"}, headers=_auth(token_owner)
     )
@@ -228,8 +230,8 @@ async def test_cannot_remove_last_owner(async_client: AsyncClient) -> None:
 
 
 async def test_list_members_returns_all(async_client: AsyncClient) -> None:
-    token_owner = await _register_and_token(async_client, "list_owner@example.com")
-    await _register_and_token(async_client, "list_member@example.com")
+    token_owner, _ = await _register_and_token(async_client)
+    _, member_email = await _register_and_token(async_client)
 
     ws_resp = await async_client.post(
         _WORKSPACES, json={"name": "List WS"}, headers=_auth(token_owner)
@@ -237,7 +239,7 @@ async def test_list_members_returns_all(async_client: AsyncClient) -> None:
     ws_id = ws_resp.json()["id"]
     await async_client.post(
         f"{_WORKSPACES}/{ws_id}/members",
-        json={"user_email": "list_member@example.com"},
+        json={"user_email": member_email},
         headers=_auth(token_owner),
     )
 
@@ -264,4 +266,4 @@ async def test_workspace_routes_require_auth(
     fake_id = "00000000-0000-0000-0000-000000000001"
     url = f"{_WORKSPACES}/{fake_id}{path_suffix}"
     resp = await async_client.request(method, url)
-    assert resp.status_code == 403
+    assert resp.status_code == 401

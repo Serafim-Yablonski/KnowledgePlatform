@@ -10,10 +10,7 @@ import structlog
 from src.ai.graphs.research import build_research_graph
 from src.ai.graphs.state import ResearchState
 from src.core.exceptions import ForbiddenError, NotFoundError
-from src.schemas.research import (
-    ResearchPlanResponse,
-    ResearchStatusResponse,
-)
+from src.domain.research import ResearchPlan, ResearchStatus
 from src.services.search import SearchService
 
 logger = structlog.get_logger(__name__)
@@ -86,14 +83,19 @@ class ResearchService:
                     exc_info=exc,
                 )
                 _task_errors[thread_id] = _safe_error(exc)
+                asyncio.get_event_loop().call_later(
+                    3600, _task_errors.pop, thread_id, None
+                )
 
         task.add_done_callback(_on_done)
 
         logger.info("research started", thread_id=thread_id, topic=topic)
         return thread_id
 
-    async def _verify_ownership(self, workspace_id: uuid.UUID, thread_id: str) -> Any:
-        """Load checkpoint state and assert it belongs to workspace_id."""
+    async def _verify_ownership(
+        self, workspace_id: uuid.UUID, user_id: uuid.UUID, thread_id: str
+    ) -> Any:
+        """Load checkpoint state and assert it belongs to workspace_id and user_id."""
         graph = build_research_graph(self._search, self._redis)
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = await graph.aget_state(config)
@@ -102,16 +104,20 @@ class ResearchService:
             raise NotFoundError(f"Research thread {thread_id!r} not found")
 
         if snapshot.values.get("workspace_id") != str(workspace_id):
-            raise ForbiddenError("Research thread does not belong to this workspace")
+            raise NotFoundError(f"Research thread {thread_id!r} not found")
+
+        if snapshot.values.get("user_id") != str(user_id):
+            raise ForbiddenError("Access denied to this research thread")
 
         return snapshot
 
     async def get_status(
         self,
         workspace_id: uuid.UUID,
+        user_id: uuid.UUID,
         thread_id: str,
-    ) -> ResearchStatusResponse:
-        snapshot = await self._verify_ownership(workspace_id, thread_id)
+    ) -> ResearchStatus:
+        snapshot = await self._verify_ownership(workspace_id, user_id, thread_id)
 
         values = snapshot.values
         topic: str = values.get("topic", "")
@@ -120,9 +126,9 @@ class ResearchService:
         synthesis: str | None = values.get("synthesis")
         human_approved: bool = values.get("human_approved", False)
 
-        plan_response: ResearchPlanResponse | None = None
+        plan: ResearchPlan | None = None
         if plan_data is not None:
-            plan_response = ResearchPlanResponse(
+            plan = ResearchPlan(
                 queries=plan_data.queries,
                 scope=plan_data.scope,
                 expected_sections=plan_data.expected_sections,
@@ -131,19 +137,19 @@ class ResearchService:
         has_interrupt = any(bool(task.interrupts) for task in snapshot.tasks)
 
         if has_interrupt:
-            status = "awaiting_review"
+            run_status = "awaiting_review"
         elif snapshot.next == ():
-            status = "completed" if synthesis else "failed"
+            run_status = "completed" if synthesis else "failed"
         elif thread_id in _running_tasks and not _running_tasks[thread_id].done():
-            status = "running"
+            run_status = "running"
         else:
-            status = "failed"
+            run_status = "failed"
 
-        return ResearchStatusResponse(
+        return ResearchStatus(
             thread_id=thread_id,
-            status=status,  # type: ignore[arg-type]
+            status=run_status,  # type: ignore[arg-type]
             topic=topic,
-            plan=plan_response,
+            plan=plan,
             findings_count=len(findings),
             synthesis=synthesis,
             human_approved=human_approved,
@@ -153,9 +159,10 @@ class ResearchService:
     async def stream_synthesis(
         self,
         workspace_id: uuid.UUID,
+        user_id: uuid.UUID,
         thread_id: str,
     ) -> AsyncGenerator[str]:
-        await self._verify_ownership(workspace_id, thread_id)
+        await self._verify_ownership(workspace_id, user_id, thread_id)
 
         stream_key = f"research:stream:{thread_id}"
 
@@ -202,13 +209,14 @@ class ResearchService:
     async def review(
         self,
         workspace_id: uuid.UUID,
+        user_id: uuid.UUID,
         thread_id: str,
         approved: bool,
         feedback: str | None,
     ) -> None:
         from langgraph.types import Command  # noqa: PLC0415
 
-        await self._verify_ownership(workspace_id, thread_id)
+        await self._verify_ownership(workspace_id, user_id, thread_id)
 
         graph = build_research_graph(self._search, self._redis)
         config = {"configurable": {"thread_id": thread_id}}

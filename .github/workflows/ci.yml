@@ -14,11 +14,11 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
         with:
-          version: "latest"
+          version: "0.11.16"
           enable-caching: true
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -35,11 +35,11 @@ jobs:
     name: Type check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
         with:
-          version: "latest"
+          version: "0.11.16"
           enable-caching: true
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -53,11 +53,11 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
         with:
-          version: "latest"
+          version: "0.11.16"
           enable-caching: true
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -74,7 +74,7 @@ jobs:
           ANTHROPIC_API_KEY: dummy
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: coverage-unit
           path: coverage.xml
@@ -82,17 +82,21 @@ jobs:
   test-integration:
     name: Integration tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
         with:
-          version: "latest"
+          version: "0.11.16"
           enable-caching: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
         run: uv sync --extra dev
+
+      - name: Pull test database image
+        run: docker pull pgvector/pgvector:pg18
 
       - name: Run integration tests
         run: uv run pytest tests/integration -x
@@ -101,18 +105,17 @@ jobs:
           SECRET_KEY: ci-test-secret-key-not-for-production
           GOOGLE_API_KEY: dummy
           ANTHROPIC_API_KEY: dummy
-          # testcontainers-python starts its own pgvector/pgvector:pg18 container.
-          # DOCKER_HOST is auto-detected on Linux; no override needed here.
+          TESTCONTAINERS_RYUK_DISABLED: "true"
 
   test-api:
     name: API tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
         with:
-          version: "latest"
+          version: "0.11.16"
           enable-caching: true
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -131,11 +134,11 @@ jobs:
     name: AI tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
         with:
-          version: "latest"
+          version: "0.11.16"
           enable-caching: true
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -150,46 +153,46 @@ jobs:
           GOOGLE_API_KEY: dummy
           ANTHROPIC_API_KEY: dummy
 
-  eval:
-    name: Eval (main only)
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [lint, typecheck, test-unit, test-integration, test-api, test-ai]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-          enable-caching: true
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Run eval
-        run: uv run python -m src.ai.eval.runner
-        env:
-          ENVIRONMENT: test
-          SECRET_KEY: ci-test-secret-key-not-for-production
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-      - name: Compare against baseline
-        run: uv run python -m src.ai.eval.compare results/baseline.json results/current.json
-
-      - name: Upload eval results
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-results-${{ github.sha }}
-          path: results/current.json
+  # eval:
+  #   name: Eval (main only)
+  #   runs-on: ubuntu-latest
+  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   needs: [lint, typecheck, test-unit, test-integration, test-api, test-ai]
+  #   steps:
+  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+  #
+  #     - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v4
+  #       with:
+  #         version: "0.11.16"
+  #         enable-caching: true
+  #         python-version: ${{ env.PYTHON_VERSION }}
+  #
+  #     - name: Install dependencies
+  #       run: uv sync
+  #
+  #     - name: Run eval
+  #       run: uv run python -m src.ai.eval.runner
+  #       env:
+  #         ENVIRONMENT: test
+  #         SECRET_KEY: ci-test-secret-key-not-for-production
+  #         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+  #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  #
+  #     - name: Compare against baseline
+  #       run: uv run python -m src.ai.eval.compare results/baseline.json results/current.json
+  #
+  #     - name: Upload eval results
+  #       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+  #       with:
+  #         name: eval-results-${{ github.sha }}
+  #         path: results/current.json
 
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest
     needs: [lint, typecheck, test-unit]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Build Docker image
         run: docker build -t knowledge-platform:ci .

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class SourceReference(BaseModel):
@@ -13,9 +13,7 @@ class SourceReference(BaseModel):
     relevance_score: float
 
 
-class AnswerResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
+class Answer(BaseModel):
     answer: Annotated[str, Field(max_length=10000)]
     sources: list[SourceReference]
     confidence: float = Field(
@@ -26,9 +24,3 @@ class AnswerResponse(BaseModel):
     reasoning: Annotated[str, Field(max_length=2000)] = Field(
         description="Brief explanation of how the answer was derived",
     )
-
-
-class AskRequest(BaseModel):
-    question: Annotated[
-        str, Field(min_length=1, max_length=2000, strip_whitespace=True)
-    ]

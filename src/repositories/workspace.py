@@ -113,3 +113,15 @@ class SQLAlchemyWorkspaceRepository:
             .where(WorkspaceMembership.workspace_id == workspace_id)
         )
         return int(result or 0)
+
+    async def count_owners_for_update(self, workspace_id: uuid.UUID) -> int:
+        # Lock the actual owner rows (FOR UPDATE on rows, not aggregate).
+        rows = await self._session.execute(
+            select(WorkspaceMembership.user_id)
+            .where(
+                WorkspaceMembership.workspace_id == workspace_id,
+                WorkspaceMembership.role == WorkspaceRole.OWNER,
+            )
+            .with_for_update()
+        )
+        return len(rows.scalars().all())

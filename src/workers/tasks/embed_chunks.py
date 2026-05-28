@@ -119,11 +119,22 @@ def embed_chunks(self: Task, document_id: str) -> None:
             )
         ]
 
-        # Re-indexing transaction:
-        # DELETE chunks with version < doc_version, then INSERT the new ones.
-        # Using version < (not !=) means a concurrent worker running an older retry
-        # will never delete chunks inserted by a newer run, preventing races.
+        # Re-indexing transaction with optimistic version check:
+        # Lock the document row, verify its version hasn't been bumped by a concurrent
+        # re-index while we were embedding (TOCTOU guard), then atomically delete stale
+        # chunks (version < doc_version) and insert the new ones.
         with get_sync_session() as session:
+            current_doc = session.execute(
+                sa.select(Document).where(Document.id == doc_uuid).with_for_update()
+            ).scalar_one_or_none()
+            if current_doc is None or current_doc.version != doc_version:
+                logger.info(
+                    "doc version changed during embedding, discarding stale chunks",
+                    document_id=document_id,
+                    expected_version=doc_version,
+                    actual_version=current_doc.version if current_doc else None,
+                )
+                return
             session.execute(
                 sa.delete(DocumentChunk).where(
                     DocumentChunk.document_id == doc_uuid,

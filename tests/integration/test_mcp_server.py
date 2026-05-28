@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.security import create_access_token
 from src.domain.roles import WorkspaceRole
+from src.domain.search import SearchResult, SearchResults
+from src.domain.workspace import WorkspaceStats
 from src.mcp_server.auth import _current_user
 from src.mcp_server.resources import get_workspace_stats, list_workspace_documents
 from src.mcp_server.tools import search_documents
@@ -29,7 +31,6 @@ from src.models.user import User
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.schemas.auth import UserCreate
-from src.schemas.search import SearchResponse, SearchResultItem
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -84,13 +85,21 @@ class TestMCPAuthMiddleware:
 
     @pytest.mark.asyncio
     async def test_invalid_bearer_token_returns_403(
-        self, async_client: AsyncClient
+        self, async_client: AsyncClient, db_session: AsyncSession
     ) -> None:
-        response = await async_client.post(
-            "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            headers={"Authorization": "Bearer not-a-real-token"},
-        )
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+
+        @asynccontextmanager
+        async def _fake_session() -> AsyncGenerator[AsyncSession]:
+            yield db_session
+
+        with patch("src.mcp_server.auth.get_session", new=_fake_session):
+            response = await async_client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"Authorization": "Bearer not-a-real-token"},
+            )
         assert response.status_code == 403
 
     @pytest.mark.asyncio
@@ -120,33 +129,38 @@ class TestMCPAuthMiddleware:
         assert response.status_code != 403
 
     @pytest.mark.asyncio
-    async def test_api_key_auth(
-        self, async_client: AsyncClient, mcp_user: User
-    ) -> None:
-        with patch("src.mcp_server.auth.settings") as mock_settings:
+    async def test_api_key_auth(self, mcp_user: User, db_session: AsyncSession) -> None:
+        from contextlib import asynccontextmanager
+
+        from starlette.requests import Request
+
+        from src.mcp_server.auth import _authenticate_request
+
+        @asynccontextmanager
+        async def _test_session() -> AsyncGenerator[AsyncSession]:
+            yield db_session
+
+        scope: dict = {
+            "type": "http",
+            "method": "POST",
+            "path": "/mcp",
+            "query_string": b"",
+            "headers": [(b"x-api-key", b"test-api-key")],
+        }
+        request = Request(scope)
+
+        with (
+            patch("src.mcp_server.auth.settings") as mock_settings,
+            patch(
+                "src.mcp_server.auth.get_session", side_effect=lambda: _test_session()
+            ),
+        ):
             mock_settings.MCP_API_KEY = "test-api-key"
             mock_settings.MCP_API_KEY_USER_EMAIL = mcp_user.email
 
-            response = await async_client.post(
-                "/mcp",
-                content=json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2024-11-05",
-                            "capabilities": {},
-                            "clientInfo": {"name": "test", "version": "1.0"},
-                        },
-                    }
-                ),
-                headers={
-                    "X-API-Key": "test-api-key",
-                    "Content-Type": "application/json",
-                },
-            )
-        assert response.status_code != 403
+            user = await _authenticate_request(request)
+
+        assert user.email == mcp_user.email
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +176,10 @@ class TestSearchDocumentsIntegration:
         mcp_workspace: uuid.UUID,
         db_session: AsyncSession,
     ) -> None:
-        search_response = SearchResponse(
+        search_response = SearchResults(
             results=[
-                SearchResultItem(
+                SearchResult(
+                    chunk_id=uuid.uuid4(),
                     chunk_text="relevant chunk",
                     document_id=uuid.uuid4(),
                     document_title="Test Doc",
@@ -185,8 +200,12 @@ class TestSearchDocumentsIntegration:
                 patch(
                     "src.mcp_server.tools._make_workspace_service"
                 ) as mock_ws_factory,
-                patch("src.mcp_server.tools.get_async_redis_client"),
+                patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock()),
                 patch("src.mcp_server.tools.get_session") as mock_gs,
+                patch(
+                    "src.mcp_server.tools.get_async_redis_client",
+                    return_value=MagicMock(),
+                ),
             ):
                 from contextlib import asynccontextmanager
 
@@ -194,7 +213,7 @@ class TestSearchDocumentsIntegration:
                 async def _fake_session() -> AsyncGenerator[MagicMock]:
                     yield MagicMock()
 
-                mock_gs.return_value = _fake_session()
+                mock_gs.side_effect = lambda: _fake_session()
 
                 mock_ws_svc = MagicMock()
                 mock_ws_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.MEMBER)
@@ -231,8 +250,12 @@ class TestSearchDocumentsIntegration:
                 patch(
                     "src.mcp_server.tools._make_workspace_service"
                 ) as mock_ws_factory,
-                patch("src.mcp_server.tools.get_async_redis_client"),
+                patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock()),
                 patch("src.mcp_server.tools.get_session") as mock_gs,
+                patch(
+                    "src.mcp_server.tools.get_async_redis_client",
+                    return_value=MagicMock(),
+                ),
             ):
                 from contextlib import asynccontextmanager
 
@@ -242,7 +265,7 @@ class TestSearchDocumentsIntegration:
                 async def _fake_session() -> AsyncGenerator[MagicMock]:
                     yield MagicMock()
 
-                mock_gs.return_value = _fake_session()
+                mock_gs.side_effect = lambda: _fake_session()
 
                 mock_ws_svc = MagicMock()
                 mock_ws_svc.get_user_role = AsyncMock(
@@ -288,7 +311,7 @@ class TestWorkspaceResources:
                 async def _fake_session() -> AsyncGenerator[MagicMock]:
                     yield MagicMock()
 
-                mock_gs.return_value = _fake_session()
+                mock_gs.side_effect = lambda: _fake_session()
 
                 mock_ws_svc = MagicMock()
                 mock_ws_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.OWNER)
@@ -306,7 +329,7 @@ class TestWorkspaceResources:
                 mock_doc.created_at = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
 
                 mock_doc_svc = MagicMock()
-                mock_doc_svc.list_by_workspace_id = AsyncMock(return_value=[mock_doc])
+                mock_doc_svc._list_by_workspace_id = AsyncMock(return_value=[mock_doc])
                 mock_doc_factory.return_value = mock_doc_svc
 
                 raw = await list_workspace_documents(str(mcp_workspace))
@@ -325,8 +348,6 @@ class TestWorkspaceResources:
         mcp_user: User,
         mcp_workspace: uuid.UUID,
     ) -> None:
-        from src.schemas.workspace import WorkspaceStatsResponse
-
         token = _current_user.set(mcp_user)
         try:
             with (
@@ -344,20 +365,20 @@ class TestWorkspaceResources:
                 async def _fake_session() -> AsyncGenerator[MagicMock]:
                     yield MagicMock()
 
-                mock_gs.return_value = _fake_session()
+                mock_gs.side_effect = lambda: _fake_session()
 
                 mock_ws_svc = MagicMock()
                 mock_ws_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.OWNER)
                 mock_ws_factory.return_value = mock_ws_svc
 
-                stats = WorkspaceStatsResponse(
+                stats = WorkspaceStats(
                     document_count=3,
                     chunk_count=42,
                     total_tokens_indexed=15000,
                     last_document_updated_at=None,
                 )
                 mock_doc_svc = MagicMock()
-                mock_doc_svc.get_workspace_stats = AsyncMock(return_value=stats)
+                mock_doc_svc._get_workspace_stats = AsyncMock(return_value=stats)
                 mock_doc_factory.return_value = mock_doc_svc
 
                 raw = await get_workspace_stats(str(mcp_workspace))

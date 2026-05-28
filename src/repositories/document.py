@@ -3,11 +3,15 @@ import uuid
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.documents import ContentType, Cursor, DocumentStatus
+from src.domain.documents import (
+    ContentType,
+    Cursor,
+    DocumentStatus,
+    DocumentUpdateInput,
+)
 from src.domain.workspace import WorkspaceStats
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
-from src.schemas.document import DocumentUpdate
 
 
 class SQLAlchemyDocumentRepository:
@@ -47,17 +51,17 @@ class SQLAlchemyDocumentRepository:
         )
         return result.first()
 
-    async def update(self, document: Document, data: DocumentUpdate) -> Document:
+    async def update(self, document: Document, data: DocumentUpdateInput) -> Document:
         if data.title is not None:
             document.title = data.title
         document.version += 1
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(document)
         return document
 
     async def delete(self, document: Document) -> None:
         await self._session.delete(document)
-        await self._session.commit()
+        await self._session.flush()
 
     async def list_by_workspace(
         self,

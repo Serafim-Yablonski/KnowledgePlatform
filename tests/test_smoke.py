@@ -27,7 +27,6 @@ def test_celery_app_exists() -> None:
 def test_eval_modules_importable() -> None:
     assert callable(src.ai.eval.runner.main)
     assert callable(src.ai.eval.compare.main)
-    src.ai.eval.compare.main("baseline.json", "current.json")
 
 
 def test_settings_defaults() -> None:

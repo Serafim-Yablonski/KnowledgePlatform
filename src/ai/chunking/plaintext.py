@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import re
+from typing import Any
 
 import tiktoken
 
@@ -22,7 +21,7 @@ def _make_chunks(
     segments: list[str],
     max_tokens: int,
     overlap_tokens: int,
-    metadata: dict,  # type: ignore[type-arg]
+    metadata: dict[str, Any],
 ) -> list[ChunkData]:
     """Pack segments into token-bounded chunks with overlap."""
     chunks: list[ChunkData] = []
@@ -74,7 +73,7 @@ def _recursive_split(
     text: str,
     max_tokens: int,
     overlap_tokens: int,
-    metadata: dict,  # type: ignore[type-arg]
+    metadata: dict[str, Any],
 ) -> list[ChunkData]:
     """Recursively split text: paragraphs → sentences → words."""
     if _count_tokens(text) <= max_tokens:
@@ -105,7 +104,7 @@ class PlainTextChunker:
         self._max_tokens = max_tokens
         self._overlap_tokens = overlap_tokens
 
-    def chunk(self, text: str, metadata: dict) -> list[ChunkData]:  # type: ignore[type-arg]
+    def chunk(self, text: str, metadata: dict[str, Any]) -> list[ChunkData]:
         if not text.strip():
             return []
         return _recursive_split(

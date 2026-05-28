@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from httpx import AsyncClient
 
-from src.ai.agents.question import AnswerResponse
+from src.domain.ai import Answer, SourceReference
+from tests.api.conftest import UserFactory
 
 _REGISTER = "/api/v1/auth/register"
 _LOGIN = "/api/v1/auth/login"
@@ -14,11 +15,13 @@ _WORKSPACES = "/api/v1/workspaces"
 
 
 async def _register_and_token(
-    client: AsyncClient, email: str, password: str = "password123"
-) -> str:
+    client: AsyncClient, password: str = "password123"
+) -> tuple[str, str]:
+    data = UserFactory()
+    email: str = data["email"]
     await client.post(_REGISTER, json={"email": email, "password": password})
     resp = await client.post(_LOGIN, json={"email": email, "password": password})
-    return resp.json()["access_token"]  # type: ignore[no-any-return]
+    return resp.json()["access_token"], email  # type: ignore[no-any-return]
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -40,9 +43,7 @@ def _ask_url(workspace_id: str) -> str:
 def _stub_ai_service(answer: str = "Test answer", confidence: float = 0.9) -> MagicMock:
     import uuid
 
-    from src.schemas.ai import SourceReference
-
-    response = AnswerResponse(
+    response = Answer(
         answer=answer,
         sources=[
             SourceReference(
@@ -64,7 +65,7 @@ class TestAskEndpoint:
     async def test_ask_returns_200_with_answer_response_structure(
         self, async_client: AsyncClient
     ) -> None:
-        token = await _register_and_token(async_client, "asker@example.com")
+        token, _ = await _register_and_token(async_client)
         ws_id = await _create_workspace(async_client, token)
 
         from src.core.dependencies import get_ai_service
@@ -98,7 +99,7 @@ class TestAskEndpoint:
     async def test_ask_includes_rate_limit_headers(
         self, async_client: AsyncClient
     ) -> None:
-        token = await _register_and_token(async_client, "ratelimit@example.com")
+        token, _ = await _register_and_token(async_client)
         ws_id = await _create_workspace(async_client, token)
 
         from src.core.dependencies import get_ai_service
@@ -127,13 +128,13 @@ class TestAskEndpoint:
             _ask_url(ws_id),
             json={"question": "What is X?"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     async def test_workspace_isolation_non_member_is_forbidden(
         self, async_client: AsyncClient
     ) -> None:
-        owner_token = await _register_and_token(async_client, "owner_ws@example.com")
-        other_token = await _register_and_token(async_client, "other_ws@example.com")
+        owner_token, _ = await _register_and_token(async_client)
+        other_token, _ = await _register_and_token(async_client)
         ws_id = await _create_workspace(async_client, owner_token, name="Private WS")
 
         resp = await async_client.post(
@@ -146,7 +147,7 @@ class TestAskEndpoint:
     async def test_ask_validates_question_min_length(
         self, async_client: AsyncClient
     ) -> None:
-        token = await _register_and_token(async_client, "validator@example.com")
+        token, _ = await _register_and_token(async_client)
         ws_id = await _create_workspace(async_client, token)
 
         resp = await async_client.post(
@@ -159,7 +160,7 @@ class TestAskEndpoint:
     async def test_ask_validates_question_max_length(
         self, async_client: AsyncClient
     ) -> None:
-        token = await _register_and_token(async_client, "maxlen@example.com")
+        token, _ = await _register_and_token(async_client)
         ws_id = await _create_workspace(async_client, token)
 
         from src.core.dependencies import get_ai_service

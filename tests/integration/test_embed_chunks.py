@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Generator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -269,6 +269,127 @@ def test_hnsw_index_exists(
         )
         rows = result.fetchall()
     assert len(rows) == 1, "HNSW index ix_chunks_embedding_hnsw not found"
+
+
+def test_embed_chunks_raw_text_none_skips(
+    setup_session: Session,
+    patched_db: None,
+) -> None:
+    """Task returns early when document is READY but raw_text is None."""
+    from src.workers.tasks.embed_chunks import embed_chunks
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = Document(
+        workspace_id=ws.id,
+        title="No Text",
+        content_type=ContentType.PLAINTEXT,
+        status=DocumentStatus.READY,
+        file_path="/dev/null",
+        file_size_bytes=0,
+        uploaded_by=user.id,
+        raw_text=None,
+        version=1,
+    )
+    setup_session.add(doc)
+    setup_session.commit()
+    setup_session.refresh(doc)
+
+    embed_chunks.run(str(doc.id))
+
+    chunks = list(
+        setup_session.execute(
+            select(DocumentChunk).where(DocumentChunk.document_id == doc.id)
+        ).scalars()
+    )
+    assert len(chunks) == 0
+
+
+def test_embed_chunks_document_not_found(
+    patched_db: None,
+) -> None:
+    """Task returns silently when the document ID does not exist."""
+    from src.workers.tasks.embed_chunks import embed_chunks
+
+    embed_chunks.run(str(uuid.uuid4()))
+
+
+def test_embed_chunks_no_chunks_produced(
+    setup_session: Session,
+    patched_db: None,
+) -> None:
+    """Task returns early and creates no chunks when the chunker produces nothing."""
+    from src.workers.tasks.embed_chunks import embed_chunks
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_ready_document(setup_session, ws, user, raw_text="Some text.")
+
+    mock_chunker = MagicMock()
+    mock_chunker.chunk = MagicMock(return_value=[])
+
+    with patch("src.workers.tasks.embed_chunks.get_chunker", return_value=mock_chunker):
+        embed_chunks.run(str(doc.id))
+
+    chunks = list(
+        setup_session.execute(
+            select(DocumentChunk).where(DocumentChunk.document_id == doc.id)
+        ).scalars()
+    )
+    assert len(chunks) == 0
+
+
+def test_embed_chunks_version_changed_during_reindex(
+    setup_session: Session,
+    patched_db: None,
+    sync_test_session_factory: sessionmaker[Session],
+) -> None:
+    """Stale chunks are discarded when doc version is bumped mid-embedding."""
+    from src.workers.tasks.embed_chunks import embed_chunks
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_ready_document(setup_session, ws, user, raw_text="Content to embed.")
+    doc_id = doc.id
+
+    async def _bump_and_embed(texts: list[str], **_kw: object) -> list[list[float]]:
+        with sync_test_session_factory() as sess:
+            d = sess.get(Document, doc_id)
+            if d is not None:
+                d.version = 999
+                sess.commit()
+        return [[0.0] * _DIMS for _ in texts]
+
+    with patch("src.workers.tasks.embed_chunks._run_embedding", new=_bump_and_embed):
+        embed_chunks.run(str(doc.id))
+
+    chunks = list(
+        setup_session.execute(
+            select(DocumentChunk).where(DocumentChunk.document_id == doc.id)
+        ).scalars()
+    )
+    assert len(chunks) == 0
+
+
+def test_embed_chunks_retry_on_embedding_failure(
+    setup_session: Session,
+    patched_db: None,
+) -> None:
+    """Embedding failure re-raises the original exception (called_directly path)."""
+    from src.workers.tasks.embed_chunks import embed_chunks
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_ready_document(setup_session, ws, user, raw_text="Embed this.")
+
+    async def _failing(*args: object, **kwargs: object) -> list[list[float]]:
+        raise RuntimeError("API unavailable")
+
+    with (
+        patch("src.workers.tasks.embed_chunks._run_embedding", new=_failing),
+        pytest.raises(RuntimeError, match="API unavailable"),
+    ):
+        embed_chunks.run(str(doc.id))
 
 
 def test_embedding_dimensions_match_settings(

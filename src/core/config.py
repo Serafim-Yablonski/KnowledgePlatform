@@ -109,6 +109,12 @@ class MCPSettings(BaseSettings):
     MCP_API_KEY: str | None = None
     MCP_API_KEY_USER_EMAIL: str | None = None
 
+    @model_validator(mode="after")
+    def _mcp_key_min_length(self) -> Self:
+        if self.MCP_API_KEY is not None and len(self.MCP_API_KEY) < 32:
+            raise ValueError("MCP_API_KEY must be at least 32 characters")
+        return self
+
 
 _DEV_SECRET = "dev-secret-key-change-before-production"
 
@@ -126,15 +132,19 @@ class Settings(
 
     @model_validator(mode="after")
     def _reject_dev_secrets_in_production(self) -> Self:
-        if self.ENVIRONMENT == "production":
-            if self.SECRET_KEY == _DEV_SECRET:
-                raise ValueError(
-                    "SECRET_KEY must be changed before deploying to production"
-                )
-            if self.POSTGRES_PASSWORD == "password":
-                raise ValueError(
-                    "POSTGRES_PASSWORD must be changed before deploying to production"
-                )
+        if self.SECRET_KEY == _DEV_SECRET:
+            raise ValueError(
+                "SECRET_KEY must be set to a strong random value. "
+                "Generate one with: "
+                "python -c 'import secrets; print(secrets.token_hex(32))'"
+            )
+        if (
+            self.ENVIRONMENT in ("production", "staging")
+            and self.POSTGRES_PASSWORD == "password"
+        ):
+            raise ValueError(
+                "POSTGRES_PASSWORD must be changed before deploying to production"
+            )
         return self
 
 

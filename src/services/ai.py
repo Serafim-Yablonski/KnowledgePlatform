@@ -7,9 +7,11 @@ import structlog
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 from src.ai.agents.question import WorkspaceDeps, agent
+from src.core.config import get_settings
 from src.core.exceptions import ForbiddenError
+from src.core.observability import set_llm_span_attrs
+from src.domain.ai import Answer
 from src.domain.roles import PERMISSIONS, WorkspaceRole
-from src.schemas.ai import AnswerResponse
 from src.services.document import DocumentService
 from src.services.search import SearchService
 
@@ -31,7 +33,7 @@ class AIService:
         user_id: uuid.UUID,
         question: str,
         role: WorkspaceRole,
-    ) -> AnswerResponse:
+    ) -> Answer:
         if "read" not in PERMISSIONS[role]:
             raise ForbiddenError("Insufficient permissions")
 
@@ -62,9 +64,11 @@ class AIService:
             span.set_attribute("confidence", result.output.confidence)
             span.set_attribute("source_count", len(result.output.sources))
             span.set_attribute("tool_calls_count", tool_calls_count)
-            span.set_attribute(
-                "total_tokens",
-                usage.total_tokens if usage.total_tokens is not None else 0,
+            set_llm_span_attrs(
+                span,
+                get_settings().LLM_MODEL,
+                usage.request_tokens or 0,
+                usage.response_tokens or 0,
             )
 
         logger.info(

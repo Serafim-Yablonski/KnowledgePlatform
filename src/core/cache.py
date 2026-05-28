@@ -7,13 +7,15 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast, get_type_hints
 
+import redis.asyncio as aioredis
+
 T = TypeVar("T")
 
 
 class ResponseCache:
     def __init__(
         self,
-        redis_client: Any,
+        redis_client: aioredis.Redis,
         key_prefix: str = "nexus:response",
     ) -> None:
         self._redis = redis_client
@@ -25,6 +27,19 @@ class ResponseCache:
 
     async def set(self, key: str, value: Any, ttl: int) -> None:
         await self._redis.set(f"{self._prefix}:{key}", json.dumps(value), ex=ttl)
+
+    async def delete_pattern(self, pattern: str) -> int:
+        full_pattern = f"{self._prefix}:{pattern}"
+        deleted = 0
+        cursor = 0
+        while True:
+            cursor, keys = await self._redis.scan(cursor, match=full_pattern, count=100)
+            if keys:
+                await self._redis.delete(*keys)
+                deleted += len(keys)
+            if cursor == 0:
+                break
+        return deleted
 
     async def get_or_set(
         self,
@@ -60,7 +75,7 @@ def cached(ttl: int, key_template: str) -> Callable[..., Any]:
         sig = inspect.signature(method)
         try:
             hints = get_type_hints(method)
-        except NameError, AttributeError:
+        except (NameError, AttributeError):  # fmt: skip
             hints = {}
         return_type = hints.get("return")
 

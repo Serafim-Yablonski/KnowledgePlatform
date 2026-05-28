@@ -44,7 +44,7 @@ async def list_workspace_documents(workspace_id: str) -> list[dict[str, Any]]:
         workspace_svc = _make_workspace_service(session)
         await workspace_svc.get_user_role(user, ws_uuid)
         doc_svc = _make_document_service(session)
-        docs = await doc_svc.list_by_workspace_id(ws_uuid, limit=100)
+        docs = await doc_svc._list_by_workspace_id(ws_uuid, limit=100)
     return [
         {
             "id": str(d.id),
@@ -66,7 +66,7 @@ async def get_workspace_stats(workspace_id: str) -> dict[str, Any]:
         workspace_svc = _make_workspace_service(session)
         await workspace_svc.get_user_role(user, ws_uuid)
         doc_svc = _make_document_service(session)
-        stats = await doc_svc.get_workspace_stats(ws_uuid)
+        stats = await doc_svc._get_workspace_stats(ws_uuid)
     return {
         "document_count": stats.document_count,
         "chunk_count": stats.chunk_count,

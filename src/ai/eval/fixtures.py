@@ -164,7 +164,7 @@ async def cleanup_stale_eval_workspaces(session: AsyncSession) -> None:
     """Delete any workspaces with slug matching 'eval-%' left by failed prior runs."""
     await session.execute(sa.delete(Workspace).where(Workspace.slug.like("eval-%")))
     await session.commit()
-    logger.warning("stale eval workspace cleanup ran")
+    logger.info("stale eval workspace cleanup ran")
 
 
 async def _get_eval_placeholder_user_id(session: AsyncSession) -> uuid.UUID:

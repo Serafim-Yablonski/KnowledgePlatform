@@ -10,13 +10,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.exceptions import ForbiddenError
+from src.domain.ai import Answer
 from src.domain.roles import WorkspaceRole
-from src.schemas.ai import AnswerResponse
 from src.services.ai import AIService
 
 
-def _make_answer_response(confidence: float = 0.9) -> AnswerResponse:
-    return AnswerResponse(
+def _make_answer_response(confidence: float = 0.9) -> Answer:
+    return Answer(
         answer="The answer is X.",
         sources=[],
         confidence=confidence,
@@ -24,7 +24,7 @@ def _make_answer_response(confidence: float = 0.9) -> AnswerResponse:
     )
 
 
-def _make_agent_result(output: AnswerResponse) -> MagicMock:
+def _make_agent_result(output: Answer) -> MagicMock:
     mock_result = MagicMock()
     mock_result.output = output
     mock_result.all_messages.return_value = []

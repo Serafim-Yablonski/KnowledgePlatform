@@ -5,9 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from src.core.config import settings
-from src.core.exceptions import InputValidationError
-
 
 class DocumentStatus(StrEnum):
     PENDING = "pending"
@@ -21,8 +18,6 @@ class ContentType(StrEnum):
     MARKDOWN = "markdown"
     PLAINTEXT = "plaintext"
 
-
-MAX_UPLOAD_SIZE_BYTES: int = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
 ALLOWED_CONTENT_TYPES: dict[str, ContentType] = {
     "application/pdf": ContentType.PDF,
@@ -46,7 +41,7 @@ def encode_cursor(cursor: Cursor) -> str:
 
 def decode_cursor(value: str) -> Cursor:
     if len(value) > 512:
-        raise InputValidationError("Invalid pagination cursor")
+        raise ValueError("Invalid pagination cursor")
     try:
         data = json.loads(base64.urlsafe_b64decode(value.encode()))
         return Cursor(
@@ -54,4 +49,16 @@ def decode_cursor(value: str) -> Cursor:
             id=uuid.UUID(data["id"]),
         )
     except (ValueError, KeyError, UnicodeDecodeError) as exc:
-        raise InputValidationError("Invalid pagination cursor") from exc
+        raise ValueError("Invalid pagination cursor") from exc
+
+
+@dataclass
+class DocumentUpdateInput:
+    title: str | None = None
+
+
+@dataclass
+class DocumentPage[T]:
+    items: list[T]
+    next_cursor: Cursor | None
+    has_more: bool

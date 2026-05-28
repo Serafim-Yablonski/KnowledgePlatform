@@ -25,6 +25,6 @@ async def get_session() -> AsyncGenerator[AsyncSession]:
     async with async_session_factory() as session:
         try:
             yield session
-        except Exception:
+        except BaseException:
             await session.rollback()
             raise

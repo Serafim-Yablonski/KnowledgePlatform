@@ -27,6 +27,7 @@ def _make_redis(pipeline_results: list) -> MagicMock:
 
     redis = MagicMock()
     redis.pipeline = MagicMock(return_value=pipe)
+    redis.zrem = AsyncMock()
     return redis
 
 
@@ -148,3 +149,36 @@ class TestSlidingWindowRateLimiter:
 
         redis.pipeline.assert_called_once_with(transaction=True)
         redis.pipeline.return_value.execute.assert_awaited_once()
+
+    # ------------------------------------------------------------------
+    # Redis unavailable → fail open
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_redis_error_fails_open(self) -> None:
+        from redis.exceptions import RedisError
+
+        limiter, redis = self._make(max_requests=5)
+        redis.pipeline.return_value.execute = AsyncMock(side_effect=RedisError("down"))
+
+        result = await limiter.check("user-1")
+
+        assert result.remaining == 5
+        assert result.limit == 5
+
+    # ------------------------------------------------------------------
+    # Rejected requests are removed from the window
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_rejected_request_removed_from_window(self) -> None:
+        limiter, redis = self._make(max_requests=5)
+        redis.pipeline.return_value.execute = AsyncMock(
+            return_value=_results(6, oldest_ts=time.time() - 10)
+        )
+        redis.zrem = AsyncMock()
+
+        with pytest.raises(RateLimitError):
+            await limiter.check("user-1")
+
+        redis.zrem.assert_awaited_once()

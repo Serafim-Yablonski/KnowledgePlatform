@@ -19,6 +19,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Truncate any oversized rows before narrowing to avoid a hard abort on ALTER.
+    op.execute("UPDATE workspaces SET name = LEFT(name, 100) WHERE length(name) > 100")
     # Narrow name column from 255 → 100 chars to match domain constraint.
     op.alter_column(
         "workspaces",
@@ -27,6 +29,7 @@ def upgrade() -> None:
         type_=sa.String(100),
         existing_nullable=False,
     )
+    op.execute("UPDATE workspaces SET slug = LEFT(slug, 55) WHERE length(slug) > 55")
     # Narrow slug column to match max slug length (50 chars + hyphen + 4 suffix).
     op.alter_column(
         "workspaces",

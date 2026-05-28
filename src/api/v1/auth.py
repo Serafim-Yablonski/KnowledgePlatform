@@ -1,14 +1,13 @@
 import uuid
 
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.dependencies import get_current_user, get_db
-from src.core.exceptions import ForbiddenError
-from src.core.security import create_access_token, create_refresh_token, decode_token
+from src.core.dependencies import (
+    get_api_key_service,
+    get_auth_service,
+    get_current_user,
+)
 from src.models.user import User
-from src.repositories.api_key import SQLAlchemyApiKeyRepository
-from src.repositories.user import SQLAlchemyUserRepository
 from src.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyListItem
 from src.schemas.auth import (
     RefreshRequest,
@@ -23,45 +22,34 @@ from src.services.auth import AuthService
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
-def _auth_service(session: AsyncSession = Depends(get_db)) -> AuthService:
-    return AuthService(SQLAlchemyUserRepository(session))
-
-
-def _api_key_service(session: AsyncSession = Depends(get_db)) -> ApiKeyService:
-    return ApiKeyService(SQLAlchemyApiKeyRepository(session))
-
-
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(
     data: UserCreate,
-    service: AuthService = Depends(_auth_service),
+    service: AuthService = Depends(get_auth_service),
 ) -> UserResponse:
-    return await service.register(data)
+    user = await service.register(data.email, data.password, data.display_name)
+    return UserResponse.model_validate(user)
 
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
     data: UserLogin,
-    service: AuthService = Depends(_auth_service),
+    service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    return await service.login(data)
+    pair = await service.login(data.email, data.password)
+    return TokenResponse(
+        access_token=pair.access_token, refresh_token=pair.refresh_token
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
     body: RefreshRequest,
-    session: AsyncSession = Depends(get_db),
+    service: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    payload = decode_token(body.refresh_token)
-    if payload.type != "refresh":
-        raise ForbiddenError("Invalid token type")
-    repo = SQLAlchemyUserRepository(session)
-    user = await repo.get_by_id(payload.sub)
-    if user is None or not user.is_active:
-        raise ForbiddenError("User not found or inactive")
+    pair = await service.refresh(body.refresh_token)
     return TokenResponse(
-        access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
+        access_token=pair.access_token, refresh_token=pair.refresh_token
     )
 
 
@@ -78,7 +66,7 @@ async def me(current_user: User = Depends(get_current_user)) -> UserResponse:
 async def create_api_key(
     data: ApiKeyCreate,
     current_user: User = Depends(get_current_user),
-    service: ApiKeyService = Depends(_api_key_service),
+    service: ApiKeyService = Depends(get_api_key_service),
 ) -> ApiKeyCreateResponse:
     api_key, raw_key = await service.create(user_id=current_user.id, name=data.name)
     return ApiKeyCreateResponse(
@@ -92,7 +80,7 @@ async def create_api_key(
 @router.get("/api-keys", response_model=list[ApiKeyListItem])
 async def list_api_keys(
     current_user: User = Depends(get_current_user),
-    service: ApiKeyService = Depends(_api_key_service),
+    service: ApiKeyService = Depends(get_api_key_service),
 ) -> list[ApiKeyListItem]:
     keys = await service.list_for_user(current_user.id)
     return [ApiKeyListItem.model_validate(k) for k in keys]
@@ -102,6 +90,6 @@ async def list_api_keys(
 async def delete_api_key(
     key_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    service: ApiKeyService = Depends(_api_key_service),
+    service: ApiKeyService = Depends(get_api_key_service),
 ) -> None:
     await service.deactivate(key_id=key_id, requesting_user_id=current_user.id)
