@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_session
-from src.core.exceptions import ForbiddenError, UnauthorizedError
+from src.core.exceptions import UnauthorizedError
 from src.core.redis import get_redis
 from src.models.user import User
 from src.models.workspace import Workspace

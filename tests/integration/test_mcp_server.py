@@ -85,13 +85,21 @@ class TestMCPAuthMiddleware:
 
     @pytest.mark.asyncio
     async def test_invalid_bearer_token_returns_403(
-        self, async_client: AsyncClient
+        self, async_client: AsyncClient, db_session: AsyncSession
     ) -> None:
-        response = await async_client.post(
-            "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            headers={"Authorization": "Bearer not-a-real-token"},
-        )
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+
+        @asynccontextmanager
+        async def _fake_session() -> AsyncGenerator[AsyncSession]:
+            yield db_session
+
+        with patch("src.mcp_server.auth.get_session", new=_fake_session):
+            response = await async_client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                headers={"Authorization": "Bearer not-a-real-token"},
+            )
         assert response.status_code == 403
 
     @pytest.mark.asyncio
