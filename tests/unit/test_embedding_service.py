@@ -1,10 +1,10 @@
-"""Unit tests for EmbeddingService — mocks httpx and Redis."""
+"""Unit tests for EmbeddingService — mocks httpx."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -21,32 +21,11 @@ def _fake_embedding(seed: int = 0) -> list[float]:
     return v
 
 
-def _make_redis(cached: dict[str, str] | None = None) -> AsyncMock:
-    """Build a minimal async Redis mock with mget + pipeline support."""
-    redis = AsyncMock()
-    stored: dict[str, str] = dict(cached or {})
-
-    async def mget(*keys: str) -> list[str | None]:
-        return [stored.get(k) for k in keys]
-
-    redis.mget = mget
-
-    pipe = AsyncMock()
-    pipe.__aenter__ = AsyncMock(return_value=pipe)
-    pipe.__aexit__ = AsyncMock(return_value=False)
-    pipe.set = MagicMock(return_value=pipe)
-    pipe.execute = AsyncMock(return_value=None)
-    redis.pipeline = MagicMock(return_value=pipe)
-
-    return redis
-
-
-def _make_service(redis: AsyncMock | None = None) -> EmbeddingService:
+def _make_service() -> EmbeddingService:
     return EmbeddingService(
         api_key=_API_KEY,
         model=_MODEL,
         dimensions=_DIMS,
-        redis_client=redis or _make_redis(),
     )
 
 
@@ -75,39 +54,6 @@ class _MockResponse:
 
 
 @pytest.mark.asyncio
-async def test_cache_hit_skips_api_call() -> None:
-    """embed_texts called twice with the same input hits the API only once."""
-    service = _make_service()
-
-    response = _MockResponse(200, _gemini_response(["hello"]))
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=response)
-        mock_client_cls.return_value = mock_client
-
-        first = await service.embed_texts(["hello"])
-
-    # Populate cache manually with what we got.
-    key = service._cache_key("hello")
-    cached_redis = _make_redis(cached={key: json.dumps(first[0])})
-    service2 = _make_service(redis=cached_redis)
-
-    with patch("httpx.AsyncClient") as mock_client_cls2:
-        mock_client2 = AsyncMock()
-        mock_client2.__aenter__ = AsyncMock(return_value=mock_client2)
-        mock_client2.__aexit__ = AsyncMock(return_value=False)
-        mock_client2.post = AsyncMock()
-        mock_client_cls2.return_value = mock_client2
-
-        second = await service2.embed_texts(["hello"])
-        mock_client2.post.assert_not_called()
-
-    assert second[0] == first[0]
-
-
-@pytest.mark.asyncio
 async def test_batch_splitting_250_texts_makes_three_api_calls() -> None:
     """250 texts → 3 batches (100 + 100 + 50) because Gemini limit is 100."""
     texts = [f"text {i}" for i in range(250)]
@@ -131,23 +77,6 @@ async def test_batch_splitting_250_texts_makes_three_api_calls() -> None:
 
     assert call_sizes == [100, 100, 50]
     assert len(results) == 250
-
-
-@pytest.mark.asyncio
-async def test_cache_key_includes_dimensions_so_dim_change_is_cache_miss() -> None:
-    """Cache key encodes dimensions — switching EMBEDDING_DIMENSIONS busts the cache."""
-    text = "same text"
-    service_768 = EmbeddingService(
-        api_key=_API_KEY, model=_MODEL, dimensions=768, redis_client=_make_redis()
-    )
-    service_256 = EmbeddingService(
-        api_key=_API_KEY, model=_MODEL, dimensions=256, redis_client=_make_redis()
-    )
-    key_768 = service_768._cache_key(text)
-    key_256 = service_256._cache_key(text)
-    assert key_768 != key_256
-    assert ":768:" in key_768
-    assert ":256:" in key_256
 
 
 @pytest.mark.asyncio

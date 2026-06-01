@@ -144,10 +144,14 @@ class TestSetActiveWorkspace:
         from src.domain.roles import WorkspaceRole
 
         ws_id = uuid.uuid4()
-        ws = _make_workspace_response(ws_id)
+        ws_info = _make_workspace_response(ws_id)
+        mock_membership = MagicMock()
+        mock_membership.role = WorkspaceRole.MEMBER
         mock_workspace_svc = MagicMock()
-        mock_workspace_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.MEMBER)
-        mock_workspace_svc.get_by_id = AsyncMock(return_value=ws)
+        mock_workspace_svc.get_workspace_for_user = AsyncMock(
+            return_value=(MagicMock(), mock_membership)
+        )
+        mock_workspace_svc.get_by_id = AsyncMock(return_value=ws_info)
 
         get_or_create_session_state(session_id, mock_user)
         sid_token = _current_session_id.set(session_id)
@@ -172,7 +176,7 @@ class TestSetActiveWorkspace:
         self, mock_user: MagicMock, session_id: str, mock_session_ctx: MagicMock
     ) -> None:
         mock_workspace_svc = MagicMock()
-        mock_workspace_svc.get_user_role = AsyncMock(
+        mock_workspace_svc.get_workspace_for_user = AsyncMock(
             side_effect=ForbiddenError("Not a member")
         )
 

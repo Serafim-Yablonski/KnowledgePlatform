@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.domain.roles import WorkspaceRole
+from src.domain.workspace import WorkspaceUpdateInput
 from src.models.workspace import Workspace, WorkspaceMembership
 
 
@@ -38,6 +39,26 @@ class SQLAlchemyWorkspaceRepository:
             select(Workspace).where(Workspace.id == workspace_id)
         )
         return result.first()
+
+    async def update(
+        self, workspace_id: uuid.UUID, data: WorkspaceUpdateInput
+    ) -> Workspace:
+        workspace = (
+            await self._session.scalars(
+                select(Workspace).where(Workspace.id == workspace_id)
+            )
+        ).first()
+        if workspace is None:
+            from src.core.exceptions import NotFoundError
+
+            raise NotFoundError("Workspace not found")
+        if data.name is not None:
+            workspace.name = data.name
+        if data.description is not None:
+            workspace.description = data.description
+        await self._session.commit()
+        await self._session.refresh(workspace)
+        return workspace
 
     async def get_by_slug(self, slug: str) -> Workspace | None:
         result = await self._session.scalars(
@@ -113,6 +134,15 @@ class SQLAlchemyWorkspaceRepository:
             .where(WorkspaceMembership.workspace_id == workspace_id)
         )
         return int(result or 0)
+
+    async def delete(self, workspace_id: uuid.UUID) -> None:
+        # Use a raw DELETE rather than session.delete() so that PostgreSQL's
+        # ondelete="CASCADE" handles memberships/documents without the ORM's
+        # unit-of-work trying to NULL-out the composite PK FK first.
+        await self._session.execute(
+            sa.delete(Workspace).where(Workspace.id == workspace_id)
+        )
+        await self._session.commit()
 
     async def count_owners_for_update(self, workspace_id: uuid.UUID) -> int:
         # Lock the actual owner rows (FOR UPDATE on rows, not aggregate).

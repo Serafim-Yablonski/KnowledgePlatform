@@ -1,117 +1,130 @@
 from __future__ import annotations
 
-import functools
-import hashlib
-import inspect
 import json
+import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar, cast, get_type_hints
+from typing import Any, TypeVar
 
 import redis.asyncio as aioredis
+import structlog
+from redis.exceptions import RedisError
 
 T = TypeVar("T")
 
+logger = structlog.get_logger(__name__)
+
+# Distinguishes "key absent in Redis" from "key present, value is JSON null".
+_MISS: Any = object()
+
 
 class ResponseCache:
+    # Cache invalidation is the caller's responsibility. After any write that
+    # modifies cached data, call `await self._cache.delete(key)` in the service
+    # layer before or after committing. TTL is a safety net, not the primary
+    # freshness mechanism. See service layer for workspace and API key invalidation.
     def __init__(
         self,
         redis_client: aioredis.Redis,
-        key_prefix: str = "nexus:response",
+        key_prefix: str = "nexus:cache",
     ) -> None:
         self._redis = redis_client
         self._prefix = key_prefix
 
-    async def get(self, key: str) -> Any | None:
-        raw: str | None = await self._redis.get(f"{self._prefix}:{key}")
-        return json.loads(raw) if raw is not None else None
+    async def get(self, key: str) -> Any:
+        try:
+            raw: str | None = await self._redis.get(f"{self._prefix}:{key}")
+        except RedisError as exc:
+            logger.warning(
+                "cache read failed — treating as miss", key=key, error=repr(exc)
+            )
+            return _MISS
+        if raw is None:
+            return _MISS
+        return json.loads(raw)
 
     async def set(self, key: str, value: Any, ttl: int) -> None:
-        await self._redis.set(f"{self._prefix}:{key}", json.dumps(value), ex=ttl)
+        try:
+            await self._redis.set(f"{self._prefix}:{key}", json.dumps(value), ex=ttl)
+        except RedisError as exc:
+            logger.warning(
+                "cache write failed — value not cached", key=key, error=repr(exc)
+            )
+
+    async def delete(self, key: str) -> None:
+        try:
+            await self._redis.delete(f"{self._prefix}:{key}")
+        except RedisError as exc:
+            logger.warning(
+                "cache invalidation failed — stale entry will expire at TTL",
+                key=key,
+                error=repr(exc),
+            )
 
     async def delete_pattern(self, pattern: str) -> int:
         full_pattern = f"{self._prefix}:{pattern}"
         deleted = 0
         cursor = 0
-        while True:
-            cursor, keys = await self._redis.scan(cursor, match=full_pattern, count=100)
-            if keys:
-                await self._redis.delete(*keys)
-                deleted += len(keys)
-            if cursor == 0:
-                break
+        try:
+            while True:
+                cursor, keys = await self._redis.scan(
+                    cursor, match=full_pattern, count=100
+                )
+                if keys:
+                    await self._redis.delete(*keys)
+                    deleted += len(keys)
+                if cursor == 0:
+                    break
+        except RedisError as exc:
+            logger.warning(
+                "cache pattern-delete failed — some stale entries may persist",
+                pattern=full_pattern,
+                error=repr(exc),
+            )
         return deleted
 
+    # Callers supply serializer/deserializer so Pydantic models
+    # (and any other non-JSON-native type) round-trip correctly.
+    # Defaults are identity functions — no change for primitive/dict callers.
     async def get_or_set(
         self,
         key: str,
         ttl: int,
         factory: Callable[[], Awaitable[T]],
+        serializer: Callable[[T], Any] = lambda v: v,
+        deserializer: Callable[[Any], T] = lambda v: v,
     ) -> T:
         cached = await self.get(key)
-        if cached is not None:
-            return cast(T, cached)
+        if cached is not _MISS:
+            return deserializer(cached)
         result = await factory()
-        await self.set(key, result, ttl)
+        await self.set(key, serializer(result), ttl)
         return result
 
 
-def cached(ttl: int, key_template: str) -> Callable[..., Any]:
-    """Decorator for async service methods.  The decorated method's instance
-    must expose ``self._cache: ResponseCache``.
+class CacheKeys:
+    """Central registry of Redis key constructors.
 
-    Template variables are filled from the bound method arguments.
-    Any ``{name_hash}`` variable is auto-computed as SHA-256[:16] of the
-    argument named ``name``.
+    Each static method returns a fully-qualified key (without the ResponseCache
+    prefix). ResponseCache prepends ``nexus:cache:`` at storage time.
 
-    Pydantic BaseModel return types are serialised via ``model_dump(mode='json')``
-    and reconstructed with ``model_validate()`` on cache hit.
-
-    Example::
-        @cached(ttl=300, key_template="search:{workspace_id}:{query_hash}")
-        async def search(self, workspace_id, query, ...): ...
+    Using static methods with f-strings — rather than str.format() on a
+    constant — avoids re-parsing the format string on every call.
     """
 
-    def decorator(method: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
-        sig = inspect.signature(method)
-        try:
-            hints = get_type_hints(method)
-        except (NameError, AttributeError):  # fmt: skip
-            hints = {}
-        return_type = hints.get("return")
+    @staticmethod
+    def workspace(workspace_id: uuid.UUID) -> str:
+        return f"workspace:{workspace_id}"
 
-        @functools.wraps(method)
-        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> T:
-            bound = sig.bind(self, *args, **kwargs)
-            bound.apply_defaults()
-            params: dict[str, Any] = {
-                k: v for k, v in bound.arguments.items() if k != "self"
-            }
-            for name, value in list(params.items()):
-                hash_key = f"{name}_hash"
-                if f"{{{hash_key}}}" in key_template:
-                    digest = hashlib.sha256(str(value).encode()).hexdigest()
-                    params[hash_key] = digest[:16]
+    @staticmethod
+    def membership(workspace_id: uuid.UUID, user_id: uuid.UUID) -> str:
+        return f"membership:{workspace_id}:{user_id}"
 
-            key = key_template.format_map(params)
+    @staticmethod
+    def api_key(key_hash: str) -> str:
+        return f"api_key:{key_hash}"
 
-            raw = await self._cache.get(key)
-            if raw is not None:
-                if return_type is not None and hasattr(return_type, "model_validate"):
-                    return cast(T, return_type.model_validate(raw))
-                return cast(T, raw)
-
-            result: T = await method(self, *args, **kwargs)
-
-            # Serialize Pydantic models to a JSON-compatible dict before storing.
-            any_result: Any = result
-            serializable: Any = (
-                any_result.model_dump(mode="json")
-                if hasattr(result, "model_dump")
-                else result
-            )
-            await self._cache.set(key, serializable, ttl)
-            return result
-
-        return wrapper
-
-    return decorator
+    # Glob pattern for delete_pattern() — used when deleting a workspace to
+    # invalidate all membership cache entries for that workspace in one pass.
+    @staticmethod
+    def membership_pattern(workspace_id: uuid.UUID) -> str:
+        return f"membership:{workspace_id}:*"

@@ -8,7 +8,6 @@ import logfire
 import structlog
 
 from src.ai.embeddings import EmbeddingService
-from src.core.cache import ResponseCache, cached
 from src.domain.search import SearchResults
 from src.repositories.protocols import SearchRepositoryProtocol
 
@@ -20,16 +19,10 @@ class SearchService:
         self,
         search_repo: SearchRepositoryProtocol,
         embedding_service: EmbeddingService,
-        cache: ResponseCache,
     ) -> None:
         self._repo = search_repo
         self._embedding = embedding_service
-        self._cache = cache
 
-    @cached(
-        ttl=300,
-        key_template="search:{workspace_id}:{query_hash}:{top_k}:{min_score}",
-    )
     async def search(
         self,
         workspace_id: uuid.UUID,

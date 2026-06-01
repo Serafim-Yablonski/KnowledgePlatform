@@ -1,7 +1,11 @@
+from typing import Any
+
 import logfire
 from celery import Celery
+from celery.signals import worker_shutdown
 
 from src.core.config import settings
+from src.core.redis import close_sync_redis
 
 celery_app = Celery(
     "knowledge_platform",
@@ -30,3 +34,10 @@ if settings.LOGFIRE_TOKEN:
 else:
     logfire.configure(send_to_logfire=False)
 logfire.instrument_celery()
+
+
+# Problem 7 fix: release the lazily-created sync Redis client when the worker
+# exits so connections are closed cleanly rather than abandoned.
+@worker_shutdown.connect  # type: ignore[untyped-decorator]
+def _on_worker_shutdown(**kwargs: Any) -> None:
+    close_sync_redis()

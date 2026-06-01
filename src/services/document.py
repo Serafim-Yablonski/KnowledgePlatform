@@ -8,9 +8,8 @@ import structlog
 from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.cache import ResponseCache
 from src.core.config import settings
-from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
+from src.core.exceptions import InputValidationError, NotFoundError
 from src.domain.documents import (
     ALLOWED_CONTENT_TYPES,
     Cursor,
@@ -19,7 +18,7 @@ from src.domain.documents import (
     DocumentUpdateInput,
     decode_cursor,
 )
-from src.domain.roles import PERMISSIONS, WorkspaceRole
+from src.domain.roles import Permission, WorkspaceRole, require_permission
 from src.domain.workspace import WorkspaceStats
 from src.models.document import Document
 from src.models.user import User
@@ -51,11 +50,6 @@ async def _validate_magic_bytes(file: UploadFile, content_type_str: str) -> None
             ) from None
 
 
-def _require_permission(role: WorkspaceRole, permission: str) -> None:
-    if permission not in PERMISSIONS[role]:
-        raise ForbiddenError("Insufficient permissions")
-
-
 def _write_file(src: IO[bytes], dest_path: Path) -> int:
     """Stream src to dest_path in chunks, enforcing the configured upload size limit."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,11 +71,9 @@ class DocumentService:
         self,
         repo: DocumentRepositoryProtocol,
         session: AsyncSession,
-        cache: ResponseCache | None = None,
     ) -> None:
         self._repo = repo
         self._session = session
-        self._cache = cache
 
     async def create(
         self,
@@ -91,7 +83,7 @@ class DocumentService:
         title: str,
         file: UploadFile,
     ) -> Document:
-        _require_permission(role, "create_document")
+        require_permission(role, Permission.CREATE_DOCUMENT)
         # Fast-fail if Content-Length header already indicates oversized payload.
         max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         if file.size is not None and file.size > max_bytes:
@@ -209,14 +201,12 @@ class DocumentService:
         document_id: uuid.UUID,
         data: DocumentUpdateInput,
     ) -> Document:
-        _require_permission(role, "update_document")
+        require_permission(role, Permission.UPDATE_DOCUMENT)
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace.id:
             raise NotFoundError("Document not found")
         doc = await self._repo.update(doc, data)
         await self._session.commit()
-        if self._cache is not None:
-            await self._cache.delete_pattern(f"search:{workspace.id}:*")
         return doc
 
     async def delete(
@@ -226,7 +216,7 @@ class DocumentService:
         role: WorkspaceRole,
         document_id: uuid.UUID,
     ) -> None:
-        _require_permission(role, "delete_document")
+        require_permission(role, Permission.DELETE_DOCUMENT)
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace.id:
             raise NotFoundError("Document not found")
@@ -235,8 +225,6 @@ class DocumentService:
         # than a deleted file with a stale DB row pointing at nothing.
         await self._repo.delete(doc)
         await self._session.commit()
-        if self._cache is not None:
-            await self._cache.delete_pattern(f"search:{workspace.id}:*")
         if file_path:
             try:
                 Path(file_path).unlink(missing_ok=True)

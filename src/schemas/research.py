@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 class ResearchStartRequest(BaseModel):
-    topic: Annotated[str, Field(min_length=1, max_length=500, strip_whitespace=True)]
+    topic: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
+    ]
     max_iterations: Annotated[int, Field(ge=1, le=5)] = 3
 
 

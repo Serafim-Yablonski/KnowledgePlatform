@@ -2,20 +2,17 @@ from __future__ import annotations
 
 import redis
 import redis.asyncio as aioredis
-from fastapi import Request
 
 from src.core.config import settings
 
-_PREFIX_CACHE = "nexus:cache"
-_PREFIX_RATELIMIT = "nexus:ratelimit"
+# Problem 5 fix: _PREFIX_CACHE and the standalone cache_get/set/delete helpers have been
+# removed — they were unused and duplicated ResponseCache (cache.py) with a different
+# prefix and no JSON serialization, making cross-system invalidation impossible.
+PREFIX_RATELIMIT = "nexus:ratelimit"
 
 _async_pool: aioredis.ConnectionPool | None = None
 _async_client: aioredis.Redis | None = None
 _sync_client: redis.Redis | None = None
-
-
-def _cache_key(key: str) -> str:
-    return f"{_PREFIX_CACHE}:{key}"
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +46,12 @@ async def close_redis() -> None:
 # ---------------------------------------------------------------------------
 
 
-def get_redis(request: Request) -> aioredis.Redis:
-    return request.app.state.redis  # type: ignore[no-any-return]
+def get_redis() -> aioredis.Redis:
+    # Problem 8 fix: single source of truth — the module-level client set by
+    # init_redis(). Previously read from request.app.state.redis, which worked
+    # only because main.py happened to store the same object there; that
+    # implicit coupling is now removed.
+    return get_async_redis_client()
 
 
 def get_async_redis_client() -> aioredis.Redis:
@@ -64,31 +65,7 @@ def get_async_redis_client() -> aioredis.Redis:
 
 
 # ---------------------------------------------------------------------------
-# Async cache helpers (FastAPI / coroutines)
-# ---------------------------------------------------------------------------
-
-
-async def cache_get(key: str) -> str | None:
-    if _async_client is None:
-        raise RuntimeError("Redis not initialized — call init_redis() first")
-    val: str | None = await _async_client.get(_cache_key(key))
-    return val
-
-
-async def cache_set(key: str, value: str, ttl_seconds: int) -> None:
-    if _async_client is None:
-        raise RuntimeError("Redis not initialized — call init_redis() first")
-    await _async_client.set(_cache_key(key), value, ex=ttl_seconds)
-
-
-async def cache_delete(key: str) -> None:
-    if _async_client is None:
-        raise RuntimeError("Redis not initialized — call init_redis() first")
-    await _async_client.delete(_cache_key(key))
-
-
-# ---------------------------------------------------------------------------
-# Sync cache helpers (Celery workers)
+# Sync client — Celery workers only
 # ---------------------------------------------------------------------------
 
 
@@ -99,15 +76,10 @@ def _get_sync_client() -> redis.Redis:
     return _sync_client
 
 
-def sync_cache_get(key: str) -> str | None:
-    # redis-py types sync get() as bytes|None even with decode_responses=True.
-    val: str | None = _get_sync_client().get(_cache_key(key))  # type: ignore[assignment]
-    return val
-
-
-def sync_cache_set(key: str, value: str, ttl_seconds: int) -> None:
-    _get_sync_client().set(_cache_key(key), value, ex=ttl_seconds)
-
-
-def sync_cache_delete(key: str) -> None:
-    _get_sync_client().delete(_cache_key(key))
+def close_sync_redis() -> None:
+    # Problem 7 fix: release sync connections on Celery worker shutdown.
+    # Called from the worker_shutdown signal in src/workers/celery_app.py.
+    global _sync_client
+    if _sync_client is not None:
+        _sync_client.close()
+        _sync_client = None

@@ -45,6 +45,7 @@ def _make_repo(
     repo.get_by_hash = AsyncMock(return_value=existing_key)
     repo.list_for_user = AsyncMock(return_value=user_keys or [])
     repo.deactivate = AsyncMock(return_value=None)
+    repo.invalidate_all_for_user = AsyncMock(return_value=None)
     return repo
 
 
@@ -127,6 +128,29 @@ class TestAuthenticate:
         service = ApiKeyService(repo)
         with pytest.raises(ForbiddenError, match="revoked"):
             await service.authenticate(raw_key)
+
+    @pytest.mark.asyncio
+    async def test_inactive_user_raises(self) -> None:
+        raw_key = "keyforinactiveuser"
+        inactive_user = MagicMock()
+        inactive_user.is_active = False
+        mock_key = _make_api_key(is_active=True, user=inactive_user)
+        repo = _make_repo(existing_key=mock_key)
+        service = ApiKeyService(repo)
+        with pytest.raises(ForbiddenError, match="revoked"):
+            await service.authenticate(raw_key)
+
+
+class TestInvalidateUserKeys:
+    @pytest.mark.asyncio
+    async def test_delegates_to_repo(self) -> None:
+        user_id = uuid.uuid4()
+        repo = _make_repo()
+        service = ApiKeyService(repo)
+
+        await service.invalidate_user_keys(user_id)
+
+        repo.invalidate_all_for_user.assert_awaited_once_with(user_id)
 
 
 class TestDeactivate:

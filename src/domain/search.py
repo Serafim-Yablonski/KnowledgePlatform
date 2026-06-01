@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 @dataclass
@@ -18,10 +18,8 @@ class SearchResult:
 
 
 class SearchResults(BaseModel):
-    """Pydantic model for @cached compatibility (model_dump/model_validate)."""
-
     results: list[SearchResult]
     query: str
     total_results: int
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)

@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from src.domain.roles import WorkspaceRole
+from src.domain.workspace import WorkspaceUpdateInput
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
 from src.services.workspace import WorkspaceService
@@ -143,6 +144,24 @@ class StubWorkspaceRepository:
             if m.workspace_id == workspace_id and m.role == WorkspaceRole.OWNER
         )
 
+    async def update(
+        self, workspace_id: uuid.UUID, data: WorkspaceUpdateInput
+    ) -> Workspace:
+        workspace = self._workspaces.get(workspace_id)
+        if workspace is None:
+            raise NotFoundError("Workspace not found")
+        if data.name is not None:
+            workspace.name = data.name
+        if data.description is not None:
+            workspace.description = data.description
+        return workspace
+
+    async def delete(self, workspace_id: uuid.UUID) -> None:
+        self._workspaces.pop(workspace_id, None)
+        self._memberships = [
+            m for m in self._memberships if m.workspace_id != workspace_id
+        ]
+
 
 class StubUserRepository:
     def __init__(self, users: list[User] | None = None) -> None:
@@ -205,20 +224,11 @@ async def test_create_returns_workspace_response_with_slug() -> None:
 
 
 async def test_member_can_get_workspace() -> None:
-    service, ws_repo, _ = _make_service()
-    owner = _make_user()
-    created = await service.create(owner, "Workspace")
-    result = await service.get_by_id(owner, created.id)
-    assert result.id == created.id
-
-
-async def test_non_member_cannot_get_workspace() -> None:
     service, _, _ = _make_service()
     owner = _make_user()
-    stranger = _make_user("stranger@example.com")
-    created = await service.create(owner, "Private")
-    with pytest.raises(ForbiddenError):
-        await service.get_by_id(stranger, created.id)
+    created = await service.create(owner, "Workspace")
+    result = await service.get_by_id(created.id)
+    assert result.id == created.id
 
 
 # ---------------------------------------------------------------------------
@@ -231,21 +241,23 @@ async def test_owner_can_add_member() -> None:
     service, _, _ = _make_service(extra_users=[new_user])
     owner = _make_user()
     created = await service.create(owner, "Team")
-    result = await service.add_member(owner, created.id, "new@example.com")
+    result = await service.add_member(
+        owner, created.id, WorkspaceRole.OWNER, "new@example.com"
+    )
     assert result.user_id == new_user.id
     assert result.role == WorkspaceRole.MEMBER
 
 
 async def test_member_cannot_add_members() -> None:
-    member_user = _make_user("member@example.com")
     new_user = _make_user("new@example.com")
-    service, ws_repo, _ = _make_service(extra_users=[member_user, new_user])
+    service, _, _ = _make_service(extra_users=[new_user])
     owner = _make_user()
     created = await service.create(owner, "Team")
-    await ws_repo.add_member(created.id, member_user.id, WorkspaceRole.MEMBER)
 
     with pytest.raises(ForbiddenError):
-        await service.add_member(member_user, created.id, "new@example.com")
+        await service.add_member(
+            owner, created.id, WorkspaceRole.MEMBER, "new@example.com"
+        )
 
 
 async def test_add_duplicate_member_raises_conflict() -> None:
@@ -256,7 +268,9 @@ async def test_add_duplicate_member_raises_conflict() -> None:
     await ws_repo.add_member(created.id, existing_user.id, WorkspaceRole.MEMBER)
 
     with pytest.raises(ConflictError):
-        await service.add_member(owner, created.id, "existing@example.com")
+        await service.add_member(
+            owner, created.id, WorkspaceRole.OWNER, "existing@example.com"
+        )
 
 
 async def test_add_nonexistent_user_returns_same_error_as_duplicate() -> None:
@@ -266,35 +280,34 @@ async def test_add_nonexistent_user_returns_same_error_as_duplicate() -> None:
     owner = _make_user()
     created = await service.create(owner, "Team")
     with pytest.raises(ConflictError):
-        await service.add_member(owner, created.id, "ghost@example.com")
+        await service.add_member(
+            owner, created.id, WorkspaceRole.OWNER, "ghost@example.com"
+        )
 
 
 async def test_admin_cannot_grant_owner_role() -> None:
-    admin_user = _make_user("admin@example.com")
     new_user = _make_user("new@example.com")
-    service, ws_repo, _ = _make_service(extra_users=[admin_user, new_user])
+    service, _, _ = _make_service(extra_users=[new_user])
     owner = _make_user()
     created = await service.create(owner, "Team")
-    await ws_repo.add_member(created.id, admin_user.id, WorkspaceRole.ADMIN)
 
     with pytest.raises(ForbiddenError, match="higher than your own"):
         await service.add_member(
-            admin_user,
+            owner,
             created.id,
+            WorkspaceRole.ADMIN,
             "new@example.com",
             WorkspaceRole.OWNER,
         )
 
 
 async def test_admin_cannot_remove_higher_ranked_owner() -> None:
-    admin_user = _make_user("admin@example.com")
-    service, ws_repo, _ = _make_service(extra_users=[admin_user])
+    service, _, _ = _make_service()
     owner = _make_user()
     created = await service.create(owner, "Team")
-    await ws_repo.add_member(created.id, admin_user.id, WorkspaceRole.ADMIN)
 
     with pytest.raises(ForbiddenError, match="higher role"):
-        await service.remove_member(admin_user, created.id, owner.id)
+        await service.remove_member(created.id, WorkspaceRole.ADMIN, owner.id)
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +320,7 @@ async def test_cannot_remove_last_owner() -> None:
     owner = _make_user()
     created = await service.create(owner, "Team")
     with pytest.raises(ConflictError, match="last owner"):
-        await service.remove_member(owner, created.id, owner.id)
+        await service.remove_member(created.id, WorkspaceRole.OWNER, owner.id)
 
 
 async def test_owner_can_remove_regular_member() -> None:
@@ -317,34 +330,30 @@ async def test_owner_can_remove_regular_member() -> None:
     created = await service.create(owner, "Team")
     await ws_repo.add_member(created.id, member_user.id, WorkspaceRole.MEMBER)
 
-    await service.remove_member(owner, created.id, member_user.id)
+    await service.remove_member(created.id, WorkspaceRole.OWNER, member_user.id)
     membership = await ws_repo.get_membership(created.id, member_user.id)
     assert membership is None
 
 
 async def test_member_cannot_remove_others() -> None:
-    member_user = _make_user("member@example.com")
     other_user = _make_user("other@example.com")
-    service, ws_repo, _ = _make_service(extra_users=[member_user, other_user])
+    service, ws_repo, _ = _make_service(extra_users=[other_user])
     owner = _make_user()
     created = await service.create(owner, "Team")
-    await ws_repo.add_member(created.id, member_user.id, WorkspaceRole.MEMBER)
     await ws_repo.add_member(created.id, other_user.id, WorkspaceRole.MEMBER)
 
     with pytest.raises(ForbiddenError):
-        await service.remove_member(member_user, created.id, other_user.id)
+        await service.remove_member(created.id, WorkspaceRole.MEMBER, other_user.id)
 
 
 async def test_admin_cannot_remove_last_owner() -> None:
-    admin_user = _make_user("admin@example.com")
-    service, ws_repo, _ = _make_service(extra_users=[admin_user])
+    service, _, _ = _make_service()
     owner = _make_user()
     created = await service.create(owner, "Team")
-    await ws_repo.add_member(created.id, admin_user.id, WorkspaceRole.ADMIN)
 
     # Role-rank check fires first: ADMIN cannot remove OWNER at all.
     with pytest.raises(ForbiddenError, match="higher role"):
-        await service.remove_member(admin_user, created.id, owner.id)
+        await service.remove_member(created.id, WorkspaceRole.ADMIN, owner.id)
 
 
 # ---------------------------------------------------------------------------
@@ -361,20 +370,10 @@ async def test_list_members_returns_all_with_user_info() -> None:
     # ws_repo.add_member uses _user_store to populate m.user automatically
     await ws_repo.add_member(created.id, member_user.id, WorkspaceRole.MEMBER)
 
-    result = await service.list_members(owner, created.id)
+    result = await service.list_members(created.id)
     assert len(result) == 2
     emails = {r.email for r in result}
     assert "listed@example.com" in emails
-
-
-async def test_list_members_non_member_forbidden() -> None:
-    service, _, _ = _make_service()
-    owner = _make_user()
-    stranger = _make_user("stranger@example.com")
-    created = await service.create(owner, "Team")
-
-    with pytest.raises(ForbiddenError):
-        await service.list_members(stranger, created.id)
 
 
 # ---------------------------------------------------------------------------
@@ -412,15 +411,10 @@ async def test_get_workspace_for_user_unknown_workspace_raises_forbidden() -> No
         await service.get_workspace_for_user(uuid.uuid4(), user.id)
 
 
-async def test_get_by_id_workspace_inconsistency_raises_not_found() -> None:
-    """Membership exists but workspace row deleted — get_by_id raises NotFoundError."""
-    service, ws_repo, _ = _make_service()
-    owner = _make_user()
-    created = await service.create(owner, "Team")
-    ws_repo._workspaces.pop(created.id)
-
+async def test_get_by_id_workspace_not_found_raises_not_found() -> None:
+    service, _, _ = _make_service()
     with pytest.raises(NotFoundError):
-        await service.get_by_id(owner, created.id)
+        await service.get_by_id(uuid.uuid4())
 
 
 async def test_get_workspace_for_user_workspace_inconsistency_raises_forbidden() -> (
@@ -447,7 +441,7 @@ async def test_remove_member_target_not_found_raises_not_found() -> None:
     created = await service.create(owner, "Team")
 
     with pytest.raises(NotFoundError):
-        await service.remove_member(owner, created.id, uuid.uuid4())
+        await service.remove_member(created.id, WorkspaceRole.OWNER, uuid.uuid4())
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +461,9 @@ async def test_add_member_integrity_error_raises_conflict() -> None:
     ws_repo.add_member = _raise  # type: ignore[method-assign]
 
     with pytest.raises(ConflictError):
-        await service.add_member(owner, created.id, "new@example.com")
+        await service.add_member(
+            owner, created.id, WorkspaceRole.OWNER, "new@example.com"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -492,3 +488,141 @@ async def test_get_user_role_not_member_raises_forbidden() -> None:
 
     with pytest.raises(ForbiddenError):
         await service.get_user_role(stranger, created.id)
+
+
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
+
+
+async def test_owner_can_update_workspace_name() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Old Name")
+
+    result = await service.update(
+        owner, created.id, WorkspaceRole.OWNER, WorkspaceUpdateInput(name="New Name")
+    )
+
+    assert result.name == "New Name"
+    assert result.id == created.id
+
+
+async def test_admin_can_update_workspace_description() -> None:
+    admin = _make_user("admin@example.com")
+    service, ws_repo, _ = _make_service(extra_users=[admin])
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+    await ws_repo.add_member(created.id, admin.id, WorkspaceRole.ADMIN)
+
+    result = await service.update(
+        admin,
+        created.id,
+        WorkspaceRole.ADMIN,
+        WorkspaceUpdateInput(description="New description"),
+    )
+
+    assert result.description == "New description"
+
+
+async def test_member_cannot_update_workspace() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(ForbiddenError):
+        await service.update(
+            owner,
+            created.id,
+            WorkspaceRole.MEMBER,
+            WorkspaceUpdateInput(name="Hacked"),
+        )
+
+
+async def test_viewer_cannot_update_workspace() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(ForbiddenError):
+        await service.update(
+            owner,
+            created.id,
+            WorkspaceRole.VIEWER,
+            WorkspaceUpdateInput(name="Hacked"),
+        )
+
+
+async def test_update_workspace_not_found_raises_not_found() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+
+    with pytest.raises(NotFoundError):
+        await service.update(
+            owner,
+            uuid.uuid4(),
+            WorkspaceRole.OWNER,
+            WorkspaceUpdateInput(name="Ghost"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+
+
+async def test_owner_can_delete_workspace() -> None:
+    service, ws_repo, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Doomed WS")
+
+    await service.delete(owner, ws_repo._workspaces[created.id], WorkspaceRole.OWNER)
+
+    assert await ws_repo.get_by_id(created.id) is None
+
+
+async def test_admin_cannot_delete_workspace() -> None:
+    service, ws_repo, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(ForbiddenError):
+        await service.delete(
+            owner, ws_repo._workspaces[created.id], WorkspaceRole.ADMIN
+        )
+
+
+async def test_member_cannot_delete_workspace() -> None:
+    service, ws_repo, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(ForbiddenError):
+        await service.delete(
+            owner, ws_repo._workspaces[created.id], WorkspaceRole.MEMBER
+        )
+
+
+async def test_delete_removes_memberships() -> None:
+    member_user = _make_user("member@example.com")
+    service, ws_repo, _ = _make_service(extra_users=[member_user])
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+    await ws_repo.add_member(created.id, member_user.id, WorkspaceRole.MEMBER)
+    assert await ws_repo.count_members(created.id) == 2
+
+    await service.delete(owner, ws_repo._workspaces[created.id], WorkspaceRole.OWNER)
+
+    assert await ws_repo.count_members(created.id) == 0
+
+
+async def test_update_with_no_fields_leaves_workspace_unchanged() -> None:
+    service, _, _ = _make_service()
+    owner = _make_user()
+    created = await service.create(owner, "Stable Name")
+
+    result = await service.update(
+        owner, created.id, WorkspaceRole.OWNER, WorkspaceUpdateInput()
+    )
+
+    assert result.name == "Stable Name"

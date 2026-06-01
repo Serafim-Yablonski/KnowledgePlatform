@@ -10,7 +10,7 @@ from src.domain.documents import (
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult
 from src.domain.user import UserCreationInput
-from src.domain.workspace import WorkspaceStats
+from src.domain.workspace import WorkspaceStats, WorkspaceUpdateInput
 from src.models.api_key import ApiKey
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
@@ -41,6 +41,10 @@ class WorkspaceRepositoryProtocol(Protocol):
 
     async def get_by_id(self, workspace_id: uuid.UUID) -> Workspace | None: ...
 
+    async def update(
+        self, workspace_id: uuid.UUID, data: WorkspaceUpdateInput
+    ) -> Workspace: ...
+
     async def get_by_slug(self, slug: str) -> Workspace | None: ...
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]: ...
@@ -68,6 +72,8 @@ class WorkspaceRepositoryProtocol(Protocol):
     async def count_members(self, workspace_id: uuid.UUID) -> int: ...
 
     async def count_owners_for_update(self, workspace_id: uuid.UUID) -> int: ...
+
+    async def delete(self, workspace_id: uuid.UUID) -> None: ...
 
 
 class DocumentRepositoryProtocol(Protocol):
@@ -137,3 +143,5 @@ class ApiKeyRepositoryProtocol(Protocol):
     async def count_active_for_user(self, user_id: uuid.UUID) -> int: ...
 
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None: ...
+
+    async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None: ...

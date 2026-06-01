@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
-import redis.asyncio as aioredis
 import structlog
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 
@@ -35,7 +34,6 @@ from src.ai.eval.metrics import (
     reciprocal_rank,
 )
 from src.ai.eval.models import EvalCase, EvalCaseResult, EvalMetrics, EvalResults
-from src.core.cache import ResponseCache
 from src.core.config import get_settings
 from src.core.database import async_session_factory
 from src.domain.roles import WorkspaceRole
@@ -306,79 +304,71 @@ class EvalRunner:
 async def _main() -> None:
     cfg = get_settings()
 
-    redis_client = aioredis.Redis.from_url(cfg.REDIS_URL, decode_responses=True)
-    try:
-        embedding_svc = EmbeddingService(
-            api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-            model=cfg.EMBEDDING_MODEL,
-            dimensions=cfg.EMBEDDING_DIMENSIONS,
-            redis_client=redis_client,
+    embedding_svc = EmbeddingService(
+        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
+        model=cfg.EMBEDDING_MODEL,
+        dimensions=cfg.EMBEDDING_DIMENSIONS,
+    )
+
+    async with async_session_factory() as session:
+        await cleanup_stale_eval_workspaces(session)
+
+    async with async_session_factory() as session:
+        from src.repositories.document import SQLAlchemyDocumentRepository
+        from src.services.ai import AIService
+        from src.services.document import DocumentService
+
+        search_repo: SearchRepositoryProtocol = SQLAlchemySearchRepository(session)
+        search_svc = SearchService(
+            search_repo=search_repo,
+            embedding_service=embedding_svc,
         )
-        cache = ResponseCache(redis_client=redis_client)
-
-        async with async_session_factory() as session:
-            await cleanup_stale_eval_workspaces(session)
-
-        async with async_session_factory() as session:
-            from src.repositories.document import SQLAlchemyDocumentRepository
-            from src.services.ai import AIService
-            from src.services.document import DocumentService
-
-            search_repo: SearchRepositoryProtocol = SQLAlchemySearchRepository(session)
-            search_svc = SearchService(
-                search_repo=search_repo,
-                embedding_service=embedding_svc,
-                cache=cache,
-            )
-            doc_svc = DocumentService(
-                repo=SQLAlchemyDocumentRepository(session),
-                session=session,
-            )
-            ai_svc = AIService(
-                search_service=search_svc,
-                document_service=doc_svc,
-            )
-
-            runner = EvalRunner(
-                search_service=search_svc,
-                golden_dataset_path=_GOLDEN_DATASET_PATH,
-                test_docs_dir=_TEST_DOCS_DIR,
-                embedding_service=embedding_svc,
-                ai_service=ai_svc,
-            )
-
-            try:
-                await runner.setup()
-                results = await runner.run()
-            finally:
-                await runner.teardown()
-
-        _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        output_path = _RESULTS_DIR / "current.json"
-        output_path.write_text(
-            json.dumps(results.to_dict(), indent=2),
-            encoding="utf-8",
+        doc_svc = DocumentService(
+            repo=SQLAlchemyDocumentRepository(session),
+            session=session,
+        )
+        ai_svc = AIService(
+            search_service=search_svc,
+            document_service=doc_svc,
         )
 
-        m = results.metrics
-        logger.info(
-            "eval complete",
-            total_cases=m.total_cases,
-            positive_cases=m.positive_cases,
-            negative_cases=m.negative_cases,
-            precision_at_k=round(m.precision_at_k, 3),
-            recall=round(m.recall, 3),
-            mrr=round(m.mrr, 3),
-            negative_rejection_rate=round(m.negative_rejection_rate, 3),
-            p95_latency_ms=round(m.p95_latency_ms),
-            answer_faithfulness=round(m.answer_faithfulness, 3),
-            answer_relevance=round(m.answer_relevance, 3),
-            negative_handling_rate=round(m.negative_handling_rate, 3),
-            output_path=str(output_path),
+        runner = EvalRunner(
+            search_service=search_svc,
+            golden_dataset_path=_GOLDEN_DATASET_PATH,
+            test_docs_dir=_TEST_DOCS_DIR,
+            embedding_service=embedding_svc,
+            ai_service=ai_svc,
         )
 
-    finally:
-        await redis_client.aclose()
+        try:
+            await runner.setup()
+            results = await runner.run()
+        finally:
+            await runner.teardown()
+
+    _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = _RESULTS_DIR / "current.json"
+    output_path.write_text(
+        json.dumps(results.to_dict(), indent=2),
+        encoding="utf-8",
+    )
+
+    m = results.metrics
+    logger.info(
+        "eval complete",
+        total_cases=m.total_cases,
+        positive_cases=m.positive_cases,
+        negative_cases=m.negative_cases,
+        precision_at_k=round(m.precision_at_k, 3),
+        recall=round(m.recall, 3),
+        mrr=round(m.mrr, 3),
+        negative_rejection_rate=round(m.negative_rejection_rate, 3),
+        p95_latency_ms=round(m.p95_latency_ms),
+        answer_faithfulness=round(m.answer_faithfulness, 3),
+        answer_relevance=round(m.answer_relevance, 3),
+        negative_handling_rate=round(m.negative_handling_rate, 3),
+        output_path=str(output_path),
+    )
 
 
 def main() -> None:

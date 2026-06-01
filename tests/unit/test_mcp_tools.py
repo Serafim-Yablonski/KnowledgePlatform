@@ -175,12 +175,18 @@ class TestAuthenticateRequest:
     @pytest.mark.asyncio
     async def test_db_api_key_revoked_raises_forbidden(self) -> None:
         """Bearer without dots → DB API key path; revoked key raises ForbiddenError."""
+        from fakeredis.aioredis import FakeRedis
+
         request = MagicMock()
         request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
 
         with (
             patch("src.mcp_server.auth._looks_like_jwt", return_value=False),
             patch("src.mcp_server.auth.get_session") as mock_gs,
+            # _authenticate_db_api_key imports get_redis at call time, so patch
+            # the source module so in-function `from src.core.redis import get_redis`
+            # resolves to a FakeRedis that doesn't require a real Redis process.
+            patch("src.core.redis.get_redis", return_value=FakeRedis()),
         ):
             session = MagicMock()
 
