@@ -66,12 +66,18 @@ async def _authenticate_jwt(token: str) -> User:
 
 async def _authenticate_db_api_key(raw_key: str, session: AsyncSession) -> User:
     """Authenticate against a database-stored API key (hash lookup)."""
+    from src.core.cache import ResponseCache
+    from src.core.redis import get_redis
     from src.repositories.api_key import SQLAlchemyApiKeyRepository
+    from src.repositories.api_key_cached import CachedApiKeyRepository
 
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    repo = SQLAlchemyApiKeyRepository(session)
+    cache = ResponseCache(get_redis())
+    repo = CachedApiKeyRepository(SQLAlchemyApiKeyRepository(session), cache)
     api_key = await repo.get_by_hash(key_hash)
     if not api_key or not api_key.is_active:
+        raise ForbiddenError("Invalid or revoked API key")
+    if not api_key.user.is_active:
         raise ForbiddenError("Invalid or revoked API key")
     asyncio.create_task(_update_last_used(api_key.id))
     return api_key.user

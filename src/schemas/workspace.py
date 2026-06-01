@@ -21,6 +21,11 @@ class WorkspaceCreate(BaseModel):
     description: Annotated[str, Field(max_length=500)] | None = None
 
 
+class WorkspaceUpdate(BaseModel):
+    name: Annotated[str, Field(min_length=1, max_length=100)] | None = None
+    description: Annotated[str, Field(max_length=500)] | None = None
+
+
 class WorkspaceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

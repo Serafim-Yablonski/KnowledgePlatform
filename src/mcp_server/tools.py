@@ -23,19 +23,22 @@ if TYPE_CHECKING:
 
 
 def _make_workspace_service(session: Any) -> Any:
+    from src.core.cache import ResponseCache
     from src.repositories.user import SQLAlchemyUserRepository
     from src.repositories.workspace import SQLAlchemyWorkspaceRepository
+    from src.repositories.workspace_cached import CachedWorkspaceRepository
     from src.services.workspace import WorkspaceService
 
+    cache = ResponseCache(get_async_redis_client())
+    inner_repo = SQLAlchemyWorkspaceRepository(session)
     return WorkspaceService(
-        workspace_repo=SQLAlchemyWorkspaceRepository(session),
+        workspace_repo=CachedWorkspaceRepository(inner_repo, cache),
         user_repo=SQLAlchemyUserRepository(session),
     )
 
 
-def _make_search_service(session: Any, redis: Any) -> Any:
+def _make_search_service(session: Any) -> Any:
     from src.ai.embeddings import EmbeddingService
-    from src.core.cache import ResponseCache
     from src.core.config import get_settings
     from src.repositories.search import SQLAlchemySearchRepository
     from src.services.search import SearchService
@@ -45,18 +48,15 @@ def _make_search_service(session: Any, redis: Any) -> Any:
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
-        redis_client=redis,
     )
     return SearchService(
         search_repo=SQLAlchemySearchRepository(session),
         embedding_service=embedding_svc,
-        cache=ResponseCache(redis),
     )
 
 
-def _make_ai_service(session: Any, redis: Any) -> Any:
+def _make_ai_service(session: Any) -> Any:
     from src.ai.embeddings import EmbeddingService
-    from src.core.cache import ResponseCache
     from src.core.config import get_settings
     from src.repositories.document import SQLAlchemyDocumentRepository
     from src.repositories.search import SQLAlchemySearchRepository
@@ -69,12 +69,10 @@ def _make_ai_service(session: Any, redis: Any) -> Any:
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
-        redis_client=redis,
     )
     search_svc = SearchService(
         search_repo=SQLAlchemySearchRepository(session),
         embedding_service=embedding_svc,
-        cache=ResponseCache(redis, key_prefix="nexus:ai_search"),
     )
     return AIService(
         search_service=search_svc,
@@ -86,7 +84,6 @@ def _make_ai_service(session: Any, redis: Any) -> Any:
 
 def _make_research_service(session: Any, redis: Any) -> Any:
     from src.ai.embeddings import EmbeddingService
-    from src.core.cache import ResponseCache
     from src.core.config import get_settings
     from src.repositories.search import SQLAlchemySearchRepository
     from src.services.research import ResearchService
@@ -97,12 +94,10 @@ def _make_research_service(session: Any, redis: Any) -> Any:
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
-        redis_client=redis,
     )
     search_svc = SearchService(
         search_repo=SQLAlchemySearchRepository(session),
         embedding_service=embedding_svc,
-        cache=ResponseCache(redis, key_prefix="nexus:research_search"),
     )
     return ResearchService(search_service=search_svc, redis_client=redis)
 
@@ -146,11 +141,10 @@ async def search_documents(
     user = get_mcp_user()
     await _mcp_rate_limit(user.id, "mcp_search", 20, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
-    redis = get_async_redis_client()
     async with get_session() as session:
         workspace_svc = _make_workspace_service(session)
         await workspace_svc.get_user_role(user, ws_uuid)  # ForbiddenError if not member
-        search_svc = _make_search_service(session, redis)
+        search_svc = _make_search_service(session)
         result = await search_svc.search(workspace_id=ws_uuid, query=query, top_k=top_k)
     return [
         {
@@ -180,11 +174,10 @@ async def ask_question(
     user = get_mcp_user()
     await _mcp_rate_limit(user.id, "mcp_ask", 10, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
-    redis = get_async_redis_client()
     async with get_session() as session:
         workspace_svc = _make_workspace_service(session)
         role = await workspace_svc.get_user_role(user, ws_uuid)
-        ai_svc = _make_ai_service(session, redis)
+        ai_svc = _make_ai_service(session)
         answer = await ai_svc.ask(
             workspace_id=ws_uuid,
             user_id=user.id,
@@ -334,20 +327,20 @@ async def set_active_workspace(
 
     async with get_session() as session:
         workspace_svc = _make_workspace_service(session)
-        # get_user_role raises ForbiddenError if the user is not a member
-        role = await workspace_svc.get_user_role(user, ws_uuid)
-        ws = await workspace_svc.get_by_id(user, ws_uuid)
+        _, membership = await workspace_svc.get_workspace_for_user(ws_uuid, user.id)
+        role = membership.role
+        ws_info = await workspace_svc.get_by_id(ws_uuid)
 
     state = get_or_create_session_state(session_id, user)
     state.active_workspace_id = ws_uuid
-    state.active_workspace_name = ws.name
+    state.active_workspace_name = ws_info.name
     state.active_workspace_role = role
 
     return {
         "active_workspace_id": str(ws_uuid),
-        "name": ws.name,
+        "name": ws_info.name,
         "role": str(role),
-        "member_count": ws.member_count,
+        "member_count": ws_info.member_count,
     }
 
 

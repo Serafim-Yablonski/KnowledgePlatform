@@ -256,6 +256,7 @@ async def test_list_members_returns_all(async_client: AsyncClient) -> None:
         ("GET", ""),
         ("POST", "/members"),
         ("GET", "/members"),
+        ("PATCH", ""),
     ],
 )
 async def test_workspace_routes_require_auth(
@@ -267,3 +268,198 @@ async def test_workspace_routes_require_auth(
     url = f"{_WORKSPACES}/{fake_id}{path_suffix}"
     resp = await async_client.request(method, url)
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Update workspace
+# ---------------------------------------------------------------------------
+
+
+async def test_update_workspace_name_returns_200(async_client: AsyncClient) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Before Update"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"name": "After Update"},
+        headers=_auth(token),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "After Update"
+    assert body["id"] == ws_id
+
+
+async def test_update_workspace_slug_is_unchanged(async_client: AsyncClient) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Slug Stable"}, headers=_auth(token)
+    )
+    original_slug = create_resp.json()["slug"]
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"name": "New Name"},
+        headers=_auth(token),
+    )
+    assert resp.json()["slug"] == original_slug
+
+
+async def test_update_workspace_description(async_client: AsyncClient) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Desc WS"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"description": "A useful description"},
+        headers=_auth(token),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["description"] == "A useful description"
+
+
+async def test_update_workspace_member_is_forbidden(async_client: AsyncClient) -> None:
+    token_owner, _ = await _register_and_token(async_client)
+    token_member, member_email = await _register_and_token(async_client)
+
+    ws_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Perm WS"}, headers=_auth(token_owner)
+    )
+    ws_id = ws_resp.json()["id"]
+
+    await async_client.post(
+        f"{_WORKSPACES}/{ws_id}/members",
+        json={"user_email": member_email},
+        headers=_auth(token_owner),
+    )
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"name": "Hacked"},
+        headers=_auth(token_member),
+    )
+    assert resp.status_code == 403
+
+
+async def test_update_workspace_non_member_is_forbidden(
+    async_client: AsyncClient,
+) -> None:
+    token_owner, _ = await _register_and_token(async_client)
+    token_stranger, _ = await _register_and_token(async_client)
+
+    ws_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Private WS"}, headers=_auth(token_owner)
+    )
+    ws_id = ws_resp.json()["id"]
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"name": "Stolen"},
+        headers=_auth(token_stranger),
+    )
+    assert resp.status_code == 403
+
+
+async def test_update_workspace_name_too_long_returns_422(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Valid Name"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"name": "x" * 101},
+        headers=_auth(token),
+    )
+    assert resp.status_code == 422
+
+
+async def test_update_workspace_empty_name_returns_422(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Valid Name"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.patch(
+        f"{_WORKSPACES}/{ws_id}",
+        json={"name": ""},
+        headers=_auth(token),
+    )
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Delete workspace
+# ---------------------------------------------------------------------------
+
+
+async def test_owner_can_delete_workspace(async_client: AsyncClient) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Doomed WS"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.delete(f"{_WORKSPACES}/{ws_id}", headers=_auth(token))
+    assert resp.status_code == 204
+
+    # Workspace is no longer accessible (non-member now)
+    get_resp = await async_client.get(f"{_WORKSPACES}/{ws_id}", headers=_auth(token))
+    assert get_resp.status_code == 403
+
+
+async def test_non_owner_member_cannot_delete_workspace(
+    async_client: AsyncClient,
+) -> None:
+    token_owner, _ = await _register_and_token(async_client)
+    token_member, member_email = await _register_and_token(async_client)
+
+    ws_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Protected WS"}, headers=_auth(token_owner)
+    )
+    ws_id = ws_resp.json()["id"]
+    await async_client.post(
+        f"{_WORKSPACES}/{ws_id}/members",
+        json={"user_email": member_email},
+        headers=_auth(token_owner),
+    )
+
+    resp = await async_client.delete(
+        f"{_WORKSPACES}/{ws_id}", headers=_auth(token_member)
+    )
+    assert resp.status_code == 403
+
+
+async def test_delete_workspace_unauthenticated(async_client: AsyncClient) -> None:
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Auth WS"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+
+    resp = await async_client.delete(f"{_WORKSPACES}/{ws_id}")
+    assert resp.status_code == 401
+
+
+async def test_delete_workspace_not_found_returns_403(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    fake_id = "00000000-0000-0000-0000-000000000099"
+
+    resp = await async_client.delete(f"{_WORKSPACES}/{fake_id}", headers=_auth(token))
+    # get_current_workspace raises ForbiddenError for non-members before service runs
+    assert resp.status_code == 403

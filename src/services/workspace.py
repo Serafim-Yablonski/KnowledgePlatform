@@ -3,9 +3,9 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 
 from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
-from src.domain.roles import PERMISSIONS, ROLE_RANK, WorkspaceRole
+from src.domain.roles import ROLE_RANK, Permission, WorkspaceRole, require_permission
 from src.domain.slug import generate_slug
-from src.domain.workspace import WorkspaceInfo, WorkspaceMember
+from src.domain.workspace import WorkspaceInfo, WorkspaceMember, WorkspaceUpdateInput
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
 from src.repositories.protocols import (
@@ -62,13 +62,30 @@ class WorkspaceService:
             member_count=1,
         )
 
-    async def get_by_id(self, actor: User, workspace_id: uuid.UUID) -> WorkspaceInfo:
-        membership = await self._repo.get_membership(workspace_id, actor.id)
-        if membership is None:
-            raise ForbiddenError("Not a member of this workspace")
+    async def get_by_id(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
         workspace = await self._repo.get_by_id(workspace_id)
         if workspace is None:
             raise NotFoundError("Workspace not found")
+        count = await self._repo.count_members(workspace_id)
+        return WorkspaceInfo(
+            id=workspace.id,
+            name=workspace.name,
+            slug=workspace.slug,
+            description=workspace.description,
+            is_active=workspace.is_active,
+            created_at=workspace.created_at,
+            member_count=count,
+        )
+
+    async def update(
+        self,
+        actor: User,
+        workspace_id: uuid.UUID,
+        role: WorkspaceRole,
+        data: WorkspaceUpdateInput,
+    ) -> WorkspaceInfo:
+        require_permission(role, Permission.UPDATE_WORKSPACE)
+        workspace = await self._repo.update(workspace_id, data)
         count = await self._repo.count_members(workspace_id)
         return WorkspaceInfo(
             id=workspace.id,
@@ -102,16 +119,15 @@ class WorkspaceService:
         self,
         actor: User,
         workspace_id: uuid.UUID,
+        actor_role: WorkspaceRole,
         user_email: str,
         role: WorkspaceRole = WorkspaceRole.MEMBER,
     ) -> WorkspaceMember:
-        membership = await self._repo.get_membership(workspace_id, actor.id)
-        if membership is None or "manage_members" not in PERMISSIONS[membership.role]:
-            raise ForbiddenError("Insufficient permissions to add members")
+        require_permission(actor_role, Permission.MANAGE_MEMBERS)
 
         # Prevent privilege escalation: a role can only be granted if the actor
         # holds an equal or higher rank (e.g. ADMIN cannot make someone OWNER).
-        if ROLE_RANK[role] > ROLE_RANK[membership.role]:
+        if ROLE_RANK[role] > ROLE_RANK[actor_role]:
             raise ForbiddenError("Cannot grant a role higher than your own")
 
         target = await self._user_repo.get_by_email(user_email)
@@ -144,16 +160,11 @@ class WorkspaceService:
 
     async def remove_member(
         self,
-        actor: User,
         workspace_id: uuid.UUID,
+        actor_role: WorkspaceRole,
         target_user_id: uuid.UUID,
     ) -> None:
-        actor_membership = await self._repo.get_membership(workspace_id, actor.id)
-        if (
-            actor_membership is None
-            or "manage_members" not in PERMISSIONS[actor_membership.role]
-        ):
-            raise ForbiddenError("Insufficient permissions to remove members")
+        require_permission(actor_role, Permission.MANAGE_MEMBERS)
 
         target_membership = await self._repo.get_membership(
             workspace_id, target_user_id
@@ -163,7 +174,7 @@ class WorkspaceService:
 
         # Prevent privilege escalation: a role can only remove members of equal
         # or lower rank (e.g. ADMIN cannot remove an OWNER).
-        if ROLE_RANK[target_membership.role] > ROLE_RANK[actor_membership.role]:
+        if ROLE_RANK[target_membership.role] > ROLE_RANK[actor_role]:
             raise ForbiddenError("Cannot remove a member with a higher role")
 
         if target_membership.role == WorkspaceRole.OWNER:
@@ -173,20 +184,22 @@ class WorkspaceService:
 
         await self._repo.remove_member(workspace_id, target_user_id)
 
+    async def delete(
+        self,
+        actor: User,
+        workspace: Workspace,
+        role: WorkspaceRole,
+    ) -> None:
+        require_permission(role, Permission.DELETE_WORKSPACE)
+        await self._repo.delete(workspace.id)
+
     async def get_user_role(
         self, actor: User, workspace_id: uuid.UUID
     ) -> WorkspaceRole:
-        membership = await self._repo.get_membership(workspace_id, actor.id)
-        if membership is None:
-            raise ForbiddenError("Not a member of this workspace")
+        _, membership = await self.get_workspace_for_user(workspace_id, actor.id)
         return membership.role
 
-    async def list_members(
-        self, actor: User, workspace_id: uuid.UUID
-    ) -> list[WorkspaceMember]:
-        membership = await self._repo.get_membership(workspace_id, actor.id)
-        if membership is None:
-            raise ForbiddenError("Not a member of this workspace")
+    async def list_members(self, workspace_id: uuid.UUID) -> list[WorkspaceMember]:
         members = await self._repo.list_members(workspace_id)
         return [
             WorkspaceMember(

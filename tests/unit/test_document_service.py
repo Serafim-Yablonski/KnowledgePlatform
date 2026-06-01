@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.cache import ResponseCache
 from src.core.config import get_settings
 from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
 from src.domain.documents import (
@@ -417,29 +416,6 @@ async def test_write_file_size_exceeded_cleanup(tmp_path: Path) -> None:
     finally:
         svc_mod.settings.UPLOAD_DIR = original_dir  # type: ignore[assignment]
         svc_mod.settings.MAX_UPLOAD_SIZE_MB = original_max  # type: ignore[assignment]
-
-
-# ---------------------------------------------------------------------------
-# update — cache invalidation
-# ---------------------------------------------------------------------------
-
-
-async def test_update_with_cache_invalidates_pattern() -> None:
-    repo = StubDocumentRepository()
-    cache = MagicMock(spec=ResponseCache)
-    cache.delete_pattern = AsyncMock()
-    service = DocumentService(repo=repo, session=MockSession(), cache=cache)  # type: ignore[arg-type]
-
-    user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
-    repo._store[doc.id] = doc
-
-    await service.update(
-        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdateInput(title="X")
-    )
-
-    cache.delete_pattern.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

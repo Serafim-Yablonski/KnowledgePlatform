@@ -58,3 +58,6 @@ class SQLAlchemyApiKeyRepository:
             .values(is_active=False)
         )
         await self._session.commit()
+
+    async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None:
+        pass  # no cache layer here; CachedApiKeyRepository overrides this

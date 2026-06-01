@@ -11,7 +11,7 @@ from fastapi import Depends, Response
 from redis.exceptions import RedisError
 
 from src.core.exceptions import RateLimitError
-from src.core.redis import get_redis
+from src.core.redis import PREFIX_RATELIMIT, get_redis
 from src.models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -38,7 +38,7 @@ class SlidingWindowRateLimiter:
         self._window_seconds = window_seconds
 
     async def check(self, identifier: str) -> RateLimitResult:
-        key = f"nexus:ratelimit:{self._key_prefix}:{identifier}"
+        key = f"{PREFIX_RATELIMIT}:{self._key_prefix}:{identifier}"
         now = time.time()
         window_start = now - self._window_seconds
         # Unique member per request: nanosecond timestamp avoids overwriting

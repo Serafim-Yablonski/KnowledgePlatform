@@ -1,17 +1,13 @@
-"""Google Gemini embedding service backed by a Redis cache.
+"""Google Gemini embedding service.
 
 Switching to OpenAI or Voyage requires changing the URL, request body format, and
-batch limit. The cache key includes model+dims so provider switches don't serve stale
-embeddings. All documents must be re-embedded after switching — trigger via the
+batch limit. All documents must be re-embedded after switching — trigger via the
 re-indexing pipeline (bump Document.version and re-dispatch embed_chunks tasks).
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
-import time
 from typing import Any
 
 import httpx
@@ -22,7 +18,6 @@ logger = structlog.get_logger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 _BATCH_LIMIT = 100  # Gemini batchEmbedContents limit (NOT 2048 like OpenAI)
-_CACHE_TTL = 86_400  # 24 hours
 
 
 class EmbeddingService:
@@ -31,19 +26,11 @@ class EmbeddingService:
         api_key: str,
         model: str,
         dimensions: int,
-        redis_client: Any,  # redis.asyncio.Redis
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
-        self._redis = redis_client
         self._url = f"{_GEMINI_BASE}/{model}:batchEmbedContents?key={api_key}"
-
-    def _cache_key(self, text: str) -> str:
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        # Include model and dims so any provider/config switch automatically
-        # invalidates all cached embeddings for that combination.
-        return f"nexus:emb:{self._model}:{self._dimensions}:{digest}"
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -54,46 +41,8 @@ class EmbeddingService:
             model=self._model,
             dimensions=self._dimensions,
             embedding_batch_size=len(texts),
-        ) as span:
-            keys = [self._cache_key(t) for t in texts]
-
-            # Single MGET to check all keys at once.
-            cached_values: list[str | None] = await self._redis.mget(*keys)
-            results: list[list[float] | None] = [
-                json.loads(v) if v is not None else None for v in cached_values
-            ]
-
-            miss_indices = [i for i, r in enumerate(results) if r is None]
-            miss_texts = [texts[i] for i in miss_indices]
-
-            cache_hits = len(texts) - len(miss_indices)
-            cache_misses = len(miss_indices)
-            span.set_attribute("cache_hits", cache_hits)
-            span.set_attribute("cache_misses", cache_misses)
-            # Gemini charges per character; total_chars on cache-miss texts is
-            # the direct cost input for a dashboard query.
-            span.set_attribute("total_chars", sum(len(t) for t in miss_texts))
-
-            if miss_texts:
-                api_start = time.monotonic()
-                fetched = await self._fetch_embeddings(miss_texts)
-                api_ms = round((time.monotonic() - api_start) * 1000)
-                span.set_attribute("api_latency_ms", api_ms)
-
-                # Write new embeddings back to Redis in a pipeline.
-                pipe = self._redis.pipeline()
-                for idx, embedding in zip(miss_indices, fetched, strict=True):
-                    results[idx] = embedding
-                    pipe.set(keys[idx], json.dumps(embedding), ex=_CACHE_TTL)
-                await pipe.execute()
-
-        filled: list[list[float]] = [r for r in results if r is not None]
-        if len(filled) != len(texts):
-            raise RuntimeError(
-                f"Embedding result count mismatch: "
-                f"expected {len(texts)}, got {len(filled)}"
-            )
-        return filled
+        ):
+            return await self._fetch_embeddings(texts)
 
     async def embed_query(self, text: str) -> list[float]:
         embeddings = await self.embed_texts([text])
@@ -114,7 +63,7 @@ class EmbeddingService:
     async def _call_api(
         self, client: httpx.AsyncClient, texts: list[str]
     ) -> list[list[float]]:
-        payload = {
+        payload: dict[str, Any] = {
             "requests": [
                 {
                     "model": f"models/{self._model}",

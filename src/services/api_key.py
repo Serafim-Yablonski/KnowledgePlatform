@@ -36,7 +36,13 @@ class ApiKeyService:
         api_key = await self._repo.get_by_hash(key_hash)
         if api_key is None or not api_key.is_active:
             raise ForbiddenError("Invalid or revoked API key")
+        if not api_key.user.is_active:
+            raise ForbiddenError("Invalid or revoked API key")
         return api_key.user
+
+    async def invalidate_user_keys(self, user_id: uuid.UUID) -> None:
+        """Invalidate all cached API key lookups for a user."""
+        await self._repo.invalidate_all_for_user(user_id)
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[ApiKey]:
         return await self._repo.list_for_user(user_id)

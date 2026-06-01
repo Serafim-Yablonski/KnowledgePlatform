@@ -28,9 +28,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app, token=cfg.LOGFIRE_TOKEN or None, environment=cfg.ENVIRONMENT
     )
 
-    redis_client = await init_redis()
+    await init_redis()
     app.state.engine = engine
-    app.state.redis = redis_client
 
     from src.mcp_server.server import get_mcp_session_manager
 

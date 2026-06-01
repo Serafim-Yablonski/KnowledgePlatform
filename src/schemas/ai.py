@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 class SourceReference(BaseModel):
@@ -30,5 +30,5 @@ class AnswerResponse(BaseModel):
 
 class AskRequest(BaseModel):
     question: Annotated[
-        str, Field(min_length=1, max_length=2000, strip_whitespace=True)
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
     ]

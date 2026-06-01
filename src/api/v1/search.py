@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from typing import cast
-
 from fastapi import APIRouter, Depends
 
 from src.core.dependencies import get_current_workspace, get_search_service
 from src.core.rate_limit import rate_limit
-from src.domain.search import SearchResults
 from src.models.workspace import Workspace
 from src.schemas.search import SearchRequest, SearchResponse, SearchResultItem
 from src.services.search import SearchService
@@ -29,15 +26,11 @@ async def search_documents(
     workspace: Workspace = Depends(get_current_workspace),
     service: SearchService = Depends(get_search_service),
 ) -> SearchResponse:
-    # cast: @cached erases return type to Any; service.search declares SearchResults
-    domain = cast(
-        SearchResults,
-        await service.search(
-            workspace_id=workspace.id,
-            query=body.query,
-            top_k=body.top_k,
-            min_score=body.min_score,
-        ),
+    domain = await service.search(
+        workspace_id=workspace.id,
+        query=body.query,
+        top_k=body.top_k,
+        min_score=body.min_score,
     )
     return SearchResponse(
         results=[

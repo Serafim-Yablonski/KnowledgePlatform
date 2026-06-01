@@ -17,7 +17,7 @@ from src.ai.graphs.state import (
 )
 from src.core.config import get_settings
 from src.core.observability import set_llm_span_attrs
-from src.schemas.search import SearchResponse
+from src.domain.search import SearchResults
 from src.services.search import SearchService
 
 logger = structlog.get_logger(__name__)
@@ -80,8 +80,8 @@ async def plan_research(state: ResearchState) -> dict[str, object]:
         set_llm_span_attrs(
             span,
             get_settings().LLM_MODEL,
-            usage.request_tokens or 0,
-            usage.response_tokens or 0,
+            usage.input_tokens or 0,
+            usage.output_tokens or 0,
         )
     logger.info("research plan created", queries=result.output.queries)
     return {"plan": result.output, "iteration_count": 0, "gap_queries": []}
@@ -100,7 +100,7 @@ def make_retrieve_node(
 
         # Sequential: all queries share one AsyncSession; asyncio.gather would
         # cause concurrent operations on the same connection (InvalidRequestError).
-        responses: list[SearchResponse] = []
+        responses: list[SearchResults] = []
         for q in queries:
             responses.append(
                 await search_service.search(workspace_id=workspace_id, query=q)
@@ -163,8 +163,8 @@ async def evaluate_sufficiency(state: ResearchState) -> dict[str, object]:
         set_llm_span_attrs(
             span,
             get_settings().LLM_MODEL,
-            usage.request_tokens or 0,
-            usage.response_tokens or 0,
+            usage.input_tokens or 0,
+            usage.output_tokens or 0,
         )
 
     ev = result.output
@@ -221,8 +221,8 @@ def make_synthesize_node(
             set_llm_span_attrs(
                 span,
                 get_settings().LLM_STRONG_MODEL,
-                usage.request_tokens or 0,
-                usage.response_tokens or 0,
+                usage.input_tokens or 0,
+                usage.output_tokens or 0,
             )
             span.set_attribute("synthesis_length", len(full_text))
 

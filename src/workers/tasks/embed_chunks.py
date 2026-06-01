@@ -5,7 +5,6 @@ import time
 import uuid
 
 import logfire
-import redis.asyncio as aioredis
 import sqlalchemy as sa
 import structlog
 from celery import Task
@@ -27,20 +26,13 @@ async def _run_embedding(
     api_key: str,
     model: str,
     dimensions: int,
-    redis_url: str,
 ) -> list[list[float]]:
-    """Run async embedding in asyncio.run(). Creates and closes its own Redis client."""
-    redis_client = aioredis.Redis.from_url(redis_url, decode_responses=True)
-    try:
-        service = EmbeddingService(
-            api_key=api_key,
-            model=model,
-            dimensions=dimensions,
-            redis_client=redis_client,
-        )
-        return await service.embed_texts(texts)
-    finally:
-        await redis_client.aclose()
+    service = EmbeddingService(
+        api_key=api_key,
+        model=model,
+        dimensions=dimensions,
+    )
+    return await service.embed_texts(texts)
 
 
 @celery_app.task(  # type: ignore[untyped-decorator]
@@ -92,7 +84,6 @@ def embed_chunks(self: Task, document_id: str) -> None:
                     api_key=settings.GOOGLE_API_KEY,
                     model=settings.EMBEDDING_MODEL,
                     dimensions=settings.EMBEDDING_DIMENSIONS,
-                    redis_url=settings.REDIS_URL,
                 )
             )
         except Exception as exc:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
 from fastapi import Depends, Request
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session
 from src.core.exceptions import UnauthorizedError
 from src.core.redis import get_redis
+from src.domain.roles import WorkspaceRole
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.services.document import DocumentService
@@ -49,24 +50,19 @@ async def get_current_user(
 
 def get_document_service(
     session: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis),
 ) -> DocumentService:
-    from src.core.cache import ResponseCache
     from src.repositories.document import SQLAlchemyDocumentRepository
 
     return DocumentService(
         repo=SQLAlchemyDocumentRepository(session),
         session=session,
-        cache=ResponseCache(redis),
     )
 
 
 def get_ai_service(
     session: AsyncSession = Depends(get_db),
-    redis: Any = Depends(get_redis),
 ) -> AIService:
     from src.ai.embeddings import EmbeddingService
-    from src.core.cache import ResponseCache
     from src.core.config import get_settings
     from src.repositories.document import SQLAlchemyDocumentRepository
     from src.repositories.search import SQLAlchemySearchRepository
@@ -77,13 +73,11 @@ def get_ai_service(
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
-        redis_client=redis,
     )
     return AIService(
         search_service=SearchService(
             search_repo=SQLAlchemySearchRepository(session),
             embedding_service=embedding_svc,
-            cache=ResponseCache(redis, key_prefix="nexus:ai_search"),
         ),
         document_service=DocumentService(
             repo=SQLAlchemyDocumentRepository(session),
@@ -94,10 +88,8 @@ def get_ai_service(
 
 def get_search_service(
     session: AsyncSession = Depends(get_db),
-    redis: Any = Depends(get_redis),
 ) -> SearchService:
     from src.ai.embeddings import EmbeddingService
-    from src.core.cache import ResponseCache
     from src.core.config import get_settings
     from src.repositories.search import SQLAlchemySearchRepository
 
@@ -106,12 +98,10 @@ def get_search_service(
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
-        redis_client=redis,
     )
     return SearchService(
         search_repo=SQLAlchemySearchRepository(session),
         embedding_service=embedding_svc,
-        cache=ResponseCache(redis),
     )
 
 
@@ -122,20 +112,34 @@ def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthService:
     return AuthService(SQLAlchemyUserRepository(session))
 
 
-def get_api_key_service(session: AsyncSession = Depends(get_db)) -> ApiKeyService:
+def get_api_key_service(
+    session: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> ApiKeyService:
+    from src.core.cache import ResponseCache
     from src.repositories.api_key import SQLAlchemyApiKeyRepository
+    from src.repositories.api_key_cached import CachedApiKeyRepository
     from src.services.api_key import ApiKeyService
 
-    return ApiKeyService(SQLAlchemyApiKeyRepository(session))
+    cache = ResponseCache(redis)
+    inner = SQLAlchemyApiKeyRepository(session)
+    return ApiKeyService(CachedApiKeyRepository(inner, cache))
 
 
-def get_workspace_service(session: AsyncSession = Depends(get_db)) -> WorkspaceService:
+def get_workspace_service(
+    session: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+) -> WorkspaceService:
+    from src.core.cache import ResponseCache
     from src.repositories.user import SQLAlchemyUserRepository
     from src.repositories.workspace import SQLAlchemyWorkspaceRepository
+    from src.repositories.workspace_cached import CachedWorkspaceRepository
     from src.services.workspace import WorkspaceService
 
+    cache = ResponseCache(redis)
+    inner_repo = SQLAlchemyWorkspaceRepository(session)
     return WorkspaceService(
-        workspace_repo=SQLAlchemyWorkspaceRepository(session),
+        workspace_repo=CachedWorkspaceRepository(inner_repo, cache),
         user_repo=SQLAlchemyUserRepository(session),
     )
 
@@ -151,12 +155,18 @@ async def get_current_workspace(
     return workspace
 
 
+def get_workspace_role(
+    request: Request,
+    _workspace: Workspace = Depends(get_current_workspace),
+) -> WorkspaceRole:
+    return request.state.workspace_role  # type: ignore[no-any-return]
+
+
 def get_research_service(
     session: AsyncSession = Depends(get_db),
-    redis: Any = Depends(get_redis),
+    redis: aioredis.Redis = Depends(get_redis),
 ) -> ResearchService:
     from src.ai.embeddings import EmbeddingService  # noqa: PLC0415
-    from src.core.cache import ResponseCache  # noqa: PLC0415
     from src.core.config import get_settings  # noqa: PLC0415
     from src.repositories.search import SQLAlchemySearchRepository  # noqa: PLC0415
     from src.services.research import ResearchService  # noqa: PLC0415
@@ -166,11 +176,9 @@ def get_research_service(
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
-        redis_client=redis,
     )
     search_svc = SearchService(
         search_repo=SQLAlchemySearchRepository(session),
         embedding_service=embedding_svc,
-        cache=ResponseCache(redis, key_prefix="nexus:research_search"),
     )
     return ResearchService(search_service=search_svc, redis_client=redis)

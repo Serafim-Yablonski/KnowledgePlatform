@@ -27,6 +27,12 @@ class WorkspaceInfo:
 
 
 @dataclass
+class WorkspaceUpdateInput:
+    name: str | None = None
+    description: str | None = None
+
+
+@dataclass
 class WorkspaceMember:
     user_id: uuid.UUID
     email: str

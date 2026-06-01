@@ -116,6 +116,15 @@ class MCPSettings(BaseSettings):
         return self
 
 
+class CacheSettings(BaseSettings):
+    model_config = _ENV_CONFIG
+
+    CACHE_TTL_WORKSPACE: int = 300  # seconds; override per environment via env var
+    CACHE_TTL_MEMBERSHIP: int = 300
+    # Safety-net TTL — revocation propagates via explicit cache.delete(), not expiry.
+    CACHE_TTL_API_KEY: int = 300
+
+
 _DEV_SECRET = "dev-secret-key-change-before-production"
 
 
@@ -127,6 +136,7 @@ class Settings(
     ObservabilitySettings,
     AppSettings,
     MCPSettings,
+    CacheSettings,
 ):
     model_config = _ENV_CONFIG
 
