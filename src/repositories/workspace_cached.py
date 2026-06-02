@@ -82,9 +82,10 @@ def _deserialize_membership(data: Any) -> WorkspaceMembership | None:
 
 class CachedWorkspaceRepository:
     """Wraps WorkspaceRepositoryProtocol with a read-through cache for
-    get_by_id and get_membership.  All mutation methods invalidate affected
-    cache keys before delegating to the inner repository so readers never
-    observe stale data after a write commits."""
+    get_by_id and get_membership. Mutations commit via the inner repository
+    first, then invalidate the cache — this prevents a concurrent reader from
+    re-populating the cache with pre-commit (stale) data during the write
+    window."""
 
     def __init__(
         self,
@@ -119,15 +120,15 @@ class CachedWorkspaceRepository:
         )
 
     # ------------------------------------------------------------------
-    # Mutations — invalidate before delegating so no stale cache window
-    # exists after the DB write commits.
+    # Mutations — commit via inner repo first, then invalidate cache.
     # ------------------------------------------------------------------
 
     async def update(
         self, workspace_id: uuid.UUID, data: WorkspaceUpdateInput
     ) -> Workspace:
+        result = await self._inner.update(workspace_id, data)
         await self._cache.delete(CacheKeys.workspace(workspace_id))
-        return await self._inner.update(workspace_id, data)
+        return result
 
     async def add_member(
         self,
@@ -136,17 +137,20 @@ class CachedWorkspaceRepository:
         role: WorkspaceRole,
         invited_by_id: uuid.UUID | None = None,
     ) -> WorkspaceMembership:
+        result = await self._inner.add_member(
+            workspace_id, user_id, role, invited_by_id
+        )
         await self._cache.delete(CacheKeys.membership(workspace_id, user_id))
-        return await self._inner.add_member(workspace_id, user_id, role, invited_by_id)
+        return result
 
     async def remove_member(self, workspace_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        await self._cache.delete(CacheKeys.membership(workspace_id, user_id))
         await self._inner.remove_member(workspace_id, user_id)
+        await self._cache.delete(CacheKeys.membership(workspace_id, user_id))
 
     async def delete(self, workspace_id: uuid.UUID) -> None:
+        await self._inner.delete(workspace_id)
         await self._cache.delete(CacheKeys.workspace(workspace_id))
         await self._cache.delete_pattern(CacheKeys.membership_pattern(workspace_id))
-        await self._inner.delete(workspace_id)
 
     # ------------------------------------------------------------------
     # Pure delegation — no caching
@@ -166,6 +170,11 @@ class CachedWorkspaceRepository:
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]:
         return await self._inner.list_for_user(user_id)
+
+    async def list_for_user_with_counts(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Workspace, int]]:
+        return await self._inner.list_for_user_with_counts(user_id)
 
     async def list_members(self, workspace_id: uuid.UUID) -> list[WorkspaceMembership]:
         return await self._inner.list_members(workspace_id)

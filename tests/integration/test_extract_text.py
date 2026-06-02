@@ -256,6 +256,69 @@ def test_extract_document_not_found_returns_silently(
     extract_text.run(str(uuid.uuid4()))
 
 
+def test_extract_soft_time_limit_marks_failed(
+    tmp_path: Path,
+    setup_session: Session,
+    patched_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SoftTimeLimitExceeded during PDF parsing marks document FAILED instead of
+    leaving it stuck in PROCESSING."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from src.workers.tasks.extract_text import extract_text
+
+    file_path = tmp_path / "doc_soft.txt"
+    file_path.write_text("content", encoding="utf-8")
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_document(setup_session, ws, user, str(file_path))
+
+    def _timeout(fp: str, ct: ContentType) -> str:
+        raise SoftTimeLimitExceeded("soft limit exceeded")
+
+    import sys
+
+    extract_mod = sys.modules["src.workers.tasks.extract_text"]
+    monkeypatch.setattr(extract_mod, "_read_text", _timeout)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        extract_text.run(str(doc.id))
+
+    setup_session.refresh(doc)
+    assert doc.status == DocumentStatus.FAILED
+
+
+def test_extract_dispatches_embed(
+    tmp_path: Path,
+    setup_session: Session,
+    patched_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful extraction dispatches embed_chunks with the document id."""
+    from unittest.mock import MagicMock
+
+    from src.workers.tasks.extract_text import extract_text
+
+    content = "dispatch test content"
+    file_path = tmp_path / "doc_dispatch.txt"
+    file_path.write_text(content, encoding="utf-8")
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_document(setup_session, ws, user, str(file_path))
+
+    import src.workers.tasks.embed_chunks as embed_mod
+
+    mock_delay = MagicMock()
+    monkeypatch.setattr(embed_mod.embed_chunks, "delay", mock_delay)
+
+    extract_text.run(str(doc.id))
+
+    mock_delay.assert_called_once_with(str(doc.id))
+
+
 def test_extract_retry_on_io_error(
     tmp_path: Path,
     setup_session: Session,

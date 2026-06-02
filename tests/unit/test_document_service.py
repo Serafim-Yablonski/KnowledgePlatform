@@ -316,7 +316,7 @@ async def test_get_wrong_workspace_raises_not_found() -> None:
     repo._store[doc.id] = doc
 
     with pytest.raises(NotFoundError):
-        await service.get(user, workspace, doc.id)
+        await service.get(workspace, doc.id)
 
 
 # ---------------------------------------------------------------------------

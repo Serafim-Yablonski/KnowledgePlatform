@@ -3,7 +3,7 @@ import uuid
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from src.domain.roles import WorkspaceRole
 from src.domain.workspace import WorkspaceUpdateInput
@@ -79,6 +79,31 @@ class SQLAlchemyWorkspaceRepository:
             .order_by(WorkspaceMembership.joined_at.desc())
         )
         return list(result.all())
+
+    async def list_for_user_with_counts(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Workspace, int]]:
+        # Two aliases of workspace_memberships: one to filter by the requesting
+        # user (INNER JOIN), one to count all members per workspace (LEFT JOIN).
+        # GROUP BY workspace PK; MAX on the user's joined_at satisfies PostgreSQL's
+        # non-aggregate ORDER BY rule while preserving the correct sort order
+        # (exactly one row per user+workspace pair means MAX == the actual value).
+        wm_user = aliased(WorkspaceMembership)
+        wm_all = aliased(WorkspaceMembership)
+        rows = await self._session.execute(
+            select(Workspace, func.count(wm_all.user_id).label("member_count"))
+            .join(
+                wm_user,
+                sa.and_(
+                    wm_user.workspace_id == Workspace.id,
+                    wm_user.user_id == user_id,
+                ),
+            )
+            .outerjoin(wm_all, wm_all.workspace_id == Workspace.id)
+            .group_by(Workspace.id)
+            .order_by(func.max(wm_user.joined_at).desc())
+        )
+        return [(row.Workspace, int(row.member_count)) for row in rows]
 
     async def add_member(
         self,

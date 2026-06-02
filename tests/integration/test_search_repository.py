@@ -57,7 +57,7 @@ async def test_workspace(db_session: AsyncSession, test_user: User) -> Workspace
     return ws
 
 
-async def _create_ready_doc(
+async def _create_indexed_doc(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     uploaded_by: uuid.UUID,
@@ -71,7 +71,7 @@ async def _create_ready_doc(
         file_path=f"/tmp/{uuid.uuid4()}.txt",
         file_size_bytes=100,
         uploaded_by=uploaded_by,
-        status=DocumentStatus.READY,
+        status=DocumentStatus.INDEXED,
         version=version,
     )
     session.add(doc)
@@ -113,7 +113,7 @@ async def test_similar_chunk_ranks_first(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
     """Chunk with embedding closest to the query should rank first."""
-    doc = await _create_ready_doc(db_session, test_workspace.id, test_user.id)
+    doc = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
     chunk_v1 = await _create_chunk(
         db_session, doc.id, _V1, text="dimension zero content"
     )
@@ -147,8 +147,8 @@ async def test_workspace_isolation(
     )
     await db_session.flush()
 
-    doc_a = await _create_ready_doc(db_session, test_workspace.id, test_user.id)
-    doc_b = await _create_ready_doc(db_session, ws_b.id, test_user.id)
+    doc_a = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
+    doc_b = await _create_indexed_doc(db_session, ws_b.id, test_user.id)
 
     chunk_a = await _create_chunk(db_session, doc_a.id, _V1, text="workspace A chunk")
     await _create_chunk(db_session, doc_b.id, _V1, text="workspace B chunk")
@@ -171,7 +171,7 @@ async def test_version_filtering_excludes_stale_chunks(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
     """Chunks with version < document.version must not be returned."""
-    doc = await _create_ready_doc(
+    doc = await _create_indexed_doc(
         db_session, test_workspace.id, test_user.id, version=2
     )
 
@@ -200,7 +200,7 @@ async def test_min_score_filters_low_similarity(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
     """Chunks with similarity below min_score must be excluded."""
-    doc = await _create_ready_doc(db_session, test_workspace.id, test_user.id)
+    doc = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
 
     # _V1 is very similar to _QUERY_NEAR_V1 (score ~0.99)
     high_chunk = await _create_chunk(db_session, doc.id, _V1, text="high sim")
@@ -221,10 +221,10 @@ async def test_min_score_filters_low_similarity(
 
 
 @pytest.mark.asyncio
-async def test_non_ready_documents_excluded(
+async def test_non_indexed_documents_excluded(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
-    """Chunks belonging to PENDING/PROCESSING/FAILED documents must not appear."""
+    """Chunks belonging to non-INDEXED documents must not appear in results."""
     pending_doc = Document(
         workspace_id=test_workspace.id,
         title="Pending",
@@ -255,7 +255,7 @@ async def test_non_ready_documents_excluded(
 async def test_top_k_limits_results(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
-    doc = await _create_ready_doc(db_session, test_workspace.id, test_user.id)
+    doc = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
     for i in range(5):
         await _create_chunk(db_session, doc.id, _V1, chunk_index=i)
 

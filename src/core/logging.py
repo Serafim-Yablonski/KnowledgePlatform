@@ -17,7 +17,9 @@ def _inject_otel_context(
     return event_dict
 
 
-def setup_logging(*, environment: str = "development") -> None:
+def setup_logging(*, environment: str = "development", log_level: str = "INFO") -> None:
+    level = getattr(logging, log_level.upper(), logging.INFO)
+
     shared_processors: list[structlog.types.Processor] = [
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
@@ -34,7 +36,7 @@ def setup_logging(*, environment: str = "development") -> None:
     # structlog-native loggers write directly via PrintLoggerFactory.
     structlog.configure(
         processors=[*shared_processors, renderer],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        wrapper_class=structlog.make_filtering_bound_logger(level),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
@@ -56,4 +58,4 @@ def setup_logging(*, environment: str = "development") -> None:
     handler.setFormatter(formatter)
     root_logger = logging.getLogger()
     root_logger.handlers = [handler]
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(level)

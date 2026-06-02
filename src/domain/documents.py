@@ -10,6 +10,7 @@ class DocumentStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
     READY = "ready"
+    INDEXED = "indexed"  # chunks stored and searchable
     FAILED = "failed"
 
 

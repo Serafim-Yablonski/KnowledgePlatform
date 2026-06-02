@@ -1,4 +1,5 @@
-from src.workers.tasks.embed_chunks import embed_chunks
-from src.workers.tasks.extract_text import extract_text
-
-__all__ = ["embed_chunks", "extract_text"]
+# Import submodules so Celery's include=["src.workers.tasks"] discovers tasks on
+# worker startup. Using submodule imports (not from-imports) avoids shadowing the
+# submodule names in the package namespace, which breaks monkeypatching in tests.
+import src.workers.tasks.embed_chunks  # noqa: F401
+import src.workers.tasks.extract_text  # noqa: F401
