@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -62,3 +62,8 @@ class ResearchState(TypedDict):
     is_sufficient: bool
     human_approved: bool
     human_feedback: str | None
+
+
+class HumanReviewInput(TypedDict):
+    approved: bool
+    feedback: NotRequired[str | None]
