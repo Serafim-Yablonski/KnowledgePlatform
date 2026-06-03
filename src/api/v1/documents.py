@@ -3,16 +3,25 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile, status
 
+from src.core.config import get_settings
 from src.core.dependencies import (
     get_current_user,
     get_current_workspace,
     get_document_service,
 )
+from src.core.rate_limit import workspace_rate_limit
 from src.domain.documents import DocumentStatus, DocumentUpdateInput, encode_cursor
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
 from src.services.document import DocumentService
+
+_cfg = get_settings()
+_upload_rate_limit = workspace_rate_limit(
+    "document_upload",
+    _cfg.RATE_LIMIT_DOCUMENT_UPLOAD_REQUESTS,
+    _cfg.RATE_LIMIT_DOCUMENT_UPLOAD_WINDOW,
+)
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/documents",
@@ -20,7 +29,12 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_upload_rate_limit)],
+)
 async def upload_document(
     title: Annotated[str, Form(min_length=1, max_length=255)],
     file: UploadFile,
@@ -38,13 +52,12 @@ async def upload_document(
 @router.get("", response_model=PaginatedResponse[DocumentResponse])
 async def list_documents(
     workspace: Workspace = Depends(get_current_workspace),
-    actor: User = Depends(get_current_user),
     cursor: str | None = Query(default=None),
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     doc_status: DocumentStatus | None = Query(default=None, alias="status"),
     service: DocumentService = Depends(get_document_service),
 ) -> PaginatedResponse[DocumentResponse]:
-    page = await service.list(actor, workspace, cursor, limit, doc_status)
+    page = await service.list(workspace, cursor, limit, doc_status)
     return PaginatedResponse(
         items=[DocumentResponse.model_validate(d) for d in page.items],
         next_cursor=encode_cursor(page.next_cursor) if page.next_cursor else None,
@@ -56,10 +69,9 @@ async def list_documents(
 async def get_document(
     document_id: uuid.UUID,
     workspace: Workspace = Depends(get_current_workspace),
-    actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    doc = await service.get(actor, workspace, document_id)
+    doc = await service.get(workspace, document_id)
     return DocumentResponse.model_validate(doc)
 
 

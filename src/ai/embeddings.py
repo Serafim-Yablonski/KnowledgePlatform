@@ -8,6 +8,7 @@ re-indexing pipeline (bump Document.version and re-dispatch embed_chunks tasks).
 from __future__ import annotations
 
 import asyncio
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -26,11 +27,15 @@ class EmbeddingService:
         api_key: str,
         model: str,
         dimensions: int,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
         self._url = f"{_GEMINI_BASE}/{model}:batchEmbedContents?key={api_key}"
+        # Shared client injected from app lifespan (FastAPI path). Celery tasks
+        # pass None and get a per-call client instead.
+        self._http_client = http_client
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -41,24 +46,33 @@ class EmbeddingService:
             model=self._model,
             dimensions=self._dimensions,
             embedding_batch_size=len(texts),
-        ):
-            return await self._fetch_embeddings(texts)
+        ) as span:
+            t0 = monotonic()
+            result = await self._fetch_embeddings(texts)
+            span.set_attribute(
+                "embedding_api_duration_ms", round((monotonic() - t0) * 1000)
+            )
+            return result
 
     async def embed_query(self, text: str) -> list[float]:
         embeddings = await self.embed_texts([text])
         return embeddings[0]
 
     async def _fetch_embeddings(self, texts: list[str]) -> list[list[float]]:
-        """Call Gemini batchEmbedContents in batches of _BATCH_LIMIT."""
-        all_embeddings: list[list[float]] = []
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for batch_start in range(0, len(texts), _BATCH_LIMIT):
-                batch = texts[batch_start : batch_start + _BATCH_LIMIT]
-                embeddings = await self._call_api(client, batch)
-                all_embeddings.extend(embeddings)
-
-        return all_embeddings
+        """Call Gemini batchEmbedContents with all batches in parallel."""
+        batches = [
+            texts[i : i + _BATCH_LIMIT] for i in range(0, len(texts), _BATCH_LIMIT)
+        ]
+        if self._http_client is not None:
+            results = await asyncio.gather(
+                *[self._call_api(self._http_client, batch) for batch in batches]
+            )
+        else:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                results = await asyncio.gather(
+                    *[self._call_api(client, batch) for batch in batches]
+                )
+        return [embedding for batch_result in results for embedding in batch_result]
 
     async def _call_api(
         self, client: httpx.AsyncClient, texts: list[str]

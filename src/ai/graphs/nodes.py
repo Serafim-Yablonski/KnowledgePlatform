@@ -98,31 +98,42 @@ def make_retrieve_node(
         queries = state["gap_queries"] if state["gap_queries"] else plan.queries
         workspace_id = uuid.UUID(state["workspace_id"])
 
-        # Sequential: all queries share one AsyncSession; asyncio.gather would
-        # cause concurrent operations on the same connection (InvalidRequestError).
-        responses: list[SearchResults] = []
-        for q in queries:
-            responses.append(
-                await search_service.search(workspace_id=workspace_id, query=q)
-            )
-
-        seen: set[tuple[str, str]] = set()
-        new_findings: list[Finding] = []
-        for query, response in zip(queries, responses, strict=True):
-            for item in response.results:
-                dedup_key = (str(item.document_id), item.chunk_text[:100])
-                if dedup_key in seen:
-                    continue
-                seen.add(dedup_key)
-                new_findings.append(
-                    Finding(
-                        text=item.chunk_text,
-                        source_document_id=str(item.document_id),
-                        source_document_title=item.document_title,
-                        relevance_score=item.score,
-                        query_that_found_it=query,
-                    )
+        with logfire.span(
+            "retrieve_evidence",
+            workspace_id=state["workspace_id"],
+            iteration=state["iteration_count"],
+        ) as span:
+            # Sequential: all queries share one AsyncSession; asyncio.gather would
+            # cause concurrent operations on the same connection (InvalidRequestError).
+            responses: list[SearchResults] = []
+            for q in queries:
+                responses.append(
+                    await search_service.search(workspace_id=workspace_id, query=q)
                 )
+
+            seen: set[tuple[str, str]] = set()
+            new_findings: list[Finding] = []
+            total_raw = 0
+            for query, response in zip(queries, responses, strict=True):
+                total_raw += len(response.results)
+                for item in response.results:
+                    dedup_key = (str(item.document_id), item.chunk_text[:100])
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    new_findings.append(
+                        Finding(
+                            text=item.chunk_text,
+                            source_document_id=str(item.document_id),
+                            source_document_title=item.document_title,
+                            relevance_score=item.score,
+                            query_that_found_it=query,
+                        )
+                    )
+
+            span.set_attribute("query_count", len(queries))
+            span.set_attribute("new_findings_count", len(new_findings))
+            span.set_attribute("dedup_skipped_count", total_raw - len(new_findings))
 
         logger.info(
             "evidence retrieved",
@@ -209,26 +220,29 @@ def make_synthesize_node(
         )
 
         full_text = ""
-        with logfire.span(
-            "research_synthesize", workspace_id=state["workspace_id"]
-        ) as span:
-            async with _synthesize_agent.run_stream(prompt) as stream_result:
-                async for chunk in stream_result.stream_text(delta=True):
-                    full_text += chunk
-                    await redis_client.rpush(stream_key, chunk)
-                    await redis_client.publish(stream_key, chunk)
-            usage = stream_result.usage()
-            set_llm_span_attrs(
-                span,
-                get_settings().LLM_STRONG_MODEL,
-                usage.input_tokens or 0,
-                usage.output_tokens or 0,
-            )
-            span.set_attribute("synthesis_length", len(full_text))
-
-        await redis_client.rpush(stream_key, "__DONE__")
-        await redis_client.publish(stream_key, "__DONE__")
-        await redis_client.expire(stream_key, 3600)
+        try:
+            with logfire.span(
+                "research_synthesize", workspace_id=state["workspace_id"]
+            ) as span:
+                async with _synthesize_agent.run_stream(prompt) as stream_result:
+                    async for chunk in stream_result.stream_text(delta=True):
+                        full_text += chunk
+                        await redis_client.rpush(stream_key, chunk)
+                        await redis_client.publish(stream_key, chunk)
+                usage = stream_result.usage()
+                set_llm_span_attrs(
+                    span,
+                    get_settings().LLM_STRONG_MODEL,
+                    usage.input_tokens or 0,
+                    usage.output_tokens or 0,
+                )
+                span.set_attribute("synthesis_length", len(full_text))
+        finally:
+            # Always signal completion and set TTL so the stream consumer
+            # unblocks and Redis cleans up the key, even on LLM errors.
+            await redis_client.rpush(stream_key, "__DONE__")
+            await redis_client.publish(stream_key, "__DONE__")
+            await redis_client.expire(stream_key, 3600)
 
         logger.info("synthesis complete", thread_id=thread_id, length=len(full_text))
         return {"synthesis": full_text}

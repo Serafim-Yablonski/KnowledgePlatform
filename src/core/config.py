@@ -92,6 +92,8 @@ class ObservabilitySettings(BaseSettings):
 
     LOGFIRE_TOKEN: str = ""
     ENVIRONMENT: str = "development"
+    LOG_LEVEL: str = "INFO"
+    SERVICE_NAME: str = "knowledge-platform"
 
 
 class AppSettings(BaseSettings):
@@ -99,6 +101,12 @@ class AppSettings(BaseSettings):
 
     UPLOAD_DIR: str = "/data/uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
+    # Set True when running behind a reverse proxy. Controls ProxyHeadersMiddleware.
+    TRUSTED_PROXY_HEADERS: bool = False
+    # Comma-separated trusted proxy IPs or CIDR ranges; "*" trusts all proxies.
+    # Only used when TRUSTED_PROXY_HEADERS=True. In Docker Compose set this to the
+    # nginx/load-balancer container IP or bridge subnet.
+    TRUSTED_PROXY_IPS: str = "127.0.0.1"
 
 
 class MCPSettings(BaseSettings):
@@ -125,6 +133,63 @@ class CacheSettings(BaseSettings):
     CACHE_TTL_API_KEY: int = 300
 
 
+class CelerySettings(BaseSettings):
+    model_config = _ENV_CONFIG
+
+    # Restart workers after N tasks — prevents memory creep from asyncio.run() loops.
+    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = 200
+
+    # extract_text: CPU-bound PDF parsing; 50 MB upload ceiling → ~2 min worst case.
+    CELERY_EXTRACT_SOFT_TIME_LIMIT: int = 120  # SoftTimeLimitExceeded at this point
+    CELERY_EXTRACT_TIME_LIMIT: int = 180  # SIGKILL if soft limit is ignored
+
+    # embed_chunks: I/O-bound embedding API; ~500 chunks × ~100 ms/call ≈ 50 s typical.
+    CELERY_EMBED_SOFT_TIME_LIMIT: int = 300
+    CELERY_EMBED_TIME_LIMIT: int = 360
+
+    # Worker concurrency per queue type. Default 2 is intentionally low for local dev
+    # (git clone on a laptop). Set higher in production: extract→4, embed→10.
+    CELERY_EXTRACT_CONCURRENCY: int = 2
+    CELERY_EMBED_CONCURRENCY: int = 2
+
+
+class RateLimitSettings(BaseSettings):
+    model_config = _ENV_CONFIG
+
+    # Auth endpoints (IP-scoped, unauthenticated)
+    RATE_LIMIT_LOGIN_REQUESTS: int = 10
+    RATE_LIMIT_LOGIN_WINDOW: int = 60
+    RATE_LIMIT_REGISTER_REQUESTS: int = 5
+    RATE_LIMIT_REGISTER_WINDOW: int = 60
+    RATE_LIMIT_REFRESH_REQUESTS: int = 20
+    RATE_LIMIT_REFRESH_WINDOW: int = 60
+    # Authenticated endpoints (user-scoped)
+    RATE_LIMIT_SEARCH_REQUESTS: int = 20
+    RATE_LIMIT_SEARCH_WINDOW: int = 60
+    RATE_LIMIT_AI_ASK_REQUESTS: int = 20
+    RATE_LIMIT_AI_ASK_WINDOW: int = 60
+    RATE_LIMIT_RESEARCH_START_REQUESTS: int = 5
+    RATE_LIMIT_RESEARCH_START_WINDOW: int = 60
+    RATE_LIMIT_RESEARCH_STREAM_REQUESTS: int = 30
+    RATE_LIMIT_RESEARCH_STREAM_WINDOW: int = 60
+    RATE_LIMIT_RESEARCH_REVIEW_REQUESTS: int = 10
+    RATE_LIMIT_RESEARCH_REVIEW_WINDOW: int = 60
+    RATE_LIMIT_RESEARCH_STATUS_REQUESTS: int = 60
+    RATE_LIMIT_RESEARCH_STATUS_WINDOW: int = 60
+    # Workspace-scoped (keyed on user_id:workspace_id)
+    RATE_LIMIT_DOCUMENT_UPLOAD_REQUESTS: int = 10
+    RATE_LIMIT_DOCUMENT_UPLOAD_WINDOW: int = 60
+    # Workspace management
+    RATE_LIMIT_WORKSPACE_CREATE_REQUESTS: int = 10
+    RATE_LIMIT_WORKSPACE_CREATE_WINDOW: int = 60
+    # API key management
+    RATE_LIMIT_API_KEY_CREATE_REQUESTS: int = 10
+    RATE_LIMIT_API_KEY_CREATE_WINDOW: int = 60
+    # When True (default), allow requests through if Redis is unavailable.
+    # Set False to reject with 503 when the rate-limit backend is down.
+    RATE_LIMIT_FAIL_OPEN: bool = True
+
+
 _DEV_SECRET = "dev-secret-key-change-before-production"
 
 
@@ -137,6 +202,8 @@ class Settings(
     AppSettings,
     MCPSettings,
     CacheSettings,
+    CelerySettings,
+    RateLimitSettings,
 ):
     model_config = _ENV_CONFIG
 

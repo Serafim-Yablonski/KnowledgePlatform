@@ -14,7 +14,7 @@ from src.ai.graphs.nodes import (
     make_synthesize_node,
     plan_research,
 )
-from src.ai.graphs.state import ResearchState
+from src.ai.graphs.state import HumanReviewInput, ResearchState
 from src.services.search import SearchService
 
 
@@ -39,11 +39,12 @@ def _should_continue(state: ResearchState) -> str:
 
 
 async def human_review(state: ResearchState) -> dict[str, object]:
-    review_result: dict[str, Any] = interrupt(
-        {"requires_review": True, "synthesis": state["synthesis"]}
+    review_input = cast(
+        HumanReviewInput,
+        interrupt({"requires_review": True, "synthesis": state["synthesis"]}),
     )
-    approved: bool = review_result.get("approved", False)
-    feedback: str | None = review_result.get("feedback")
+    approved: bool = review_input.get("approved", False)
+    feedback: str | None = review_input.get("feedback")
     return {"human_approved": approved, "human_feedback": feedback}
 
 

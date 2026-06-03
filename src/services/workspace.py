@@ -1,5 +1,6 @@
 import uuid
 
+import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
@@ -12,6 +13,8 @@ from src.repositories.protocols import (
     UserRepositoryProtocol,
     WorkspaceRepositoryProtocol,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class WorkspaceService:
@@ -51,6 +54,12 @@ class WorkspaceService:
             workspace_id=workspace.id,
             user_id=actor.id,
             role=WorkspaceRole.OWNER,
+        )
+        logger.info(
+            "workspace created",
+            workspace_id=str(workspace.id),
+            workspace_slug=workspace.slug,
+            actor_id=str(actor.id),
         )
         return WorkspaceInfo(
             id=workspace.id,
@@ -98,22 +107,19 @@ class WorkspaceService:
         )
 
     async def list_for_user(self, actor: User) -> list[WorkspaceInfo]:
-        workspaces = await self._repo.list_for_user(actor.id)
-        result: list[WorkspaceInfo] = []
-        for ws in workspaces:
-            count = await self._repo.count_members(ws.id)
-            result.append(
-                WorkspaceInfo(
-                    id=ws.id,
-                    name=ws.name,
-                    slug=ws.slug,
-                    description=ws.description,
-                    is_active=ws.is_active,
-                    created_at=ws.created_at,
-                    member_count=count,
-                )
+        rows = await self._repo.list_for_user_with_counts(actor.id)
+        return [
+            WorkspaceInfo(
+                id=ws.id,
+                name=ws.name,
+                slug=ws.slug,
+                description=ws.description,
+                is_active=ws.is_active,
+                created_at=ws.created_at,
+                member_count=count,
             )
-        return result
+            for ws, count in rows
+        ]
 
     async def add_member(
         self,
@@ -150,6 +156,13 @@ class WorkspaceService:
         except IntegrityError as exc:
             raise ConflictError("Invitation could not be sent") from exc
 
+        logger.info(
+            "workspace member added",
+            workspace_id=str(workspace_id),
+            actor_id=str(actor.id),
+            target_user_id=str(target.id),
+            role=role.value,
+        )
         return WorkspaceMember(
             user_id=target.id,
             email=target.email,
@@ -183,6 +196,12 @@ class WorkspaceService:
                 raise ConflictError("Cannot remove the last owner of a workspace")
 
         await self._repo.remove_member(workspace_id, target_user_id)
+        logger.info(
+            "workspace member removed",
+            workspace_id=str(workspace_id),
+            actor_role=actor_role.value,
+            target_user_id=str(target_user_id),
+        )
 
     async def delete(
         self,
@@ -192,6 +211,11 @@ class WorkspaceService:
     ) -> None:
         require_permission(role, Permission.DELETE_WORKSPACE)
         await self._repo.delete(workspace.id)
+        logger.info(
+            "workspace deleted",
+            workspace_id=str(workspace.id),
+            actor_id=str(actor.id),
+        )
 
     async def get_user_role(
         self, actor: User, workspace_id: uuid.UUID

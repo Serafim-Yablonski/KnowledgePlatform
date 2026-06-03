@@ -172,8 +172,11 @@ class MCPAuthMiddleware:
             )
             await response(scope, receive, send)
             return
-        except Exception:
-            logger.warning("unexpected error during MCP authentication")
+        except Exception as exc:
+            logger.warning(
+                "unexpected error during MCP authentication",
+                error_type=type(exc).__name__,
+            )
             response = JSONResponse(
                 {"error": {"code": 503, "message": "Service temporarily unavailable"}},
                 status_code=503,

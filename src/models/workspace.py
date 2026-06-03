@@ -43,6 +43,13 @@ class Workspace(HasIDMixin, Base):
 
 class WorkspaceMembership(Base):
     __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        # Secondary index so queries filtering only by user_id (list_for_user,
+        # get_workspace_for_user) use an index scan rather than a full table scan.
+        # The PK (workspace_id, user_id) cannot serve these queries because
+        # user_id is not the leading column.
+        sa.Index("ix_memberships_user_id", "user_id"),
+    )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("workspaces.id", ondelete="CASCADE"),

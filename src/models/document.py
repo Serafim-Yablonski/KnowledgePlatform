@@ -34,7 +34,7 @@ class Document(HasIDMixin, Base):
     file_path: Mapped[str] = mapped_column(sa.String(1024), nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
-        sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+        sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     status: Mapped[DocumentStatus] = mapped_column(
         sa.Enum(DocumentStatus, native_enum=False, length=20),

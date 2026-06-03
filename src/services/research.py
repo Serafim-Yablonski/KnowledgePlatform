@@ -15,18 +15,7 @@ from src.services.search import SearchService
 
 logger = structlog.get_logger(__name__)
 
-_running_tasks: dict[str, asyncio.Task[Any]] = {}
-_task_errors: dict[str, str] = {}
-
 _STREAM_SENTINEL = "__DONE__"
-
-
-def _safe_error(exc: BaseException) -> str:
-    from pydantic_ai.exceptions import ModelHTTPError  # noqa: PLC0415
-
-    if isinstance(exc, ModelHTTPError):
-        return f"LLM service error (HTTP {exc.status_code}). Please retry."
-    return f"Research failed: {type(exc).__name__}"
 
 
 _STREAM_TIMEOUT = 300.0  # 5-minute ceiling for synthesis streaming
@@ -72,19 +61,13 @@ class ResearchService:
             graph.ainvoke(initial_state, config),
             name=f"research:{thread_id}",
         )
-        _running_tasks[thread_id] = task
 
         def _on_done(t: asyncio.Task[Any]) -> None:
-            _running_tasks.pop(thread_id, None)
             if not t.cancelled() and (exc := t.exception()):
                 logger.error(
                     "research task failed",
                     thread_id=thread_id,
                     exc_info=exc,
-                )
-                _task_errors[thread_id] = _safe_error(exc)
-                asyncio.get_event_loop().call_later(
-                    3600, _task_errors.pop, thread_id, None
                 )
 
         task.add_done_callback(_on_done)
@@ -140,10 +123,11 @@ class ResearchService:
             run_status = "awaiting_review"
         elif snapshot.next == ():
             run_status = "completed" if synthesis else "failed"
-        elif thread_id in _running_tasks and not _running_tasks[thread_id].done():
-            run_status = "running"
         else:
-            run_status = "failed"
+            # Graph has remaining nodes — either actively running or failed before
+            # the next checkpoint. We rely on the checkpointer as the source of
+            # truth; "running" is the best we can report without process-local state.
+            run_status = "running"
 
         return ResearchStatus(
             thread_id=thread_id,
@@ -153,7 +137,7 @@ class ResearchService:
             findings_count=len(findings),
             synthesis=synthesis,
             human_approved=human_approved,
-            error=_task_errors.get(thread_id),
+            error=None,
         )
 
     async def stream_synthesis(

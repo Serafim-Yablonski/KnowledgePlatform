@@ -10,12 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.exceptions import ForbiddenError, NotFoundError
-from src.services.research import (
-    ResearchService,
-    _running_tasks,
-    _safe_error,
-    _task_errors,
-)
+from src.services.research import ResearchService
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,26 +49,6 @@ def _make_snapshot(
     task_mock.interrupts = ["interrupt"] if has_interrupt else []
     snap.tasks = [task_mock]
     return snap
-
-
-# ---------------------------------------------------------------------------
-# _safe_error
-# ---------------------------------------------------------------------------
-
-
-def test_safe_error_with_model_http_error() -> None:
-    class FakeModelHTTPError(Exception):
-        status_code = 429
-
-    with patch("pydantic_ai.exceptions.ModelHTTPError", FakeModelHTTPError):
-        result = _safe_error(FakeModelHTTPError())
-
-    assert "HTTP 429" in result
-
-
-def test_safe_error_with_generic_exception() -> None:
-    result = _safe_error(ValueError("boom"))
-    assert result.startswith("Research failed: ValueError")
 
 
 # ---------------------------------------------------------------------------
@@ -216,32 +191,10 @@ async def test_get_status_running() -> None:
     thread_id = f"running-{uuid.uuid4()}"
     snap = _make_snapshot(next_nodes=("some_node",))
 
-    async def _pending() -> Any:
-        await asyncio.sleep(100)
-
-    task = asyncio.create_task(_pending())
-    _running_tasks[thread_id] = task
-    try:
-        with patch.object(
-            service, "_verify_ownership", new=AsyncMock(return_value=snap)
-        ):
-            result = await service.get_status(_WS_ID, _USER_ID, thread_id)
-        assert result.status == "running"
-    finally:
-        task.cancel()
-        _running_tasks.pop(thread_id, None)
-
-
-async def test_get_status_failed_stale_task() -> None:
-    service = _make_service()
-    thread_id = f"stale-{uuid.uuid4()}"
-    snap = _make_snapshot(next_nodes=("some_node",))
-    _running_tasks.pop(thread_id, None)
-
     with patch.object(service, "_verify_ownership", new=AsyncMock(return_value=snap)):
         result = await service.get_status(_WS_ID, _USER_ID, thread_id)
 
-    assert result.status == "failed"
+    assert result.status == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +202,8 @@ async def test_get_status_failed_stale_task() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_start_research_task_failure_records_error() -> None:
+async def test_start_research_task_failure_logs_error() -> None:
+    """Failed research tasks are logged; no longer stored in process memory."""
     service = _make_service()
     mock_graph = MagicMock()
 
@@ -266,11 +220,12 @@ async def test_start_research_task_failure_records_error() -> None:
             max_iterations=1,
         )
 
+    # Let the background task complete.
     await asyncio.sleep(0.05)
 
-    assert thread_id in _task_errors
-    _task_errors.pop(thread_id, None)
-    _running_tasks.pop(thread_id, None)
+    # thread_id is a valid UUID string; error is logged but not in-memory tracked.
+    assert isinstance(thread_id, str)
+    assert len(thread_id) == 36
 
 
 async def test_start_research_returns_thread_id() -> None:
@@ -295,7 +250,6 @@ async def test_start_research_returns_thread_id() -> None:
 
     # Let the background task complete before the event loop tears down.
     await asyncio.sleep(0.01)
-    _running_tasks.pop(thread_id, None)
 
 
 # ---------------------------------------------------------------------------

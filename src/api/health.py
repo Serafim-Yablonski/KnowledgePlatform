@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -24,15 +25,30 @@ async def health(request: Request) -> JSONResponse:
         except SQLAlchemyError:
             checks["database"] = "error"
 
-    redis_client: Any = getattr(request.app.state, "redis", None)
-    if redis_client is None:
+    # Redis is the broker; use the module-level async client (same as the app uses).
+    try:
+        from src.core.redis import get_async_redis_client
+
+        await get_async_redis_client().ping()
+        checks["redis"] = "ok"
+    except RedisError:
+        checks["redis"] = "error"
+    except RuntimeError:
         checks["redis"] = "unavailable"
-    else:
-        try:
-            await redis_client.ping()
-            checks["redis"] = "ok"
-        except RedisError:
-            checks["redis"] = "error"
+
+    # Ping Celery workers via the broker. run_in_executor avoids blocking the
+    # async handler — inspect() uses a synchronous kombu transport internally.
+    try:
+        from src.workers.celery_app import celery_app
+
+        loop = asyncio.get_running_loop()
+        ping_result: Any = await loop.run_in_executor(
+            None,
+            lambda: celery_app.control.inspect(timeout=1.0).ping(),
+        )
+        checks["workers"] = "ok" if ping_result else "unavailable"
+    except Exception:
+        checks["workers"] = "error"
 
     all_ok = all(v == "ok" for v in checks.values())
     return JSONResponse(

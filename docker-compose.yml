@@ -46,9 +46,36 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/1
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000
 
-  celery-worker:
+  # CPU-bound extraction (PDF parsing). Scale independently from embed workers.
+  # Set CELERY_EXTRACT_CONCURRENCY in .env for production (default: 2 for local dev).
+  celery-worker-extract:
     build: .
-    command: celery -A src.workers.celery_app worker --loglevel=info
+    command: >
+      celery -A src.workers.celery_app worker
+      --loglevel=info --queues extract
+      --concurrency ${CELERY_EXTRACT_CONCURRENCY:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/data/uploads
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+
+  # I/O-bound embedding (HTTP calls to embedding API). Higher concurrency than extract.
+  # Set CELERY_EMBED_CONCURRENCY in .env for production (default: 2 for local dev).
+  celery-worker-embed:
+    build: .
+    command: >
+      celery -A src.workers.celery_app worker
+      --loglevel=info --queues embed
+      --concurrency ${CELERY_EMBED_CONCURRENCY:-2}
     depends_on:
       postgres:
         condition: service_healthy

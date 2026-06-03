@@ -250,8 +250,9 @@ async def test_deactivate_invalidates_cache_for_target_key() -> None:
 
     await repo.deactivate(ak.id, ak.user_id)
 
-    assert call_order[0] == "delete:api_key:targetkeyhash"
-    assert call_order[1] == "db:deactivate"
+    # DB commit happens first, then cache invalidation (invalidate-after-commit).
+    assert call_order[0] == "db:deactivate"
+    assert call_order[1] == "delete:api_key:targetkeyhash"
     assert "api_key:targetkeyhash" not in cache._store
 
 

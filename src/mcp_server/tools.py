@@ -10,6 +10,7 @@ from pydantic import Field
 
 from src.core.database import get_session
 from src.core.exceptions import InputValidationError
+from src.core.http import get_async_http_client
 from src.core.redis import get_async_redis_client
 from src.mcp_server.auth import get_mcp_user
 
@@ -48,6 +49,7 @@ def _make_search_service(session: Any) -> Any:
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
+        http_client=get_async_http_client(),
     )
     return SearchService(
         search_repo=SQLAlchemySearchRepository(session),
@@ -69,6 +71,7 @@ def _make_ai_service(session: Any) -> Any:
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
+        http_client=get_async_http_client(),
     )
     search_svc = SearchService(
         search_repo=SQLAlchemySearchRepository(session),
@@ -94,6 +97,7 @@ def _make_research_service(session: Any, redis: Any) -> Any:
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
+        http_client=get_async_http_client(),
     )
     search_svc = SearchService(
         search_repo=SQLAlchemySearchRepository(session),

@@ -49,6 +49,10 @@ class WorkspaceRepositoryProtocol(Protocol):
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]: ...
 
+    async def list_for_user_with_counts(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Workspace, int]]: ...
+
     async def add_member(
         self,
         workspace_id: uuid.UUID,

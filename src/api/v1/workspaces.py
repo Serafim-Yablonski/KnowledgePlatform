@@ -2,12 +2,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, status
 
+from src.core.config import get_settings
 from src.core.dependencies import (
     get_current_user,
     get_current_workspace,
     get_workspace_role,
     get_workspace_service,
 )
+from src.core.rate_limit import rate_limit
 from src.domain.roles import WorkspaceRole
 from src.domain.workspace import WorkspaceUpdateInput
 from src.models.user import User
@@ -21,10 +23,22 @@ from src.schemas.workspace import (
 )
 from src.services.workspace import WorkspaceService
 
+_cfg = get_settings()
+_create_rate_limit = rate_limit(
+    "workspace_create",
+    _cfg.RATE_LIMIT_WORKSPACE_CREATE_REQUESTS,
+    _cfg.RATE_LIMIT_WORKSPACE_CREATE_WINDOW,
+)
+
 router = APIRouter(prefix="/api/v1/workspaces", tags=["workspaces"])
 
 
-@router.post("", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=WorkspaceResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_create_rate_limit)],
+)
 async def create_workspace(
     data: WorkspaceCreate,
     actor: User = Depends(get_current_user),

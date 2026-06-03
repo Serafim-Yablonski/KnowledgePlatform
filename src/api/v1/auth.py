@@ -2,11 +2,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, status
 
+from src.core.config import get_settings
 from src.core.dependencies import (
     get_api_key_service,
     get_auth_service,
     get_current_user,
 )
+from src.core.rate_limit import ip_rate_limit, rate_limit
 from src.models.user import User
 from src.schemas.api_key import ApiKeyCreate, ApiKeyCreateResponse, ApiKeyListItem
 from src.schemas.auth import (
@@ -21,8 +23,29 @@ from src.services.auth import AuthService
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
+_cfg = get_settings()
+_register_rate_limit = ip_rate_limit(
+    "auth_register", _cfg.RATE_LIMIT_REGISTER_REQUESTS, _cfg.RATE_LIMIT_REGISTER_WINDOW
+)
+_login_rate_limit = ip_rate_limit(
+    "auth_login", _cfg.RATE_LIMIT_LOGIN_REQUESTS, _cfg.RATE_LIMIT_LOGIN_WINDOW
+)
+_refresh_rate_limit = ip_rate_limit(
+    "auth_refresh", _cfg.RATE_LIMIT_REFRESH_REQUESTS, _cfg.RATE_LIMIT_REFRESH_WINDOW
+)
+_api_key_create_rate_limit = rate_limit(
+    "api_key_create",
+    _cfg.RATE_LIMIT_API_KEY_CREATE_REQUESTS,
+    _cfg.RATE_LIMIT_API_KEY_CREATE_WINDOW,
+)
 
-@router.post("/register", response_model=UserResponse, status_code=201)
+
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=201,
+    dependencies=[Depends(_register_rate_limit)],
+)
 async def register(
     data: UserCreate,
     service: AuthService = Depends(get_auth_service),
@@ -31,7 +54,9 @@ async def register(
     return UserResponse.model_validate(user)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login", response_model=TokenResponse, dependencies=[Depends(_login_rate_limit)]
+)
 async def login(
     data: UserLogin,
     service: AuthService = Depends(get_auth_service),
@@ -42,7 +67,11 @@ async def login(
     )
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    dependencies=[Depends(_refresh_rate_limit)],
+)
 async def refresh(
     body: RefreshRequest,
     service: AuthService = Depends(get_auth_service),
@@ -62,6 +91,7 @@ async def me(current_user: User = Depends(get_current_user)) -> UserResponse:
     "/api-keys",
     response_model=ApiKeyCreateResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_api_key_create_rate_limit)],
 )
 async def create_api_key(
     data: ApiKeyCreate,

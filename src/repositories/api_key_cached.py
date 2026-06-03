@@ -89,9 +89,9 @@ def _deserialize_api_key(data: dict[str, Any] | None) -> ApiKey | None:
 class CachedApiKeyRepository:
     """Wraps ApiKeyRepositoryProtocol with a read-through cache for get_by_hash.
 
-    deactivate() invalidates the cache entry for the target key immediately
-    before delegating to the inner repository — revocation is instant regardless
-    of the TTL. The TTL is a safety net for Redis eviction or bugs only.
+    deactivate() commits the DB change first, then removes the cache entry.
+    This prevents a concurrent auth request from re-populating the cache with
+    an active key during the window between cache delete and DB commit.
     """
 
     def __init__(
@@ -116,17 +116,17 @@ class CachedApiKeyRepository:
         )
 
     # ------------------------------------------------------------------
-    # Mutations — invalidate before delegating
+    # Mutations — commit via inner repo first, then invalidate cache.
     # ------------------------------------------------------------------
 
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        # Fetch the target key to obtain its hash for cache invalidation.
+        # Fetch the hash before the DB write so we still have it after deactivation.
         # deactivate() is a rare admin operation so the extra DB call is acceptable.
         keys = await self._inner.list_for_user(user_id)
         target = next((k for k in keys if k.id == key_id), None)
+        await self._inner.deactivate(key_id, user_id)
         if target is not None:
             await self._cache.delete(CacheKeys.api_key(target.key_hash))
-        await self._inner.deactivate(key_id, user_id)
 
     async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None:
         keys = await self._inner.list_for_user(user_id)

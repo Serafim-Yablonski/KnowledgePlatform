@@ -276,7 +276,7 @@ async def test_get_membership_caches_none_for_non_member() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_update_invalidates_workspace_cache_before_db_write() -> None:
+async def test_update_invalidates_workspace_cache_after_db_write() -> None:
     ws = _make_workspace()
     repo, inner, cache = _make_repo(workspace=ws)
 
@@ -304,12 +304,13 @@ async def test_update_invalidates_workspace_cache_before_db_write() -> None:
 
     await repo.update(ws.id, WorkspaceUpdateInput(name="New Name"))
 
-    assert call_order[0] == f"delete:workspace:{ws.id}"
-    assert call_order[1] == "db:update"
+    # DB commits first, then cache is invalidated (invalidate-after-commit).
+    assert call_order[0] == "db:update"
+    assert call_order[1] == f"delete:workspace:{ws.id}"
     assert f"workspace:{ws.id}" not in cache._store
 
 
-async def test_add_member_invalidates_membership_cache_before_db_write() -> None:
+async def test_add_member_invalidates_membership_cache_after_db_write() -> None:
     ws_id = uuid.uuid4()
     user_id = uuid.uuid4()
     m = _make_membership(workspace_id=ws_id, user_id=user_id)
@@ -338,12 +339,13 @@ async def test_add_member_invalidates_membership_cache_before_db_write() -> None
 
     await repo.add_member(ws_id, user_id, WorkspaceRole.MEMBER)
 
-    assert call_order[0] == f"delete:membership:{ws_id}:{user_id}"
-    assert call_order[1] == "db:add_member"
+    # DB commits first, then cache is invalidated (invalidate-after-commit).
+    assert call_order[0] == "db:add_member"
+    assert call_order[1] == f"delete:membership:{ws_id}:{user_id}"
     assert f"membership:{ws_id}:{user_id}" not in cache._store
 
 
-async def test_remove_member_invalidates_membership_cache_before_db_write() -> None:
+async def test_remove_member_invalidates_membership_cache_after_db_write() -> None:
     ws_id = uuid.uuid4()
     user_id = uuid.uuid4()
     m = _make_membership(workspace_id=ws_id, user_id=user_id)
@@ -367,8 +369,9 @@ async def test_remove_member_invalidates_membership_cache_before_db_write() -> N
 
     await repo.remove_member(ws_id, user_id)
 
-    assert call_order[0] == f"delete:membership:{ws_id}:{user_id}"
-    assert call_order[1] == "db:remove_member"
+    # DB commits first, then cache is invalidated (invalidate-after-commit).
+    assert call_order[0] == "db:remove_member"
+    assert call_order[1] == f"delete:membership:{ws_id}:{user_id}"
     assert f"membership:{ws_id}:{user_id}" not in cache._store
 
 

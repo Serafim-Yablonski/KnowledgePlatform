@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING
 
+import httpx
 import redis.asyncio as aioredis
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_session
 from src.core.exceptions import UnauthorizedError
+from src.core.http import get_async_http_client
 from src.core.redis import get_redis
 from src.domain.roles import WorkspaceRole
 from src.models.user import User
@@ -31,6 +33,10 @@ _bearer = HTTPBearer(auto_error=False)
 async def get_db() -> AsyncGenerator[AsyncSession]:
     async with get_session() as session:
         yield session
+
+
+def get_http_client() -> httpx.AsyncClient:
+    return get_async_http_client()
 
 
 async def get_current_user(
@@ -61,6 +67,7 @@ def get_document_service(
 
 def get_ai_service(
     session: AsyncSession = Depends(get_db),
+    http_client: httpx.AsyncClient = Depends(get_http_client),
 ) -> AIService:
     from src.ai.embeddings import EmbeddingService
     from src.core.config import get_settings
@@ -73,6 +80,7 @@ def get_ai_service(
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
+        http_client=http_client,
     )
     return AIService(
         search_service=SearchService(
@@ -88,6 +96,7 @@ def get_ai_service(
 
 def get_search_service(
     session: AsyncSession = Depends(get_db),
+    http_client: httpx.AsyncClient = Depends(get_http_client),
 ) -> SearchService:
     from src.ai.embeddings import EmbeddingService
     from src.core.config import get_settings
@@ -98,6 +107,7 @@ def get_search_service(
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
+        http_client=http_client,
     )
     return SearchService(
         search_repo=SQLAlchemySearchRepository(session),
@@ -165,6 +175,7 @@ def get_workspace_role(
 def get_research_service(
     session: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
+    http_client: httpx.AsyncClient = Depends(get_http_client),
 ) -> ResearchService:
     from src.ai.embeddings import EmbeddingService  # noqa: PLC0415
     from src.core.config import get_settings  # noqa: PLC0415
@@ -176,6 +187,7 @@ def get_research_service(
         api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
         model=cfg.EMBEDDING_MODEL,
         dimensions=cfg.EMBEDDING_DIMENSIONS,
+        http_client=http_client,
     )
     search_svc = SearchService(
         search_repo=SQLAlchemySearchRepository(session),

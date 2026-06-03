@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pypdf import PdfWriter
@@ -200,12 +201,16 @@ def test_extract_idempotent(
     assert doc.status == DocumentStatus.READY
 
 
-def test_extract_skips_processing_status(
+def test_extract_retries_processing_status(
     tmp_path: Path,
     setup_session: Session,
     patched_db: None,
 ) -> None:
-    """Task returns immediately when doc is already PROCESSING."""
+    """PROCESSING documents are re-processed (crash-recovery for a killed worker).
+
+    The task intentionally does not skip PROCESSING — a worker that set the
+    status and then crashed must be retryable without manual intervention.
+    """
     from src.workers.tasks.extract_text import extract_text
 
     file_path = tmp_path / "doc_proc.txt"
@@ -215,15 +220,16 @@ def test_extract_skips_processing_status(
     ws = _make_workspace(setup_session, user)
     doc = _make_document(setup_session, ws, user, str(file_path))
 
-    # Simulate a prior worker having already set the status to PROCESSING.
+    # Simulate a prior worker crash: status is stuck at PROCESSING.
     doc.status = DocumentStatus.PROCESSING
     setup_session.commit()
 
-    extract_text.run(str(doc.id))
+    with patch("src.workers.tasks.embed_chunks.embed_chunks"):
+        extract_text.run(str(doc.id))
 
     setup_session.refresh(doc)
-    # Must remain PROCESSING — the task must not overwrite in-flight work.
-    assert doc.status == DocumentStatus.PROCESSING
+    # Task must complete and advance the document to READY.
+    assert doc.status == DocumentStatus.READY
 
 
 def test_extract_missing_file_sets_failed(
@@ -254,6 +260,69 @@ def test_extract_document_not_found_returns_silently(
 
     # Random UUID that has no corresponding DB row.
     extract_text.run(str(uuid.uuid4()))
+
+
+def test_extract_soft_time_limit_marks_failed(
+    tmp_path: Path,
+    setup_session: Session,
+    patched_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SoftTimeLimitExceeded during PDF parsing marks document FAILED instead of
+    leaving it stuck in PROCESSING."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from src.workers.tasks.extract_text import extract_text
+
+    file_path = tmp_path / "doc_soft.txt"
+    file_path.write_text("content", encoding="utf-8")
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_document(setup_session, ws, user, str(file_path))
+
+    def _timeout(fp: str, ct: ContentType) -> str:
+        raise SoftTimeLimitExceeded("soft limit exceeded")
+
+    import sys
+
+    extract_mod = sys.modules["src.workers.tasks.extract_text"]
+    monkeypatch.setattr(extract_mod, "_read_text", _timeout)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        extract_text.run(str(doc.id))
+
+    setup_session.refresh(doc)
+    assert doc.status == DocumentStatus.FAILED
+
+
+def test_extract_dispatches_embed(
+    tmp_path: Path,
+    setup_session: Session,
+    patched_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful extraction dispatches embed_chunks with the document id."""
+    from unittest.mock import MagicMock
+
+    from src.workers.tasks.extract_text import extract_text
+
+    content = "dispatch test content"
+    file_path = tmp_path / "doc_dispatch.txt"
+    file_path.write_text(content, encoding="utf-8")
+
+    user = _make_user(setup_session)
+    ws = _make_workspace(setup_session, user)
+    doc = _make_document(setup_session, ws, user, str(file_path))
+
+    import src.workers.tasks.embed_chunks as embed_mod
+
+    mock_delay = MagicMock()
+    monkeypatch.setattr(embed_mod.embed_chunks, "delay", mock_delay)
+
+    extract_text.run(str(doc.id))
+
+    mock_delay.assert_called_once_with(str(doc.id))
 
 
 def test_extract_retry_on_io_error(

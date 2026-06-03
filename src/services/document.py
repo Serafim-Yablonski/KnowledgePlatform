@@ -151,9 +151,7 @@ class DocumentService:
             raise NotFoundError("Document not found")
         return doc
 
-    async def get(
-        self, user: User, workspace: Workspace, document_id: uuid.UUID
-    ) -> Document:
+    async def get(self, workspace: Workspace, document_id: uuid.UUID) -> Document:
         doc = await self._repo.get_by_id(document_id)
         if doc is None or doc.workspace_id != workspace.id:
             raise NotFoundError("Document not found")
@@ -161,7 +159,6 @@ class DocumentService:
 
     async def list(
         self,
-        user: User,
         workspace: Workspace,
         cursor_str: str | None,
         limit: int,

@@ -120,6 +120,7 @@ async def load_test_documents(
             )
         ]
         session.add_all(chunks)
+        doc.status = DocumentStatus.INDEXED
         await session.flush()
 
         slug_to_id[slug] = doc.id
