@@ -65,6 +65,9 @@ async def _app_error_handler(request: Request, exc: Exception) -> JSONResponse:
     headers: dict[str, str] = {}
     if isinstance(err, RateLimitError):
         headers["Retry-After"] = str(err.retry_after)
+        headers["RateLimit-Limit"] = str(err.limit)
+        headers["RateLimit-Remaining"] = "0"
+        headers["RateLimit-Reset"] = str(err.retry_after)
     # Only surface structured field errors on validation responses; strip the
     # free-form errors dict from all other codes to avoid leaking internals.
     errors = err.errors if err.status_code == 422 else None

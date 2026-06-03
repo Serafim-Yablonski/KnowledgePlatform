@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pypdf import PdfWriter
-from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
