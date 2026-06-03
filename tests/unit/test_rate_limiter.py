@@ -6,9 +6,10 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Request
 
 from src.core.exceptions import RateLimitError
-from src.core.rate_limit import RateLimitResult, SlidingWindowRateLimiter
+from src.core.rate_limit import RateLimitResult, SlidingWindowRateLimiter, _client_ip
 
 
 def _make_redis(pipeline_results: list) -> MagicMock:
@@ -182,3 +183,57 @@ class TestSlidingWindowRateLimiter:
             await limiter.check("user-1")
 
         redis.zrem.assert_awaited_once()
+
+
+class TestResetAt:
+    @pytest.mark.asyncio
+    async def test_reset_at_uses_oldest_entry_expiry(self) -> None:
+        """reset_at should reflect when the oldest entry expires, not now+window."""
+        redis = _make_redis([])
+        limiter = SlidingWindowRateLimiter(redis, "test", 5, 60)
+        now = time.time()
+        oldest_ts = now - 40  # oldest request was 40s ago → expires in 20s
+        redis.pipeline.return_value.execute = AsyncMock(
+            return_value=_results(3, oldest_ts=oldest_ts)
+        )
+
+        with patch("src.core.rate_limit.time") as mock_time:
+            mock_time.time.return_value = now
+            mock_time.time_ns.return_value = int(now * 1e9)
+            result = await limiter.check("user-1")
+
+        expected_reset = oldest_ts + 60
+        assert abs(result.reset_at.timestamp() - expected_reset) < 1
+
+    @pytest.mark.asyncio
+    async def test_reset_at_falls_back_when_no_entries(self) -> None:
+        """When the zset is empty (first-ever request race), fall back to now+window."""
+        redis = _make_redis([])
+        limiter = SlidingWindowRateLimiter(redis, "test", 5, 60)
+        now = time.time()
+        # No oldest entry (empty list)
+        redis.pipeline.return_value.execute = AsyncMock(
+            return_value=[None, None, 1, [], True]
+        )
+
+        with patch("src.core.rate_limit.time") as mock_time:
+            mock_time.time.return_value = now
+            mock_time.time_ns.return_value = int(now * 1e9)
+            result = await limiter.check("user-1")
+
+        assert abs(result.reset_at.timestamp() - (now + 60)) < 1
+
+
+class TestClientIp:
+    def _req(self, host: str | None) -> Request:
+        scope: dict = {"type": "http", "headers": []}
+        if host is not None:
+            scope["client"] = (host, 12345)
+        req = Request(scope)
+        return req
+
+    def test_returns_host_when_client_present(self) -> None:
+        assert _client_ip(self._req("1.2.3.4")) == "1.2.3.4"
+
+    def test_returns_none_when_client_absent(self) -> None:
+        assert _client_ip(self._req(None)) is None

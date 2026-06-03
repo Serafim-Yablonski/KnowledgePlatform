@@ -198,9 +198,12 @@ def test_embed_chunks_reindexing_replaces_old_chunks(
     )
     assert len(v1_chunks) >= 1
 
-    # Simulate a document update: new text + bumped version.
+    # Refresh so setup_session sees the INDEXED status the task wrote; then reset
+    # to READY to simulate what DocumentService does before re-triggering embed_chunks.
+    setup_session.refresh(doc)
     doc.raw_text = "Updated text for version two with more content."
     doc.version = 2
+    doc.status = DocumentStatus.READY
     setup_session.commit()
 
     with patch(

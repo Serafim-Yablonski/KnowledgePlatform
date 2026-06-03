@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
+from src.core.config import get_settings
 from src.core.dependencies import get_current_workspace, get_search_service
 from src.core.rate_limit import rate_limit
 from src.models.workspace import Workspace
@@ -13,7 +14,10 @@ router = APIRouter(
     tags=["search"],
 )
 
-_search_rate_limit = rate_limit("search", 20, 60)
+_cfg = get_settings()
+_search_rate_limit = rate_limit(
+    "search", _cfg.RATE_LIMIT_SEARCH_REQUESTS, _cfg.RATE_LIMIT_SEARCH_WINDOW
+)
 
 
 @router.post(

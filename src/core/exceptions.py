@@ -53,7 +53,14 @@ class RateLimitError(AppError):
         detail: str | None = None,
         *,
         retry_after: int = 60,
+        limit: int = 0,
         errors: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(detail, errors=errors)
         self.retry_after = retry_after
+        self.limit = limit
+
+
+class ServiceUnavailableError(AppError):
+    status_code = 503
+    detail = "Service temporarily unavailable"

@@ -174,6 +174,20 @@ class RateLimitSettings(BaseSettings):
     RATE_LIMIT_RESEARCH_STREAM_WINDOW: int = 60
     RATE_LIMIT_RESEARCH_REVIEW_REQUESTS: int = 10
     RATE_LIMIT_RESEARCH_REVIEW_WINDOW: int = 60
+    RATE_LIMIT_RESEARCH_STATUS_REQUESTS: int = 60
+    RATE_LIMIT_RESEARCH_STATUS_WINDOW: int = 60
+    # Workspace-scoped (keyed on user_id:workspace_id)
+    RATE_LIMIT_DOCUMENT_UPLOAD_REQUESTS: int = 10
+    RATE_LIMIT_DOCUMENT_UPLOAD_WINDOW: int = 60
+    # Workspace management
+    RATE_LIMIT_WORKSPACE_CREATE_REQUESTS: int = 10
+    RATE_LIMIT_WORKSPACE_CREATE_WINDOW: int = 60
+    # API key management
+    RATE_LIMIT_API_KEY_CREATE_REQUESTS: int = 10
+    RATE_LIMIT_API_KEY_CREATE_WINDOW: int = 60
+    # When True (default), allow requests through if Redis is unavailable.
+    # Set False to reject with 503 when the rate-limit backend is down.
+    RATE_LIMIT_FAIL_OPEN: bool = True
 
 
 _DEV_SECRET = "dev-secret-key-change-before-production"

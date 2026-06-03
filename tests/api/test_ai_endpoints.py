@@ -116,9 +116,9 @@ class TestAskEndpoint:
             app.dependency_overrides.pop(get_ai_service, None)
 
         assert resp.status_code == 200
-        assert "x-ratelimit-limit" in resp.headers
-        assert "x-ratelimit-remaining" in resp.headers
-        assert "x-ratelimit-reset" in resp.headers
+        assert "ratelimit-limit" in resp.headers
+        assert "ratelimit-remaining" in resp.headers
+        assert "ratelimit-reset" in resp.headers
 
     async def test_ask_requires_authentication(self, async_client: AsyncClient) -> None:
         import uuid
@@ -150,11 +150,19 @@ class TestAskEndpoint:
         token, _ = await _register_and_token(async_client)
         ws_id = await _create_workspace(async_client, token)
 
-        resp = await async_client.post(
-            _ask_url(ws_id),
-            json={"question": ""},
-            headers=_auth(token),
-        )
+        from src.core.dependencies import get_ai_service
+        from src.main import app
+
+        app.dependency_overrides[get_ai_service] = lambda: _stub_ai_service()
+        try:
+            resp = await async_client.post(
+                _ask_url(ws_id),
+                json={"question": ""},
+                headers=_auth(token),
+            )
+        finally:
+            app.dependency_overrides.pop(get_ai_service, None)
+
         assert resp.status_code == 422
 
     async def test_ask_validates_question_max_length(

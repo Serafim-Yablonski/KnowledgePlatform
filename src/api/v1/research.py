@@ -9,6 +9,7 @@ import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from src.core.config import get_settings
 from src.core.dependencies import (
     get_current_user,
     get_current_workspace,
@@ -33,9 +34,27 @@ router = APIRouter(
     tags=["research"],
 )
 
-_start_rate_limit = rate_limit("ai_research_start", 5, 60)
-_stream_rate_limit = rate_limit("ai_research_stream", 30, 60)
-_review_rate_limit = rate_limit("ai_research_review", 10, 60)
+_cfg = get_settings()
+_start_rate_limit = rate_limit(
+    "ai_research_start",
+    _cfg.RATE_LIMIT_RESEARCH_START_REQUESTS,
+    _cfg.RATE_LIMIT_RESEARCH_START_WINDOW,
+)
+_status_rate_limit = rate_limit(
+    "ai_research_status",
+    _cfg.RATE_LIMIT_RESEARCH_STATUS_REQUESTS,
+    _cfg.RATE_LIMIT_RESEARCH_STATUS_WINDOW,
+)
+_stream_rate_limit = rate_limit(
+    "ai_research_stream",
+    _cfg.RATE_LIMIT_RESEARCH_STREAM_REQUESTS,
+    _cfg.RATE_LIMIT_RESEARCH_STREAM_WINDOW,
+)
+_review_rate_limit = rate_limit(
+    "ai_research_review",
+    _cfg.RATE_LIMIT_RESEARCH_REVIEW_REQUESTS,
+    _cfg.RATE_LIMIT_RESEARCH_REVIEW_WINDOW,
+)
 
 
 @router.post(
@@ -59,7 +78,11 @@ async def start_research(
     return ResearchStartResponse(thread_id=thread_id)
 
 
-@router.get("/{thread_id}", response_model=ResearchStatusResponse)
+@router.get(
+    "/{thread_id}",
+    response_model=ResearchStatusResponse,
+    dependencies=[Depends(_status_rate_limit)],
+)
 async def get_research_status(
     thread_id: uuid.UUID,
     workspace: Workspace = Depends(get_current_workspace),

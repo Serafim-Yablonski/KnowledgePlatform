@@ -3,16 +3,25 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile, status
 
+from src.core.config import get_settings
 from src.core.dependencies import (
     get_current_user,
     get_current_workspace,
     get_document_service,
 )
+from src.core.rate_limit import workspace_rate_limit
 from src.domain.documents import DocumentStatus, DocumentUpdateInput, encode_cursor
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
 from src.services.document import DocumentService
+
+_cfg = get_settings()
+_upload_rate_limit = workspace_rate_limit(
+    "document_upload",
+    _cfg.RATE_LIMIT_DOCUMENT_UPLOAD_REQUESTS,
+    _cfg.RATE_LIMIT_DOCUMENT_UPLOAD_WINDOW,
+)
 
 router = APIRouter(
     prefix="/api/v1/workspaces/{workspace_id}/documents",
@@ -20,7 +29,12 @@ router = APIRouter(
 )
 
 
-@router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_upload_rate_limit)],
+)
 async def upload_document(
     title: Annotated[str, Form(min_length=1, max_length=255)],
     file: UploadFile,

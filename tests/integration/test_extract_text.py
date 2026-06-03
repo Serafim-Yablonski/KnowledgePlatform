@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from pypdf import PdfWriter
+from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -200,12 +201,16 @@ def test_extract_idempotent(
     assert doc.status == DocumentStatus.READY
 
 
-def test_extract_skips_processing_status(
+def test_extract_retries_processing_status(
     tmp_path: Path,
     setup_session: Session,
     patched_db: None,
 ) -> None:
-    """Task returns immediately when doc is already PROCESSING."""
+    """PROCESSING documents are re-processed (crash-recovery for a killed worker).
+
+    The task intentionally does not skip PROCESSING — a worker that set the
+    status and then crashed must be retryable without manual intervention.
+    """
     from src.workers.tasks.extract_text import extract_text
 
     file_path = tmp_path / "doc_proc.txt"
@@ -215,15 +220,16 @@ def test_extract_skips_processing_status(
     ws = _make_workspace(setup_session, user)
     doc = _make_document(setup_session, ws, user, str(file_path))
 
-    # Simulate a prior worker having already set the status to PROCESSING.
+    # Simulate a prior worker crash: status is stuck at PROCESSING.
     doc.status = DocumentStatus.PROCESSING
     setup_session.commit()
 
-    extract_text.run(str(doc.id))
+    with patch("src.workers.tasks.embed_chunks.embed_chunks"):
+        extract_text.run(str(doc.id))
 
     setup_session.refresh(doc)
-    # Must remain PROCESSING — the task must not overwrite in-flight work.
-    assert doc.status == DocumentStatus.PROCESSING
+    # Task must complete and advance the document to READY.
+    assert doc.status == DocumentStatus.READY
 
 
 def test_extract_missing_file_sets_failed(

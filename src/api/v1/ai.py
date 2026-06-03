@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 
+from src.core.config import get_settings
 from src.core.dependencies import (
     get_ai_service,
     get_current_user,
@@ -20,7 +21,10 @@ router = APIRouter(
     tags=["ai"],
 )
 
-_ask_rate_limit = rate_limit("ai_ask", 20, 60)
+_cfg = get_settings()
+_ask_rate_limit = rate_limit(
+    "ai_ask", _cfg.RATE_LIMIT_AI_ASK_REQUESTS, _cfg.RATE_LIMIT_AI_ASK_WINDOW
+)
 
 
 @router.post(
