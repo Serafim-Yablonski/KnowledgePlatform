@@ -64,16 +64,16 @@ def mock_user():
 
 
 @pytest.fixture
-def mock_session_ctx():
-    """Patch get_session to return a no-op context manager (no DB access)."""
-    session = MagicMock()
+def fake_services():
+    """Patch open_services to yield a stub Services; tests attach service mocks."""
+    services = MagicMock()
 
     @asynccontextmanager
-    async def _fake_get_session() -> AsyncGenerator[MagicMock]:
-        yield session
+    async def _fake_open_services() -> AsyncGenerator[MagicMock]:
+        yield services
 
-    with patch("src.mcp_server.tools.get_session", _fake_get_session):
-        yield session
+    with patch("src.mcp_server.tools.open_services", _fake_open_services):
+        yield services
 
 
 @pytest.fixture
@@ -111,34 +111,49 @@ class TestGetMcpUser:
             _current_user.reset(token)
 
 
+@pytest.fixture
+def auth_services():
+    """Patch open_services in the auth module; tests configure auth/api_key mocks."""
+    services = MagicMock()
+
+    @asynccontextmanager
+    async def _fake_open_services() -> AsyncGenerator[MagicMock]:
+        yield services
+
+    with patch("src.mcp_server.auth.open_services", _fake_open_services):
+        yield services
+
+
 class TestAuthenticateRequest:
     @pytest.mark.asyncio
-    async def test_bearer_token_valid(self) -> None:
+    async def test_jwt_bearer_uses_auth_service(self, auth_services: MagicMock) -> None:
         request = MagicMock()
-        request.headers = {"Authorization": "Bearer valid-token"}
+        request.headers = {"Authorization": "Bearer header.payload.signature"}
         expected_user = _make_user()
+        auth_services.auth.get_current_user = AsyncMock(return_value=expected_user)
+        auth_services.api_key.authenticate = AsyncMock()
 
-        with (
-            # Make the token look like a JWT (has two dots) so the JWT path is taken.
-            patch("src.mcp_server.auth._looks_like_jwt", return_value=True),
-            patch("src.mcp_server.auth.get_session") as mock_gs,
-            patch("src.repositories.user.SQLAlchemyUserRepository"),  # inline import
-            patch("src.mcp_server.auth.AuthService") as mock_auth_svc_cls,
-        ):
-            session = MagicMock()
-
-            @asynccontextmanager
-            async def _fake() -> AsyncGenerator[MagicMock]:
-                yield session
-
-            mock_gs.return_value = _fake()
-            mock_auth_svc_cls.return_value.get_current_user = AsyncMock(
-                return_value=expected_user
-            )
-
-            result = await _authenticate_request(request)
+        result = await _authenticate_request(request)
 
         assert result is expected_user
+        auth_services.auth.get_current_user.assert_awaited_once_with(
+            "header.payload.signature"
+        )
+        auth_services.api_key.authenticate.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_opaque_bearer_uses_api_key_service(
+        self, auth_services: MagicMock
+    ) -> None:
+        request = MagicMock()
+        request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+        expected_user = _make_user()
+        auth_services.api_key.authenticate = AsyncMock(return_value=expected_user)
+
+        result = await _authenticate_request(request)
+
+        assert result is expected_user
+        auth_services.api_key.authenticate.assert_awaited_once_with("not-a-jwt-no-dots")
 
     @pytest.mark.asyncio
     async def test_no_credentials_raises(self) -> None:
@@ -149,89 +164,38 @@ class TestAuthenticateRequest:
             await _authenticate_request(request)
 
     @pytest.mark.asyncio
-    async def test_api_key_no_user_email_configured_raises(self) -> None:
+    async def test_revoked_api_key_raises_forbidden(
+        self, auth_services: MagicMock
+    ) -> None:
         request = MagicMock()
-        request.headers = {"X-API-Key": "my-key"}
+        request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+        auth_services.api_key.authenticate = AsyncMock(
+            side_effect=ForbiddenError("Invalid or revoked API key")
+        )
 
-        with patch("src.mcp_server.auth.settings") as mock_settings:
-            mock_settings.MCP_API_KEY = "my-key"
-            mock_settings.MCP_API_KEY_USER_EMAIL = None
-
-            with pytest.raises(ForbiddenError, match="email not configured"):
-                await _authenticate_request(request)
+        with pytest.raises(ForbiddenError, match="Invalid or revoked"):
+            await _authenticate_request(request)
 
     @pytest.mark.asyncio
-    async def test_wrong_api_key_raises(self) -> None:
-        request = MagicMock()
-        request.headers = {"X-API-Key": "wrong-key"}
-
-        with patch("src.mcp_server.auth.settings") as mock_settings:
-            mock_settings.MCP_API_KEY = "correct-key"
-            mock_settings.MCP_API_KEY_USER_EMAIL = "admin@example.com"
-
-            with pytest.raises(UnauthorizedError):
-                await _authenticate_request(request)
-
-    @pytest.mark.asyncio
-    async def test_db_api_key_revoked_raises_forbidden(self) -> None:
-        """Bearer without dots → DB API key path; revoked key raises ForbiddenError."""
-        from fakeredis.aioredis import FakeRedis
-
+    async def test_db_error_propagates(self) -> None:
+        """A DB error during auth propagates rather than being masked as 403."""
         request = MagicMock()
         request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
 
-        with (
-            patch("src.mcp_server.auth._looks_like_jwt", return_value=False),
-            patch("src.mcp_server.auth.get_session") as mock_gs,
-            # _authenticate_db_api_key imports get_redis at call time, so patch
-            # the source module so in-function `from src.core.redis import get_redis`
-            # resolves to a FakeRedis that doesn't require a real Redis process.
-            patch("src.core.redis.get_redis", return_value=FakeRedis()),
-        ):
-            session = MagicMock()
-
-            @asynccontextmanager
-            async def _fake() -> AsyncGenerator[MagicMock]:
-                yield session
-
-            mock_gs.return_value = _fake()
-
-            from src.repositories.api_key import SQLAlchemyApiKeyRepository
-
-            with (
-                patch.object(
-                    SQLAlchemyApiKeyRepository,
-                    "get_by_hash",
-                    new=AsyncMock(return_value=None),
-                ),
-                pytest.raises(ForbiddenError, match="Invalid or revoked"),
-            ):
-                await _authenticate_request(request)
-
-    @pytest.mark.asyncio
-    async def test_db_api_key_db_error_propagates(self) -> None:
-        """A DB error during API key auth propagates rather than being masked as 403."""
-        request = MagicMock()
-        request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+        @asynccontextmanager
+        async def _failing() -> AsyncGenerator[MagicMock]:
+            raise RuntimeError("DB unavailable")
+            yield  # noqa: RET508
 
         with (
-            patch("src.mcp_server.auth._looks_like_jwt", return_value=False),
-            patch("src.mcp_server.auth.get_session") as mock_gs,
+            patch("src.mcp_server.auth.open_services", _failing),
+            pytest.raises(RuntimeError, match="DB unavailable"),
         ):
-
-            @asynccontextmanager
-            async def _failing() -> AsyncGenerator[MagicMock]:
-                raise RuntimeError("DB unavailable")
-                yield  # noqa: RET508
-
-            mock_gs.return_value = _failing()
-
-            with pytest.raises(RuntimeError, match="DB unavailable"):
-                await _authenticate_request(request)
+            await _authenticate_request(request)
 
     @pytest.mark.asyncio
     async def test_invalid_workspace_id_raises(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         with pytest.raises(InputValidationError):
             await search_documents(workspace_id="not-a-uuid", query="q")
@@ -245,7 +209,7 @@ class TestAuthenticateRequest:
 class TestSearchDocumentsTool:
     @pytest.mark.asyncio
     async def test_calls_search_service(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         ws_id = uuid.uuid4()
         search_response = _make_search_response(2)
@@ -256,14 +220,8 @@ class TestSearchDocumentsTool:
         mock_search_svc.search = AsyncMock(return_value=search_response)
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
-            patch(
-                "src.mcp_server.tools._make_search_service",
-                return_value=mock_search_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
+            patch.object(fake_services, "search", mock_search_svc),
         ):
             result = await search_documents(
                 workspace_id=str(ws_id), query="test query", top_k=3
@@ -287,7 +245,7 @@ class TestSearchDocumentsTool:
 
     @pytest.mark.asyncio
     async def test_rejects_non_member(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         mock_workspace_svc = MagicMock()
         mock_workspace_svc.get_user_role = AsyncMock(
@@ -295,17 +253,14 @@ class TestSearchDocumentsTool:
         )
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
             pytest.raises(ForbiddenError),
         ):
             await search_documents(workspace_id=str(uuid.uuid4()), query="q")
 
     @pytest.mark.asyncio
     async def test_formats_results_correctly(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         doc_id = uuid.uuid4()
         search_response = SearchResponse(
@@ -328,14 +283,8 @@ class TestSearchDocumentsTool:
         mock_search_svc.search = AsyncMock(return_value=search_response)
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
-            patch(
-                "src.mcp_server.tools._make_search_service",
-                return_value=mock_search_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
+            patch.object(fake_services, "search", mock_search_svc),
         ):
             result = await search_documents(workspace_id=str(uuid.uuid4()), query="q")
 
@@ -354,7 +303,7 @@ class TestSearchDocumentsTool:
 class TestAskQuestionTool:
     @pytest.mark.asyncio
     async def test_calls_ai_service_with_role(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         ws_id = uuid.uuid4()
         answer = AnswerResponse(
@@ -377,14 +326,8 @@ class TestAskQuestionTool:
         mock_ai_svc.ask = AsyncMock(return_value=answer)
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
-            patch(
-                "src.mcp_server.tools._make_ai_service",
-                return_value=mock_ai_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
+            patch.object(fake_services, "ai", mock_ai_svc),
         ):
             result = await ask_question(
                 workspace_id=str(ws_id), question="What is the answer?"
@@ -418,7 +361,7 @@ class TestAskQuestionTool:
 class TestStartResearchTool:
     @pytest.mark.asyncio
     async def test_calls_research_service(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         ws_id = uuid.uuid4()
         thread_id = str(uuid.uuid4())
@@ -429,14 +372,8 @@ class TestStartResearchTool:
         mock_research_svc.start_research = AsyncMock(return_value=thread_id)
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
-            patch(
-                "src.mcp_server.tools._make_research_service",
-                return_value=mock_research_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
+            patch.object(fake_services, "research", mock_research_svc),
         ):
             result = await start_research(
                 workspace_id=str(ws_id), topic="AI trends", max_iterations=2
@@ -460,7 +397,7 @@ class TestStartResearchTool:
 class TestGetResearchStatusTool:
     @pytest.mark.asyncio
     async def test_returns_status_dict(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         ws_id = uuid.uuid4()
         thread_id = str(uuid.uuid4())
@@ -482,14 +419,8 @@ class TestGetResearchStatusTool:
         mock_research_svc.get_status = AsyncMock(return_value=status)
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
-            patch(
-                "src.mcp_server.tools._make_research_service",
-                return_value=mock_research_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
+            patch.object(fake_services, "research", mock_research_svc),
         ):
             result = await get_research_status(
                 thread_id=thread_id, workspace_id=str(ws_id)
@@ -503,7 +434,7 @@ class TestGetResearchStatusTool:
 
     @pytest.mark.asyncio
     async def test_omits_plan_when_none(
-        self, mock_user: MagicMock, mock_session_ctx: MagicMock, mock_redis: None
+        self, mock_user: MagicMock, fake_services: MagicMock, mock_redis: None
     ) -> None:
         ws_id = uuid.uuid4()
         thread_id = str(uuid.uuid4())
@@ -522,14 +453,8 @@ class TestGetResearchStatusTool:
         mock_research_svc.get_status = AsyncMock(return_value=status)
 
         with (
-            patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ),
-            patch(
-                "src.mcp_server.tools._make_research_service",
-                return_value=mock_research_svc,
-            ),
+            patch.object(fake_services, "workspace", mock_workspace_svc),
+            patch.object(fake_services, "research", mock_research_svc),
         ):
             result = await get_research_status(
                 thread_id=thread_id, workspace_id=str(ws_id)

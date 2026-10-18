@@ -43,6 +43,7 @@ dev = [
     "mypy==1.20.2",
     "ruff==0.15.12",
     "fakeredis>=2.35.1",
+    "import-linter==2.15",
 ]
 
 [build-system]
@@ -85,8 +86,47 @@ target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20"]
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/ai/eval/*" = ["T20"]  # CLI tools: stdout is their interface
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
+
+[tool.importlinter]
+root_package = "src"
+include_external_packages = true
+# Annotation-only imports create no runtime coupling.
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+# Everything else receives finished services.
+name = "Only the composition root builds repositories"
+type = "forbidden"
+source_modules = [
+    "src.ai",
+    "src.api",
+    "src.core",
+    "src.domain",
+    "src.main",
+    "src.mcp_server",
+    "src.models",
+    "src.schemas",
+    "src.services",
+    "src.workers",
+]
+forbidden_modules = ["src.repositories"]
+ignore_imports = [
+    # Not debt: services depend on repository interfaces by design (dependency injection).
+    "src.** -> src.repositories.protocols",
+]
+# Adapters reach repositories only through src.composition, which is the point.
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Business logic is framework-free"
+type = "forbidden"
+source_modules = ["src.services", "src.repositories", "src.domain"]
+forbidden_modules = ["fastapi", "starlette"]

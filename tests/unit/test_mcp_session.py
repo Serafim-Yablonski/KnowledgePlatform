@@ -61,15 +61,16 @@ def session_id() -> str:
 
 
 @pytest.fixture
-def mock_session_ctx():
-    session = MagicMock()
+def fake_services():
+    """Patch open_services to yield a stub Services; tests attach service mocks."""
+    services = MagicMock()
 
     @asynccontextmanager
-    async def _fake() -> AsyncGenerator[MagicMock]:
-        yield session
+    async def _fake_open_services() -> AsyncGenerator[MagicMock]:
+        yield services
 
-    with patch("src.mcp_server.tools.get_session", _fake):
-        yield session
+    with patch("src.mcp_server.tools.open_services", _fake_open_services):
+        yield services
 
 
 @pytest.fixture
@@ -86,7 +87,7 @@ def mock_redis():
 class TestListWorkspaces:
     @pytest.mark.asyncio
     async def test_returns_user_workspaces(
-        self, mock_user: MagicMock, session_id: str, mock_session_ctx: MagicMock
+        self, mock_user: MagicMock, session_id: str, fake_services: MagicMock
     ) -> None:
         ws_id = uuid.uuid4()
         ws = _make_workspace_response(ws_id)
@@ -96,10 +97,7 @@ class TestListWorkspaces:
 
         sid_token = _current_session_id.set(session_id)
         try:
-            with patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ):
+            with patch.object(fake_services, "workspace", mock_workspace_svc):
                 result = await list_workspaces()
         finally:
             _current_session_id.reset(sid_token)
@@ -112,7 +110,7 @@ class TestListWorkspaces:
 
     @pytest.mark.asyncio
     async def test_creates_session_state_entry(
-        self, mock_user: MagicMock, session_id: str, mock_session_ctx: MagicMock
+        self, mock_user: MagicMock, session_id: str, fake_services: MagicMock
     ) -> None:
         mock_workspace_svc = MagicMock()
         mock_workspace_svc.list_for_user = AsyncMock(return_value=[])
@@ -120,10 +118,7 @@ class TestListWorkspaces:
 
         sid_token = _current_session_id.set(session_id)
         try:
-            with patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ):
+            with patch.object(fake_services, "workspace", mock_workspace_svc):
                 await list_workspaces()
         finally:
             _current_session_id.reset(sid_token)
@@ -139,7 +134,7 @@ class TestListWorkspaces:
 class TestSetActiveWorkspace:
     @pytest.mark.asyncio
     async def test_stores_workspace_in_session_state(
-        self, mock_user: MagicMock, session_id: str, mock_session_ctx: MagicMock
+        self, mock_user: MagicMock, session_id: str, fake_services: MagicMock
     ) -> None:
         from src.domain.roles import WorkspaceRole
 
@@ -156,10 +151,7 @@ class TestSetActiveWorkspace:
         get_or_create_session_state(session_id, mock_user)
         sid_token = _current_session_id.set(session_id)
         try:
-            with patch(
-                "src.mcp_server.tools._make_workspace_service",
-                return_value=mock_workspace_svc,
-            ):
+            with patch.object(fake_services, "workspace", mock_workspace_svc):
                 result = await set_active_workspace(workspace_id=str(ws_id))
         finally:
             _current_session_id.reset(sid_token)
@@ -173,7 +165,7 @@ class TestSetActiveWorkspace:
 
     @pytest.mark.asyncio
     async def test_non_member_raises_forbidden(
-        self, mock_user: MagicMock, session_id: str, mock_session_ctx: MagicMock
+        self, mock_user: MagicMock, session_id: str, fake_services: MagicMock
     ) -> None:
         mock_workspace_svc = MagicMock()
         mock_workspace_svc.get_workspace_for_user = AsyncMock(
@@ -184,10 +176,7 @@ class TestSetActiveWorkspace:
         sid_token = _current_session_id.set(session_id)
         try:
             with (
-                patch(
-                    "src.mcp_server.tools._make_workspace_service",
-                    return_value=mock_workspace_svc,
-                ),
+                patch.object(fake_services, "workspace", mock_workspace_svc),
                 pytest.raises(ForbiddenError),
             ):
                 await set_active_workspace(workspace_id=str(uuid.uuid4()))

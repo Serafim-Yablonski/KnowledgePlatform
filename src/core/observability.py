@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import logfire
 import structlog
-from fastapi import FastAPI
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 _logger = structlog.get_logger(__name__)
 

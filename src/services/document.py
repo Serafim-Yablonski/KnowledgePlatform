@@ -1,11 +1,9 @@
 import uuid
-from collections.abc import Sequence
 from pathlib import Path
-from typing import IO
+from typing import BinaryIO
 
 import anyio
 import structlog
-from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
@@ -16,13 +14,13 @@ from src.domain.documents import (
     DocumentPage,
     DocumentStatus,
     DocumentUpdateInput,
+    DocumentUpload,
     decode_cursor,
 )
 from src.domain.roles import Permission, WorkspaceRole, require_permission
 from src.domain.workspace import WorkspaceStats
 from src.models.document import Document
 from src.models.user import User
-from src.models.workspace import Workspace
 from src.repositories.protocols import DocumentRepositoryProtocol
 
 logger = structlog.get_logger(__name__)
@@ -35,9 +33,14 @@ _MAGIC_BYTES: dict[str, bytes] = {
 _TEXT_TYPES = {"text/plain", "text/markdown"}
 
 
-async def _validate_magic_bytes(file: UploadFile, content_type_str: str) -> None:
-    header = await file.read(8)
-    await file.seek(0)
+def _read_header(stream: BinaryIO) -> bytes:
+    header = stream.read(8)
+    stream.seek(0)
+    return header
+
+
+async def _validate_magic_bytes(stream: BinaryIO, content_type_str: str) -> None:
+    header = await anyio.to_thread.run_sync(_read_header, stream)
     expected = _MAGIC_BYTES.get(content_type_str)
     if expected and not header.startswith(expected):
         raise InputValidationError("File content does not match declared Content-Type")
@@ -50,7 +53,7 @@ async def _validate_magic_bytes(file: UploadFile, content_type_str: str) -> None
             ) from None
 
 
-def _write_file(src: IO[bytes], dest_path: Path) -> int:
+def _write_file(src: BinaryIO, dest_path: Path) -> int:
     """Stream src to dest_path in chunks, enforcing the configured upload size limit."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     total = 0
@@ -78,28 +81,28 @@ class DocumentService:
     async def create(
         self,
         user: User,
-        workspace: Workspace,
+        workspace_id: uuid.UUID,
         role: WorkspaceRole,
         title: str,
-        file: UploadFile,
+        upload: DocumentUpload,
     ) -> Document:
         require_permission(role, Permission.CREATE_DOCUMENT)
-        # Fast-fail if Content-Length header already indicates oversized payload.
+        # Reject early if the adapter already knows the size (no DB row, no disk write).
         max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        if file.size is not None and file.size > max_bytes:
+        if upload.declared_size is not None and upload.declared_size > max_bytes:
             raise InputValidationError(
                 f"File exceeds maximum size of {settings.MAX_UPLOAD_SIZE_MB} MB"
             )
-        content_type_str = file.content_type or ""
+        content_type_str = upload.content_type
         if content_type_str not in ALLOWED_CONTENT_TYPES:
             raise InputValidationError(
                 f"Unsupported file type: {content_type_str!r}. "
                 f"Allowed: {', '.join(ALLOWED_CONTENT_TYPES)}"
             )
-        await _validate_magic_bytes(file, content_type_str)
+        await _validate_magic_bytes(upload.stream, content_type_str)
         content_type = ALLOWED_CONTENT_TYPES[content_type_str]
 
-        filename = Path(file.filename or "upload").name or "upload"
+        filename = Path(upload.filename or "upload").name or "upload"
         _probe = (
             Path(settings.UPLOAD_DIR)
             / "00000000-0000-0000-0000-000000000000"
@@ -110,22 +113,22 @@ class DocumentService:
             raise InputValidationError("Invalid filename")
 
         doc = await self._repo.create(
-            workspace_id=workspace.id,
+            workspace_id=workspace_id,
             title=title,
             content_type=content_type,
             file_path="",
-            file_size_bytes=file.size or 0,
+            file_size_bytes=upload.declared_size or 0,
             uploaded_by=user.id,
         )
 
         file_path = (
-            Path(settings.UPLOAD_DIR) / str(workspace.id) / str(doc.id) / filename
+            Path(settings.UPLOAD_DIR) / str(workspace_id) / str(doc.id) / filename
         )
 
-        # Offload blocking I/O to a thread; _write_file also enforces the size limit
-        # for streaming uploads where Content-Length is absent.
+        # Offload blocking I/O to a thread; _write_file enforces the authoritative size
+        # limit, which is the only one when the adapter knows no size up front.
         actual_size = await anyio.to_thread.run_sync(
-            lambda: _write_file(file.file, file_path)
+            lambda: _write_file(upload.stream, file_path)
         )
 
         doc.file_path = str(file_path)
@@ -140,28 +143,17 @@ class DocumentService:
 
         return doc
 
-    async def _get_by_id(
-        self,
-        workspace_id: uuid.UUID,
-        document_id: uuid.UUID,
-    ) -> Document:
-        """Fetch a document scoped to a workspace. Caller must verify membership."""
-        doc = await self._repo.get_by_id(document_id)
-        if doc is None or doc.workspace_id != workspace_id:
-            raise NotFoundError("Document not found")
-        return doc
-
-    async def get(self, workspace: Workspace, document_id: uuid.UUID) -> Document:
-        doc = await self._repo.get_by_id(document_id)
-        if doc is None or doc.workspace_id != workspace.id:
+    async def get(self, workspace_id: uuid.UUID, document_id: uuid.UUID) -> Document:
+        doc = await self._repo.get_by_id(workspace_id, document_id)
+        if doc is None:
             raise NotFoundError("Document not found")
         return doc
 
     async def list(
         self,
-        workspace: Workspace,
-        cursor_str: str | None,
-        limit: int,
+        workspace_id: uuid.UUID,
+        cursor_str: str | None = None,
+        limit: int = 20,
         status: DocumentStatus | None = None,
     ) -> DocumentPage[Document]:
         try:
@@ -169,7 +161,7 @@ class DocumentService:
         except ValueError as exc:
             raise InputValidationError("Invalid pagination cursor") from exc
         docs, next_cursor = await self._repo.list_by_workspace(
-            workspace.id, limit=limit, cursor=cursor, status=status
+            workspace_id, limit=limit, cursor=cursor, status=status
         )
         return DocumentPage(
             items=list(docs),
@@ -177,31 +169,19 @@ class DocumentService:
             has_more=next_cursor is not None,
         )
 
-    async def _list_by_workspace_id(
-        self,
-        workspace_id: uuid.UUID,
-        limit: int = 50,
-    ) -> Sequence[Document]:
-        """List documents by workspace ID. Caller must verify workspace membership."""
-        docs, _ = await self._repo.list_by_workspace(workspace_id, limit=limit)
-        return docs
-
-    async def _get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats:
-        """Return aggregate stats for a workspace. Caller must verify membership."""
+    async def get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats:
         return await self._repo.get_workspace_stats(workspace_id)
 
     async def update(
         self,
         user: User,
-        workspace: Workspace,
+        workspace_id: uuid.UUID,
         role: WorkspaceRole,
         document_id: uuid.UUID,
         data: DocumentUpdateInput,
     ) -> Document:
         require_permission(role, Permission.UPDATE_DOCUMENT)
-        doc = await self._repo.get_by_id(document_id)
-        if doc is None or doc.workspace_id != workspace.id:
-            raise NotFoundError("Document not found")
+        doc = await self.get(workspace_id, document_id)
         doc = await self._repo.update(doc, data)
         await self._session.commit()
         return doc
@@ -209,14 +189,12 @@ class DocumentService:
     async def delete(
         self,
         user: User,
-        workspace: Workspace,
+        workspace_id: uuid.UUID,
         role: WorkspaceRole,
         document_id: uuid.UUID,
     ) -> None:
         require_permission(role, Permission.DELETE_DOCUMENT)
-        doc = await self._repo.get_by_id(document_id)
-        if doc is None or doc.workspace_id != workspace.id:
-            raise NotFoundError("Document not found")
+        doc = await self.get(workspace_id, document_id)
         file_path = doc.file_path
         # Delete the DB record first — a consistent DB with an orphaned file is better
         # than a deleted file with a stale DB row pointing at nothing.

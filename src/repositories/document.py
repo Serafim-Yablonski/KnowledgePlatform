@@ -45,9 +45,13 @@ class SQLAlchemyDocumentRepository:
         await self._session.refresh(doc)
         return doc
 
-    async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
+    async def get_by_id(
+        self, workspace_id: uuid.UUID, document_id: uuid.UUID
+    ) -> Document | None:
         result = await self._session.scalars(
-            sa.select(Document).where(Document.id == document_id)
+            sa.select(Document).where(
+                Document.id == document_id, Document.workspace_id == workspace_id
+            )
         )
         return result.first()
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+import redis.asyncio as aioredis
 import structlog
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 
@@ -34,11 +35,10 @@ from src.ai.eval.metrics import (
     reciprocal_rank,
 )
 from src.ai.eval.models import EvalCase, EvalCaseResult, EvalMetrics, EvalResults
+from src.composition import Services
 from src.core.config import get_settings
 from src.core.database import async_session_factory
 from src.domain.roles import WorkspaceRole
-from src.repositories.protocols import SearchRepositoryProtocol
-from src.repositories.search import SQLAlchemySearchRepository
 from src.services.search import SearchService
 
 if TYPE_CHECKING:
@@ -304,40 +304,24 @@ class EvalRunner:
 async def _main() -> None:
     cfg = get_settings()
 
-    embedding_svc = EmbeddingService(
-        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-        model=cfg.EMBEDDING_MODEL,
-        dimensions=cfg.EMBEDDING_DIMENSIONS,
-    )
-
     async with async_session_factory() as session:
         await cleanup_stale_eval_workspaces(session)
 
-    async with async_session_factory() as session:
-        from src.repositories.document import SQLAlchemyDocumentRepository
-        from src.services.ai import AIService
-        from src.services.document import DocumentService
-
-        search_repo: SearchRepositoryProtocol = SQLAlchemySearchRepository(session)
-        search_svc = SearchService(
-            search_repo=search_repo,
-            embedding_service=embedding_svc,
-        )
-        doc_svc = DocumentService(
-            repo=SQLAlchemyDocumentRepository(session),
-            session=session,
-        )
-        ai_svc = AIService(
-            search_service=search_svc,
-            document_service=doc_svc,
-        )
-
+    # A standalone script owns its resources; Services only wires them.
+    async with (
+        async_session_factory() as session,
+        aioredis.Redis.from_pool(
+            aioredis.ConnectionPool.from_url(cfg.REDIS_URL, decode_responses=True)
+        ) as redis,
+        httpx.AsyncClient(timeout=30.0) as http_client,
+    ):
+        services = Services(session, redis, http_client)
         runner = EvalRunner(
-            search_service=search_svc,
+            search_service=services.search,
             golden_dataset_path=_GOLDEN_DATASET_PATH,
             test_docs_dir=_TEST_DOCS_DIR,
-            embedding_service=embedding_svc,
-            ai_service=ai_svc,
+            embedding_service=services.embeddings,
+            ai_service=services.ai,
         )
 
         try:

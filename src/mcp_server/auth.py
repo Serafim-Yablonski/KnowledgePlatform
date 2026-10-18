@@ -2,23 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
-import hashlib
-import secrets
-import uuid
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from src.core.config import settings
-from src.core.database import get_session
-from src.core.exceptions import AppError, ForbiddenError, UnauthorizedError
-from src.services.auth import AuthService
+from src.composition import open_services
+from src.core.exceptions import AppError, UnauthorizedError
 
 logger = structlog.get_logger(__name__)
 
@@ -33,56 +26,6 @@ _current_user: contextvars.ContextVar[User | None] = contextvars.ContextVar(
 _MCP_SESSION_HEADER = "mcp-session-id"
 
 
-async def _update_last_used(key_id: uuid.UUID) -> None:
-    """Fire-and-forget coroutine: update last_used_at in a fresh session."""
-    from datetime import UTC, datetime
-
-    import sqlalchemy as sa
-
-    from src.models.api_key import ApiKey
-
-    try:
-        async with get_session() as session:
-            await session.execute(
-                sa.update(ApiKey)
-                .where(ApiKey.id == key_id)
-                .values(last_used_at=datetime.now(UTC))
-            )
-            await session.commit()
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.warning("failed to update api key last_used_at", key_id=str(key_id))
-
-
-async def _authenticate_jwt(token: str) -> User:
-    async with get_session() as session:
-        from src.repositories.user import SQLAlchemyUserRepository
-
-        repo = SQLAlchemyUserRepository(session)
-        service = AuthService(repo)
-        return await service.get_current_user(token)
-
-
-async def _authenticate_db_api_key(raw_key: str, session: AsyncSession) -> User:
-    """Authenticate against a database-stored API key (hash lookup)."""
-    from src.core.cache import ResponseCache
-    from src.core.redis import get_redis
-    from src.repositories.api_key import SQLAlchemyApiKeyRepository
-    from src.repositories.api_key_cached import CachedApiKeyRepository
-
-    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    cache = ResponseCache(get_redis())
-    repo = CachedApiKeyRepository(SQLAlchemyApiKeyRepository(session), cache)
-    api_key = await repo.get_by_hash(key_hash)
-    if not api_key or not api_key.is_active:
-        raise ForbiddenError("Invalid or revoked API key")
-    if not api_key.user.is_active:
-        raise ForbiddenError("Invalid or revoked API key")
-    asyncio.create_task(_update_last_used(api_key.id))
-    return api_key.user
-
-
 def _looks_like_jwt(token: str) -> bool:
     """Return True if the token is structurally a JWT (header.payload.signature)."""
     return token.count(".") == 2
@@ -90,42 +33,17 @@ def _looks_like_jwt(token: str) -> bool:
 
 async def _authenticate_request(request: Request) -> User:
     auth_header = request.headers.get("Authorization", "")
-
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-
+    if not auth_header.startswith("Bearer "):
+        raise UnauthorizedError(
+            "Authentication required — provide Authorization: Bearer <token>"
+        )
+    token = auth_header[7:]
+    async with open_services() as services:
         if _looks_like_jwt(token):
-            # Definitely a JWT — always use the JWT path and surface the real
-            # error (expired, bad signature, etc.) instead of masking it with
-            # "Invalid or revoked API key".
-            return await _authenticate_jwt(token)
-
-        async with get_session() as session:
-            return await _authenticate_db_api_key(token, session)
-
-    # Legacy static API key (env-var pair) — kept for backward compatibility.
-    api_key_header = request.headers.get("X-API-Key", "")
-    configured_key = settings.MCP_API_KEY
-    if (
-        api_key_header
-        and configured_key
-        and secrets.compare_digest(api_key_header, configured_key)
-    ):
-        if not settings.MCP_API_KEY_USER_EMAIL:
-            raise ForbiddenError("API key user email not configured")
-        async with get_session() as session:
-            from src.repositories.user import SQLAlchemyUserRepository
-
-            repo = SQLAlchemyUserRepository(session)
-            user = await repo.get_by_email(settings.MCP_API_KEY_USER_EMAIL)
-            if user is None or not user.is_active:
-                raise ForbiddenError("API key user not found or inactive")
-            return user
-
-    raise UnauthorizedError(
-        "Authentication required — provide Authorization: Bearer <token> "
-        "or X-API-Key header"
-    )
+            # Definitely a JWT — surface the real error (expired, bad signature)
+            # instead of masking it with "Invalid or revoked API key".
+            return await services.auth.get_current_user(token)
+        return await services.api_key.authenticate(token)
 
 
 def get_mcp_user() -> User:
@@ -172,7 +90,7 @@ class MCPAuthMiddleware:
             )
             await response(scope, receive, send)
             return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — top-level handler of the MCP ASGI app
             logger.warning(
                 "unexpected error during MCP authentication",
                 error_type=type(exc).__name__,

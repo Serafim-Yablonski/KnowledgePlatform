@@ -63,8 +63,8 @@ _evaluate_agent: Agent[None, EvaluationResult] = Agent(
     defer_model_check=True,
 )
 
-# output_type=str enables stream_text() for token-level streaming to the client.
-# EXCEPTION: output_type=str needed for stream_text(delta=True); see ADR-003.
+# output_type=str (not a Pydantic model) so stream_text(delta=True) can forward
+# tokens to the client as they arrive.
 _synthesize_agent: Agent[None, str] = Agent(
     get_settings().LLM_STRONG_MODEL,
     output_type=str,

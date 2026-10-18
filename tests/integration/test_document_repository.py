@@ -226,11 +226,19 @@ async def test_create_and_get_by_id(
     doc_id = doc.id  # save before flush/commit expiry
     await db_session.flush()
 
-    fetched = await repo.get_by_id(doc_id)
+    fetched = await repo.get_by_id(test_workspace.id, doc_id)
     assert fetched is not None
     assert fetched.title == "Hello"
     assert fetched.status == DocumentStatus.PENDING
     assert fetched.version == 1
+
+
+async def test_get_by_id_scoped_to_workspace(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    doc = await _create_doc(db_session, test_workspace.id, test_user.id)
+    repo = SQLAlchemyDocumentRepository(db_session)
+    assert await repo.get_by_id(uuid.uuid4(), doc.id) is None
 
 
 async def test_update_increments_version(
@@ -250,4 +258,4 @@ async def test_delete_removes_record(
     doc_id = doc.id
     repo = SQLAlchemyDocumentRepository(db_session)
     await repo.delete(doc)
-    assert await repo.get_by_id(doc_id) is None
+    assert await repo.get_by_id(test_workspace.id, doc_id) is None

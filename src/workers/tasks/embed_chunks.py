@@ -106,7 +106,7 @@ def embed_chunks(self: Task, document_id: str) -> None:
                         dimensions=settings.EMBEDDING_DIMENSIONS,
                     )
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — task retry boundary; re-raised via self.retry
                 logger.error(
                     "embedding generation failed",
                     document_id=document_id,

@@ -47,7 +47,7 @@ async def health(request: Request) -> JSONResponse:
             lambda: celery_app.control.inspect(timeout=1.0).ping(),
         )
         checks["workers"] = "ok" if ping_result else "unavailable"
-    except Exception:
+    except Exception:  # noqa: BLE001 — a health probe reports failure, never raises
         checks["workers"] = "error"
 
     all_ok = all(v == "ok" for v in checks.values())

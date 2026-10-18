@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -17,11 +17,11 @@ from src.domain.documents import (
     Cursor,
     DocumentStatus,
     DocumentUpdateInput,
+    DocumentUpload,
 )
 from src.domain.roles import WorkspaceRole
 from src.models.document import Document
 from src.models.user import User
-from src.models.workspace import Workspace
 from src.services.document import DocumentService
 
 # ---------------------------------------------------------------------------
@@ -39,19 +39,6 @@ def _make_user() -> User:
     u.created_at = datetime.now(UTC).replace(tzinfo=None)
     u.updated_at = datetime.now(UTC).replace(tzinfo=None)
     return u
-
-
-def _make_workspace() -> Workspace:
-    ws = Workspace()
-    ws.id = uuid.uuid4()
-    ws.name = "Test WS"
-    ws.slug = "test-ws-abcd"
-    ws.description = None
-    ws.created_by = uuid.uuid4()
-    ws.is_active = True
-    ws.created_at = datetime.now(UTC).replace(tzinfo=None)
-    ws.updated_at = datetime.now(UTC).replace(tzinfo=None)
-    return ws
 
 
 def _make_document(workspace_id: uuid.UUID, uploaded_by: uuid.UUID) -> Document:
@@ -80,21 +67,19 @@ _MIME_DEFAULT_CONTENT: dict[str, bytes] = {
 
 def _make_upload_file(
     *,
-    size: int = 1024,
+    size: int | None = 1024,
     content_type: str = "application/pdf",
     filename: str = "test.pdf",
     content: bytes | None = None,
-) -> Any:
+) -> DocumentUpload:
     if content is None:
         content = _MIME_DEFAULT_CONTENT.get(content_type, b"fake content")
-    f = MagicMock()
-    f.size = size
-    f.content_type = content_type
-    f.filename = filename
-    f.file = io.BytesIO(content)
-    f.read = AsyncMock(return_value=content[:8])
-    f.seek = AsyncMock()
-    return f
+    return DocumentUpload(
+        filename=filename,
+        content_type=content_type,
+        declared_size=size,
+        stream=io.BytesIO(content),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +116,11 @@ class StubDocumentRepository:
         self._store[doc.id] = doc
         return doc
 
-    async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
-        return self._store.get(document_id)
+    async def get_by_id(
+        self, workspace_id: uuid.UUID, document_id: uuid.UUID
+    ) -> Document | None:
+        doc = self._store.get(document_id)
+        return doc if doc is not None and doc.workspace_id == workspace_id else None
 
     async def update(self, document: Document, data: DocumentUpdateInput) -> Document:
         if data.title is not None:
@@ -181,28 +169,28 @@ def _make_service() -> tuple[DocumentService, StubDocumentRepository]:
 async def test_file_too_large_raises_validation_error(tmp_path: Path) -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
     upload = _make_upload_file(size=get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
 
     with pytest.raises(InputValidationError, match="exceeds maximum size"):
-        await service.create(user, workspace, WorkspaceRole.MEMBER, "My Doc", upload)
+        await service.create(user, workspace_id, WorkspaceRole.MEMBER, "My Doc", upload)
 
 
 async def test_unsupported_mime_type_raises_validation_error() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
     upload = _make_upload_file(content_type="image/png", filename="photo.png")
 
     with pytest.raises(InputValidationError, match="Unsupported file type"):
-        await service.create(user, workspace, WorkspaceRole.MEMBER, "My Doc", upload)
+        await service.create(user, workspace_id, WorkspaceRole.MEMBER, "My Doc", upload)
 
 
 async def test_allowed_mime_types_are_accepted(tmp_path: Path) -> None:
     for mime, expected_ct in ALLOWED_CONTENT_TYPES.items():
         service, repo = _make_service()
         user = _make_user()
-        workspace = _make_workspace()
+        workspace_id = uuid.uuid4()
         upload = _make_upload_file(content_type=mime, filename="file.txt")
         import src.services.document as svc_mod
 
@@ -210,7 +198,7 @@ async def test_allowed_mime_types_are_accepted(tmp_path: Path) -> None:
         svc_mod.settings.UPLOAD_DIR = str(tmp_path)  # type: ignore[assignment]
         try:
             result = await service.create(
-                user, workspace, WorkspaceRole.MEMBER, "Title", upload
+                user, workspace_id, WorkspaceRole.MEMBER, "Title", upload
             )
             assert result.content_type == expected_ct
         finally:
@@ -225,24 +213,24 @@ async def test_allowed_mime_types_are_accepted(tmp_path: Path) -> None:
 async def test_viewer_cannot_create_document() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
     upload = _make_upload_file()
 
     with pytest.raises(ForbiddenError):
-        await service.create(user, workspace, WorkspaceRole.VIEWER, "Doc", upload)
+        await service.create(user, workspace_id, WorkspaceRole.VIEWER, "Doc", upload)
 
 
 async def test_viewer_cannot_update_document() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
+    workspace_id = uuid.uuid4()
+    doc = _make_document(workspace_id, user.id)
     repo._store[doc.id] = doc
 
     with pytest.raises(ForbiddenError):
         await service.update(
             user,
-            workspace,
+            workspace_id,
             WorkspaceRole.VIEWER,
             doc.id,
             DocumentUpdateInput(title="X"),
@@ -252,24 +240,24 @@ async def test_viewer_cannot_update_document() -> None:
 async def test_viewer_cannot_delete_document() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
+    workspace_id = uuid.uuid4()
+    doc = _make_document(workspace_id, user.id)
     repo._store[doc.id] = doc
 
     with pytest.raises(ForbiddenError):
-        await service.delete(user, workspace, WorkspaceRole.VIEWER, doc.id)
+        await service.delete(user, workspace_id, WorkspaceRole.VIEWER, doc.id)
 
 
 async def test_member_cannot_delete_document() -> None:
     """MEMBER role lacks delete_document permission."""
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
+    workspace_id = uuid.uuid4()
+    doc = _make_document(workspace_id, user.id)
     repo._store[doc.id] = doc
 
     with pytest.raises(ForbiddenError):
-        await service.delete(user, workspace, WorkspaceRole.MEMBER, doc.id)
+        await service.delete(user, workspace_id, WorkspaceRole.MEMBER, doc.id)
 
 
 # ---------------------------------------------------------------------------
@@ -280,25 +268,25 @@ async def test_member_cannot_delete_document() -> None:
 async def test_delete_handles_missing_file_gracefully() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
 
-    doc = _make_document(workspace.id, user.id)
+    doc = _make_document(workspace_id, user.id)
     doc.file_path = "/nonexistent/path/that/does/not/exist.pdf"
     repo._store[doc.id] = doc
 
     # Must not raise even though the file doesn't exist
-    await service.delete(user, workspace, WorkspaceRole.OWNER, doc.id)
+    await service.delete(user, workspace_id, WorkspaceRole.OWNER, doc.id)
 
-    assert await repo.get_by_id(doc.id) is None
+    assert doc.id not in repo._store
 
 
 async def test_delete_nonexistent_document_raises_not_found() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
 
     with pytest.raises(NotFoundError):
-        await service.delete(user, workspace, WorkspaceRole.OWNER, uuid.uuid4())
+        await service.delete(user, workspace_id, WorkspaceRole.OWNER, uuid.uuid4())
 
 
 # ---------------------------------------------------------------------------
@@ -309,14 +297,14 @@ async def test_delete_nonexistent_document_raises_not_found() -> None:
 async def test_get_wrong_workspace_raises_not_found() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    other_workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
+    other_workspace_id = uuid.uuid4()
 
-    doc = _make_document(other_workspace.id, user.id)
+    doc = _make_document(other_workspace_id, user.id)
     repo._store[doc.id] = doc
 
     with pytest.raises(NotFoundError):
-        await service.get(workspace, doc.id)
+        await service.get(workspace_id, doc.id)
 
 
 # ---------------------------------------------------------------------------
@@ -327,14 +315,18 @@ async def test_get_wrong_workspace_raises_not_found() -> None:
 async def test_update_increments_version() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
 
-    doc = _make_document(workspace.id, user.id)
+    doc = _make_document(workspace_id, user.id)
     repo._store[doc.id] = doc
     original_version = doc.version
 
     result = await service.update(
-        user, workspace, WorkspaceRole.MEMBER, doc.id, DocumentUpdateInput(title="New")
+        user,
+        workspace_id,
+        WorkspaceRole.MEMBER,
+        doc.id,
+        DocumentUpdateInput(title="New"),
     )
     assert result.version == original_version + 1
     assert result.title == "New"
@@ -348,26 +340,26 @@ async def test_update_increments_version() -> None:
 async def test_validate_magic_bytes_wrong_pdf_header_raises() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
     upload = _make_upload_file(
         content_type="application/pdf",
         content=b"not a real pdf file",
     )
     with pytest.raises(InputValidationError, match="does not match"):
-        await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+        await service.create(user, workspace_id, WorkspaceRole.MEMBER, "Doc", upload)
 
 
 async def test_validate_magic_bytes_binary_in_text_file_raises() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
     upload = _make_upload_file(
         content_type="text/plain",
         content=b"\x80\x81\x82\x83",  # invalid UTF-8 continuation bytes
     )
 
     with pytest.raises(InputValidationError, match="does not match"):
-        await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+        await service.create(user, workspace_id, WorkspaceRole.MEMBER, "Doc", upload)
 
 
 # ---------------------------------------------------------------------------
@@ -378,14 +370,14 @@ async def test_validate_magic_bytes_binary_in_text_file_raises() -> None:
 async def test_create_path_traversal_filename_raises() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
     upload = _make_upload_file(content_type="text/plain", filename="safe.txt")
 
     with (
         patch("pathlib.Path.is_relative_to", return_value=False),
         pytest.raises(InputValidationError, match="Invalid filename"),
     ):
-        await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+        await service.create(user, workspace_id, WorkspaceRole.MEMBER, "Doc", upload)
 
 
 # ---------------------------------------------------------------------------
@@ -400,11 +392,11 @@ async def test_write_file_size_exceeded_cleanup(tmp_path: Path) -> None:
     repo = StubDocumentRepository()
     service = DocumentService(repo=repo, session=MockSession())  # type: ignore[arg-type]
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
 
-    # file.size = None bypasses the fast-fail header check; MAX_UPLOAD_SIZE_MB = 0
+    # declared_size = None bypasses the early size check; MAX_UPLOAD_SIZE_MB = 0
     # means even one byte exceeds the limit inside _write_file.
-    upload = _make_upload_file(size=None, content_type="text/plain", content=b"hi")  # type: ignore[arg-type]
+    upload = _make_upload_file(size=None, content_type="text/plain", content=b"hi")
 
     original_dir = svc_mod.settings.UPLOAD_DIR
     original_max = svc_mod.settings.MAX_UPLOAD_SIZE_MB
@@ -412,7 +404,9 @@ async def test_write_file_size_exceeded_cleanup(tmp_path: Path) -> None:
     svc_mod.settings.MAX_UPLOAD_SIZE_MB = 0  # type: ignore[assignment]
     try:
         with pytest.raises(InputValidationError, match="exceeds maximum size"):
-            await service.create(user, workspace, WorkspaceRole.MEMBER, "Doc", upload)
+            await service.create(
+                user, workspace_id, WorkspaceRole.MEMBER, "Doc", upload
+            )
     finally:
         svc_mod.settings.UPLOAD_DIR = original_dir  # type: ignore[assignment]
         svc_mod.settings.MAX_UPLOAD_SIZE_MB = original_max  # type: ignore[assignment]
@@ -426,60 +420,63 @@ async def test_write_file_size_exceeded_cleanup(tmp_path: Path) -> None:
 async def test_delete_oserror_is_suppressed() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
+    workspace_id = uuid.uuid4()
+    doc = _make_document(workspace_id, user.id)
     doc.file_path = "/some/path/file.pdf"
     repo._store[doc.id] = doc
 
     with patch("pathlib.Path.unlink", side_effect=OSError("disk full")):
-        await service.delete(user, workspace, WorkspaceRole.OWNER, doc.id)
+        await service.delete(user, workspace_id, WorkspaceRole.OWNER, doc.id)
 
-    assert await repo.get_by_id(doc.id) is None
+    assert doc.id not in repo._store
 
 
 # ---------------------------------------------------------------------------
-# _get_by_id — private helper coverage
+# get / list / get_workspace_stats — reads scoped by workspace_id
 # ---------------------------------------------------------------------------
 
 
-async def test_private_get_by_id_found_returns_doc() -> None:
+async def test_get_found_returns_doc() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
+    workspace_id = uuid.uuid4()
+    doc = _make_document(workspace_id, user.id)
     repo._store[doc.id] = doc
 
-    result = await service._get_by_id(workspace.id, doc.id)
+    result = await service.get(workspace_id, doc.id)
     assert result.id == doc.id
 
 
-async def test_private_get_by_id_missing_raises_not_found() -> None:
+async def test_get_missing_raises_not_found() -> None:
     service, _ = _make_service()
     with pytest.raises(NotFoundError):
-        await service._get_by_id(uuid.uuid4(), uuid.uuid4())
+        await service.get(uuid.uuid4(), uuid.uuid4())
 
 
-async def test_private_get_by_id_wrong_workspace_raises_not_found() -> None:
+async def test_list_returns_only_workspace_docs() -> None:
     service, repo = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
+    workspace_id = uuid.uuid4()
+    doc = _make_document(workspace_id, user.id)
+    other = _make_document(uuid.uuid4(), user.id)
     repo._store[doc.id] = doc
+    repo._store[other.id] = other
 
-    with pytest.raises(NotFoundError):
-        await service._get_by_id(uuid.uuid4(), doc.id)
-
-
-# ---------------------------------------------------------------------------
-# _list_by_workspace_id — private helper coverage
-# ---------------------------------------------------------------------------
+    page = await service.list(workspace_id)
+    assert [d.id for d in page.items] == [doc.id]
+    assert page.has_more is False
 
 
-async def test_private_get_workspace_stats() -> None:
+async def test_list_invalid_cursor_raises_validation_error() -> None:
+    service, _ = _make_service()
+    with pytest.raises(InputValidationError, match="cursor"):
+        await service.list(uuid.uuid4(), cursor_str="not-a-cursor")
+
+
+async def test_get_workspace_stats() -> None:
     from src.domain.workspace import WorkspaceStats
 
-    repo = StubDocumentRepository()
-    service = DocumentService(repo=repo, session=MockSession())  # type: ignore[arg-type]
+    service, repo = _make_service()
 
     async def _stats(wid: uuid.UUID) -> WorkspaceStats:
         return WorkspaceStats(
@@ -491,31 +488,20 @@ async def test_private_get_workspace_stats() -> None:
 
     repo.get_workspace_stats = _stats  # type: ignore[attr-defined]
 
-    result = await service._get_workspace_stats(uuid.uuid4())
+    result = await service.get_workspace_stats(uuid.uuid4())
     assert result.document_count == 3
 
 
 async def test_update_nonexistent_document_raises_not_found() -> None:
     service, _ = _make_service()
     user = _make_user()
-    workspace = _make_workspace()
+    workspace_id = uuid.uuid4()
 
     with pytest.raises(NotFoundError):
         await service.update(
             user,
-            workspace,
+            workspace_id,
             WorkspaceRole.MEMBER,
             uuid.uuid4(),
             DocumentUpdateInput(title="X"),
         )
-
-
-async def test_private_list_by_workspace_id_returns_docs() -> None:
-    service, repo = _make_service()
-    user = _make_user()
-    workspace = _make_workspace()
-    doc = _make_document(workspace.id, user.id)
-    repo._store[doc.id] = doc
-
-    result = await service._list_by_workspace_id(workspace.id)
-    assert len(result) == 1

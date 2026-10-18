@@ -5,6 +5,7 @@ import os
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 
+import httpx
 import pytest
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from testcontainers.postgres import PostgresContainer
 
 from src.core.config import get_settings
-from src.core.dependencies import get_db
+from src.core.dependencies import get_db, get_http_client
 from src.core.redis import get_redis
 from src.main import app
 
@@ -101,8 +102,16 @@ async def async_client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
     async def _override_get_db() -> AsyncGenerator[AsyncSession]:
         yield db_session
 
+    # Stands in for the lifespan's shared client; tests that need an external API
+    # override the service that uses it, so any real request here is a test bug.
+    def _no_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected outbound HTTP call: {request.url}")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_no_network))
+
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_redis] = lambda: fake_redis
+    app.dependency_overrides[get_http_client] = lambda: http_client
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -111,6 +120,7 @@ async def async_client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
     finally:
         app.dependency_overrides.clear()
         await fake_redis.aclose()
+        await http_client.aclose()
 
 
 @pytest.fixture

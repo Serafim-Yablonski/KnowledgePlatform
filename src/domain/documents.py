@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import BinaryIO
 
 
 class DocumentStatus(StrEnum):
@@ -51,6 +52,22 @@ def decode_cursor(value: str) -> Cursor:
         )
     except (ValueError, KeyError, UnicodeDecodeError) as exc:
         raise ValueError("Invalid pagination cursor") from exc
+
+
+@dataclass(frozen=True)
+class DocumentUpload:
+    """An uploaded file as the service sees it, independent of the web framework.
+
+    ``declared_size`` is whatever size the adapter already knows, if any. From REST it
+    is Starlette's count of the already-buffered body, not a header, so rejecting on it
+    saves the DB row and disk write, not the transfer. The limit that counts is the
+    one enforced while streaming ``stream`` to disk.
+    """
+
+    filename: str
+    content_type: str
+    declared_size: int | None
+    stream: BinaryIO
 
 
 @dataclass

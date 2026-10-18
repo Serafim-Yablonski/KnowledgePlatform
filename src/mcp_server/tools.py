@@ -3,107 +3,15 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from src.core.database import get_session
+from src.composition import open_services
 from src.core.exceptions import InputValidationError
-from src.core.http import get_async_http_client
 from src.core.redis import get_async_redis_client
 from src.mcp_server.auth import get_mcp_user
-
-if TYPE_CHECKING:
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Internal service factories (mirror src/core/dependencies.py without Depends)
-# ---------------------------------------------------------------------------
-
-
-def _make_workspace_service(session: Any) -> Any:
-    from src.core.cache import ResponseCache
-    from src.repositories.user import SQLAlchemyUserRepository
-    from src.repositories.workspace import SQLAlchemyWorkspaceRepository
-    from src.repositories.workspace_cached import CachedWorkspaceRepository
-    from src.services.workspace import WorkspaceService
-
-    cache = ResponseCache(get_async_redis_client())
-    inner_repo = SQLAlchemyWorkspaceRepository(session)
-    return WorkspaceService(
-        workspace_repo=CachedWorkspaceRepository(inner_repo, cache),
-        user_repo=SQLAlchemyUserRepository(session),
-    )
-
-
-def _make_search_service(session: Any) -> Any:
-    from src.ai.embeddings import EmbeddingService
-    from src.core.config import get_settings
-    from src.repositories.search import SQLAlchemySearchRepository
-    from src.services.search import SearchService
-
-    cfg = get_settings()
-    embedding_svc = EmbeddingService(
-        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-        model=cfg.EMBEDDING_MODEL,
-        dimensions=cfg.EMBEDDING_DIMENSIONS,
-        http_client=get_async_http_client(),
-    )
-    return SearchService(
-        search_repo=SQLAlchemySearchRepository(session),
-        embedding_service=embedding_svc,
-    )
-
-
-def _make_ai_service(session: Any) -> Any:
-    from src.ai.embeddings import EmbeddingService
-    from src.core.config import get_settings
-    from src.repositories.document import SQLAlchemyDocumentRepository
-    from src.repositories.search import SQLAlchemySearchRepository
-    from src.services.ai import AIService
-    from src.services.document import DocumentService
-    from src.services.search import SearchService
-
-    cfg = get_settings()
-    embedding_svc = EmbeddingService(
-        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-        model=cfg.EMBEDDING_MODEL,
-        dimensions=cfg.EMBEDDING_DIMENSIONS,
-        http_client=get_async_http_client(),
-    )
-    search_svc = SearchService(
-        search_repo=SQLAlchemySearchRepository(session),
-        embedding_service=embedding_svc,
-    )
-    return AIService(
-        search_service=search_svc,
-        document_service=DocumentService(
-            repo=SQLAlchemyDocumentRepository(session), session=session
-        ),
-    )
-
-
-def _make_research_service(session: Any, redis: Any) -> Any:
-    from src.ai.embeddings import EmbeddingService
-    from src.core.config import get_settings
-    from src.repositories.search import SQLAlchemySearchRepository
-    from src.services.research import ResearchService
-    from src.services.search import SearchService
-
-    cfg = get_settings()
-    embedding_svc = EmbeddingService(
-        api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-        model=cfg.EMBEDDING_MODEL,
-        dimensions=cfg.EMBEDDING_DIMENSIONS,
-        http_client=get_async_http_client(),
-    )
-    search_svc = SearchService(
-        search_repo=SQLAlchemySearchRepository(session),
-        embedding_service=embedding_svc,
-    )
-    return ResearchService(search_service=search_svc, redis_client=redis)
 
 
 def _parse_workspace_id(workspace_id: str) -> uuid.UUID:
@@ -145,10 +53,10 @@ async def search_documents(
     user = get_mcp_user()
     await _mcp_rate_limit(user.id, "mcp_search", 20, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
-    async with get_session() as session:
-        workspace_svc = _make_workspace_service(session)
+    async with open_services() as services:
+        workspace_svc = services.workspace
         await workspace_svc.get_user_role(user, ws_uuid)  # ForbiddenError if not member
-        search_svc = _make_search_service(session)
+        search_svc = services.search
         result = await search_svc.search(workspace_id=ws_uuid, query=query, top_k=top_k)
     return [
         {
@@ -178,10 +86,10 @@ async def ask_question(
     user = get_mcp_user()
     await _mcp_rate_limit(user.id, "mcp_ask", 10, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
-    async with get_session() as session:
-        workspace_svc = _make_workspace_service(session)
+    async with open_services() as services:
+        workspace_svc = services.workspace
         role = await workspace_svc.get_user_role(user, ws_uuid)
-        ai_svc = _make_ai_service(session)
+        ai_svc = services.ai
         answer = await ai_svc.ask(
             workspace_id=ws_uuid,
             user_id=user.id,
@@ -228,11 +136,10 @@ async def start_research(
     user = get_mcp_user()
     await _mcp_rate_limit(user.id, "mcp_research_start", 5, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
-    redis = get_async_redis_client()
-    async with get_session() as session:
-        workspace_svc = _make_workspace_service(session)
+    async with open_services() as services:
+        workspace_svc = services.workspace
         await workspace_svc.get_user_role(user, ws_uuid)
-        research_svc = _make_research_service(session, redis)
+        research_svc = services.research
         thread_id = await research_svc.start_research(
             workspace_id=ws_uuid,
             user_id=user.id,
@@ -254,11 +161,10 @@ async def get_research_status(
 ) -> dict[str, Any]:
     user = get_mcp_user()
     ws_uuid = _parse_workspace_id(workspace_id)
-    redis = get_async_redis_client()
-    async with get_session() as session:
-        workspace_svc = _make_workspace_service(session)
+    async with open_services() as services:
+        workspace_svc = services.workspace
         await workspace_svc.get_user_role(user, ws_uuid)
-        research_svc = _make_research_service(session, redis)
+        research_svc = services.research
         status = await research_svc.get_status(
             workspace_id=ws_uuid, user_id=user.id, thread_id=thread_id
         )
@@ -295,8 +201,8 @@ async def list_workspaces() -> list[dict[str, Any]]:
     session_id = get_current_session_id() or str(user.id)
     get_or_create_session_state(session_id, user)
 
-    async with get_session() as session:
-        workspace_svc = _make_workspace_service(session)
+    async with open_services() as services:
+        workspace_svc = services.workspace
         workspaces = await workspace_svc.list_for_user(user)
         results = []
         for ws in workspaces:
@@ -329,8 +235,8 @@ async def set_active_workspace(
     ws_uuid = _parse_workspace_id(workspace_id)
     session_id = get_current_session_id() or str(user.id)
 
-    async with get_session() as session:
-        workspace_svc = _make_workspace_service(session)
+    async with open_services() as services:
+        workspace_svc = services.workspace
         _, membership = await workspace_svc.get_workspace_for_user(ws_uuid, user.id)
         role = membership.role
         ws_info = await workspace_svc.get_by_id(ws_uuid)

@@ -10,7 +10,12 @@ from src.core.dependencies import (
     get_document_service,
 )
 from src.core.rate_limit import workspace_rate_limit
-from src.domain.documents import DocumentStatus, DocumentUpdateInput, encode_cursor
+from src.domain.documents import (
+    DocumentStatus,
+    DocumentUpdateInput,
+    DocumentUpload,
+    encode_cursor,
+)
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
@@ -43,8 +48,14 @@ async def upload_document(
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
+    upload = DocumentUpload(
+        filename=file.filename or "",
+        content_type=file.content_type or "",
+        declared_size=file.size,
+        stream=file.file,
+    )
     doc = await service.create(
-        actor, workspace, request.state.workspace_role, title, file
+        actor, workspace.id, request.state.workspace_role, title, upload
     )
     return DocumentResponse.model_validate(doc)
 
@@ -57,7 +68,7 @@ async def list_documents(
     doc_status: DocumentStatus | None = Query(default=None, alias="status"),
     service: DocumentService = Depends(get_document_service),
 ) -> PaginatedResponse[DocumentResponse]:
-    page = await service.list(workspace, cursor, limit, doc_status)
+    page = await service.list(workspace.id, cursor, limit, doc_status)
     return PaginatedResponse(
         items=[DocumentResponse.model_validate(d) for d in page.items],
         next_cursor=encode_cursor(page.next_cursor) if page.next_cursor else None,
@@ -71,7 +82,7 @@ async def get_document(
     workspace: Workspace = Depends(get_current_workspace),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    doc = await service.get(workspace, document_id)
+    doc = await service.get(workspace.id, document_id)
     return DocumentResponse.model_validate(doc)
 
 
@@ -86,7 +97,7 @@ async def update_document(
 ) -> DocumentResponse:
     domain_data = DocumentUpdateInput(title=data.title)
     doc = await service.update(
-        actor, workspace, request.state.workspace_role, document_id, domain_data
+        actor, workspace.id, request.state.workspace_role, document_id, domain_data
     )
     return DocumentResponse.model_validate(doc)
 
@@ -99,4 +110,4 @@ async def delete_document(
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> None:
-    await service.delete(actor, workspace, request.state.workspace_role, document_id)
+    await service.delete(actor, workspace.id, request.state.workspace_role, document_id)

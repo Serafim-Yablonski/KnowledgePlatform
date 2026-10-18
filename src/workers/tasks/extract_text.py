@@ -94,7 +94,7 @@ def extract_text(self: Task, document_id: str) -> None:
                 doc.status = DocumentStatus.FAILED
                 try:
                     session.commit()
-                except Exception as commit_exc:
+                except Exception as commit_exc:  # noqa: BLE001 — best-effort status write; original error is retried below
                     logger.warning(
                         "failed to persist FAILED status",
                         document_id=document_id,

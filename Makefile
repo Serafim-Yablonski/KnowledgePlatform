@@ -27,6 +27,7 @@ test-int:
 lint:
 	uv run ruff check src/ tests/
 	uv run ruff format --check src/ tests/
+	uv run lint-imports
 
 typecheck:
 	uv run mypy --strict src/
