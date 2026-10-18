@@ -116,6 +116,28 @@ class TestGetOrSet:
         # Cache hit must return an _Item instance, not a raw dict.
         assert isinstance(result2, _Item)
 
+    @pytest.mark.asyncio
+    async def test_miss_returns_deserialized_copy_not_factory_object(
+        self, cache: ResponseCache
+    ) -> None:
+        # A miss must return what a hit would: a fresh copy, so callers can't end up
+        # holding the factory's object (for ORM rows: one a session can expire).
+        original = _Item(name="bar", value=7)
+
+        async def factory() -> _Item:
+            return original
+
+        result = await cache.get_or_set(
+            "item",
+            60,
+            factory,
+            serializer=lambda r: r.model_dump(mode="json"),
+            deserializer=_Item.model_validate,
+        )
+
+        assert result == original
+        assert result is not original
+
 
 # ---------------------------------------------------------------------------
 # ResponseCache.delete
@@ -156,6 +178,22 @@ def _broken_redis() -> MagicMock:
     client.delete = AsyncMock(side_effect=RedisConnectionError("Redis down"))
     client.scan = AsyncMock(side_effect=RedisConnectionError("Redis down"))
     return client
+
+
+class TestClaim:
+    @pytest.mark.asyncio
+    async def test_first_claim_wins_until_ttl(self, cache: ResponseCache) -> None:
+        assert await cache.claim("slot", ttl=60) is True
+        assert await cache.claim("slot", ttl=60) is False
+
+    @pytest.mark.asyncio
+    async def test_claim_fails_closed_when_redis_down(self) -> None:
+        # Nobody wins a slot Redis can't arbitrate: "everyone wins" would break
+        # callers that use a claim for mutual exclusion.
+        cache = ResponseCache(_broken_redis())  # type: ignore[arg-type]
+        with structlog.testing.capture_logs() as logs:
+            assert await cache.claim("slot", ttl=60) is False
+        assert any("cache claim failed" in e["event"] for e in logs)
 
 
 class TestRedisDownDegradation:

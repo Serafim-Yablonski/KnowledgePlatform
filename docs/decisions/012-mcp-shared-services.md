@@ -1,5 +1,5 @@
 # 012. MCP Server as a Protocol Adapter over the Shared Service Layer
-Status: Accepted | Date: 2026-05-24
+Status: Accepted, amended by ADR-018 | Date: 2026-05-24
 
 ## Context
 We need an MCP (Model Context Protocol) server so AI clients can search documents, ask questions, and run research workflows. The same business logic already exists behind the REST API. The key question is where to draw the boundary: should the MCP server duplicate service logic, access repositories directly, or share the existing service layer?

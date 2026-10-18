@@ -1,6 +1,8 @@
 # 013. MCP API Key Authentication and Session-Scoped Workspace State
 Status: Accepted | Date: 2026-05-25
 
+> 2026-10-16: the legacy env-var key (`MCP_API_KEY`, `MCP_API_KEY_USER_EMAIL`, `X-API-Key`) was removed; database API keys are the only key path.
+
 ## Context
 The MCP server previously supported JWT Bearer tokens (short-lived, issued by the login endpoint) and a static env-var API key pair (`MCP_API_KEY` + `MCP_API_KEY_USER_EMAIL`). Long-running desktop clients like Claude Desktop need a credential that survives token expiry without user intervention. Additionally, every existing MCP tool required an explicit `workspace_id` UUID parameter, forcing the calling agent to track and pass this on every call.
 

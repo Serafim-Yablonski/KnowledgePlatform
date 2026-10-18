@@ -4,10 +4,14 @@ import hashlib
 import secrets
 import uuid
 
+import structlog
+
 from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from src.models.api_key import ApiKey
 from src.models.user import User
 from src.repositories.protocols import ApiKeyRepositoryProtocol
+
+logger = structlog.get_logger(__name__)
 
 _MAX_ACTIVE_KEYS = 5
 
@@ -38,7 +42,17 @@ class ApiKeyService:
             raise ForbiddenError("Invalid or revoked API key")
         if not api_key.user.is_active:
             raise ForbiddenError("Invalid or revoked API key")
+        await self._record_use(api_key.id)
         return api_key.user
+
+    async def _record_use(self, key_id: uuid.UUID) -> None:
+        # Bookkeeping must never turn a valid key into a failed request.
+        try:
+            await self._repo.touch_last_used(key_id)
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not fail auth
+            logger.warning(
+                "failed to record api key use", key_id=str(key_id), error=repr(exc)
+            )
 
     async def invalidate_user_keys(self, user_id: uuid.UUID) -> None:
         """Invalidate all cached API key lookups for a user."""
