@@ -6,7 +6,7 @@ import uuid
 
 import structlog
 
-from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from src.core.exceptions import ConflictError, InvalidTokenError, NotFoundError
 from src.models.api_key import ApiKey
 from src.models.user import User
 from src.repositories.protocols import ApiKeyRepositoryProtocol
@@ -39,9 +39,9 @@ class ApiKeyService:
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         api_key = await self._repo.get_by_hash(key_hash)
         if api_key is None or not api_key.is_active:
-            raise ForbiddenError("Invalid or revoked API key")
+            raise InvalidTokenError("Invalid or revoked API key")
         if not api_key.user.is_active:
-            raise ForbiddenError("Invalid or revoked API key")
+            raise InvalidTokenError("Invalid or revoked API key")
         await self._record_use(api_key.id)
         return api_key.user
 

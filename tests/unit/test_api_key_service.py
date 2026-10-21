@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import structlog.testing
 
-from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from src.core.exceptions import ConflictError, InvalidTokenError, NotFoundError
 from src.services.api_key import ApiKeyService
 
 
@@ -120,7 +120,7 @@ class TestAuthenticate:
     async def test_wrong_key_raises(self) -> None:
         repo = _make_repo(existing_key=None)
         service = ApiKeyService(repo)
-        with pytest.raises(ForbiddenError):
+        with pytest.raises(InvalidTokenError):
             await service.authenticate("wrongkey")
 
     @pytest.mark.asyncio
@@ -129,7 +129,7 @@ class TestAuthenticate:
         mock_key = _make_api_key(is_active=False)
         repo = _make_repo(existing_key=mock_key)
         service = ApiKeyService(repo)
-        with pytest.raises(ForbiddenError, match="revoked"):
+        with pytest.raises(InvalidTokenError, match="revoked"):
             await service.authenticate(raw_key)
 
     @pytest.mark.asyncio
@@ -140,7 +140,7 @@ class TestAuthenticate:
         mock_key = _make_api_key(is_active=True, user=inactive_user)
         repo = _make_repo(existing_key=mock_key)
         service = ApiKeyService(repo)
-        with pytest.raises(ForbiddenError, match="revoked"):
+        with pytest.raises(InvalidTokenError, match="revoked"):
             await service.authenticate(raw_key)
         repo.touch_last_used.assert_not_awaited()
 

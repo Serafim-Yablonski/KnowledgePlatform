@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from src.core.exceptions import ConflictError, ForbiddenError
+from src.core.exceptions import (
+    ConflictError,
+    InvalidTokenError,
+    UnauthorizedError,
+)
 from src.core.security import create_access_token
 from src.domain.user import TokenPair
 from src.models.user import User
@@ -99,22 +103,28 @@ async def test_login_success() -> None:
 async def test_login_wrong_password() -> None:
     service, _ = _make_service()
     await service.register("bob@example.com", "hunter22")
-    with pytest.raises(ForbiddenError, match="Invalid credentials"):
+    with pytest.raises(UnauthorizedError, match="Invalid credentials") as exc_info:
         await service.login("bob@example.com", "wrongpass")
+    # No token was sent: the plain challenge, not invalid_token.
+    assert type(exc_info.value) is UnauthorizedError
 
 
 async def test_login_nonexistent_email() -> None:
     service, _ = _make_service()
-    with pytest.raises(ForbiddenError, match="Invalid credentials"):
+    with pytest.raises(UnauthorizedError, match="Invalid credentials") as exc_info:
         await service.login("ghost@example.com", "whatever")
+    # No token was sent: the plain challenge, not invalid_token.
+    assert type(exc_info.value) is UnauthorizedError
 
 
 async def test_login_inactive_user() -> None:
     service, repo = _make_service()
     user = await service.register("inactive@example.com", "secret99")
     await repo.update(user, is_active=False)
-    with pytest.raises(ForbiddenError, match="Invalid credentials"):
+    with pytest.raises(UnauthorizedError, match="Invalid credentials") as exc_info:
         await service.login("inactive@example.com", "secret99")
+    # No token was sent: the plain challenge, not invalid_token.
+    assert type(exc_info.value) is UnauthorizedError
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +143,7 @@ async def test_get_current_user_success() -> None:
 async def test_get_current_user_not_found() -> None:
     service, _ = _make_service()
     token = create_access_token(uuid.uuid4())
-    with pytest.raises(ForbiddenError, match="User not found or inactive"):
+    with pytest.raises(InvalidTokenError, match="User not found or inactive"):
         await service.get_current_user(token)
 
 
@@ -142,13 +152,13 @@ async def test_get_current_user_inactive() -> None:
     user = await service.register("dave@example.com", "secret99")
     await repo.update(user, is_active=False)
     token = create_access_token(user.id)
-    with pytest.raises(ForbiddenError, match="User not found or inactive"):
+    with pytest.raises(InvalidTokenError, match="User not found or inactive"):
         await service.get_current_user(token)
 
 
 async def test_get_current_user_invalid_token() -> None:
     service, _ = _make_service()
-    with pytest.raises(ForbiddenError):
+    with pytest.raises(InvalidTokenError):
         await service.get_current_user("not.a.token")
 
 
@@ -157,7 +167,7 @@ async def test_get_current_user_rejects_refresh_token() -> None:
 
     service, _ = _make_service()
     token = create_refresh_token(uuid.uuid4())
-    with pytest.raises(ForbiddenError, match="Invalid token type"):
+    with pytest.raises(InvalidTokenError, match="Invalid token type"):
         await service.get_current_user(token)
 
 
@@ -183,13 +193,13 @@ async def test_refresh_success() -> None:
 async def test_refresh_rejects_access_token() -> None:
     service, _ = _make_service()
     token = create_access_token(uuid.uuid4())
-    with pytest.raises(ForbiddenError, match="Invalid token type"):
+    with pytest.raises(InvalidTokenError, match="Invalid token type"):
         await service.refresh(token)
 
 
 async def test_refresh_rejects_invalid_token() -> None:
     service, _ = _make_service()
-    with pytest.raises(ForbiddenError):
+    with pytest.raises(InvalidTokenError):
         await service.refresh("not.a.token")
 
 
@@ -198,7 +208,7 @@ async def test_refresh_rejects_unknown_user() -> None:
 
     service, _ = _make_service()
     token = create_refresh_token(uuid.uuid4())
-    with pytest.raises(ForbiddenError, match="User not found or inactive"):
+    with pytest.raises(InvalidTokenError, match="User not found or inactive"):
         await service.refresh(token)
 
 
@@ -209,7 +219,7 @@ async def test_refresh_rejects_inactive_user() -> None:
     user = await service.register("grace@example.com", "secret99")
     await repo.update(user, is_active=False)
     token = create_refresh_token(user.id)
-    with pytest.raises(ForbiddenError, match="User not found or inactive"):
+    with pytest.raises(InvalidTokenError, match="User not found or inactive"):
         await service.refresh(token)
 
 

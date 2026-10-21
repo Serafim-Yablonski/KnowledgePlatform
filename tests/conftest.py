@@ -13,10 +13,24 @@ from sqlalchemy import NullPool
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from src.core.config import get_settings
 from src.core.dependencies import get_db, get_http_client
+from src.core.observability import configure_logfire
 from src.core.redis import get_redis
 from src.main import app
+from tests.support.docker import wait_for_port_mappings
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _api_tracing_config() -> None:
+    """Run every test under the API process's tracing config, not Logfire's
+    unconfigured default, which trusts any incoming trace context. Never exports:
+    no token, whatever .env says."""
+    configure_logfire(
+        token=None,
+        environment="test",
+        service_name="knowledge-platform",
+        trust_incoming_trace_context=False,
+    )
 
 
 def _ensure_docker_host() -> None:
@@ -31,8 +45,14 @@ def _ensure_docker_host() -> None:
 def postgres_container() -> Generator[PostgresContainer]:
     _ensure_docker_host()
     # pgvector/pgvector:pg18 ships PostgreSQL 18 with pgvector pre-installed.
-    with PostgresContainer("pgvector/pgvector:pg18") as container:
+    container = PostgresContainer("pgvector/pgvector:pg18")
+    # Covers the Ryuk reaper's port lookup too: start() launches the reaper first.
+    with wait_for_port_mappings():
+        container.start()
+    try:
         yield container
+    finally:
+        container.stop()
 
 
 @pytest.fixture(scope="session")
@@ -128,7 +148,9 @@ def settings_override(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Patch individual Settings fields for a single test.
 
     Usage: settings_override.setattr(settings, "SECRET_KEY", "test-value")
+
+    ``settings`` is the instance ``get_settings()`` caches, so a patch reaches both.
+    Never clear that cache here: the next ``get_settings()`` would build a new
+    instance, and patches to ``settings`` would no longer reach its callers.
     """
-    get_settings.cache_clear()
-    yield monkeypatch
-    get_settings.cache_clear()
+    return monkeypatch

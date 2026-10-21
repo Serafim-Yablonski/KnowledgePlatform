@@ -1,13 +1,12 @@
 """Integration tests for the MCP server against real PostgreSQL.
 
-Tools, resources and auth run on real services built by the composition root over
+Tools and auth run on real services built by the composition root over
 the test DB session; only external calls (embeddings, rate limiting) are stubbed.
-Protocol-level tests through the MCP client arrive with the transport rewrite.
+Protocol-level tests through the MCP client live in test_mcp_protocol.py.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import AsyncGenerator, Generator
 from contextlib import ExitStack, asynccontextmanager
@@ -17,22 +16,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import sqlalchemy as sa
 from fakeredis.aioredis import FakeRedis
-from httpx import AsyncClient
+from mcp.server.context import ServerRequestContext
+from mcp.server.mcpserver import Context
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from src.composition import Services
-from src.core.exceptions import ForbiddenError
-from src.core.security import create_access_token
-from src.domain.documents import ContentType
+from src.core.exceptions import ForbiddenError, InvalidTokenError
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult, SearchResults
-from src.mcp_server.auth import _authenticate_request, _current_user
-from src.mcp_server.resources import get_workspace_stats, list_workspace_documents
+from src.mcp_server.auth import McpContext, _authenticate_request
 from src.mcp_server.tools import search_documents
 from src.models.user import User
-from src.repositories.document import SQLAlchemyDocumentRepository
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.schemas.auth import UserCreate
@@ -68,11 +64,6 @@ async def mcp_workspace(db_session: AsyncSession, mcp_user: User) -> uuid.UUID:
 
 
 @pytest.fixture
-def bearer_token(mcp_user: User) -> str:
-    return create_access_token(mcp_user.id)
-
-
-@pytest.fixture
 async def services(db_session: AsyncSession) -> AsyncGenerator[Services]:
     fake_redis = FakeRedis()
     yield Services(db_session, fake_redis, http_client=MagicMock())
@@ -88,7 +79,7 @@ def real_services(services: Services) -> Generator[Services]:
         yield services
 
     with ExitStack() as stack:
-        for module in ("auth", "tools", "resources"):
+        for module in ("auth", "tools"):
             stack.enter_context(patch(f"src.mcp_server.{module}.open_services", _open))
         stack.enter_context(
             patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock())
@@ -97,10 +88,19 @@ def real_services(services: Services) -> Generator[Services]:
 
 
 @pytest.fixture
-def as_user(mcp_user: User) -> Generator[User]:
-    token = _current_user.set(mcp_user)
-    yield mcp_user
-    _current_user.reset(token)
+def as_user(mcp_user: User) -> McpContext:
+    """The tool Context of a request MCP auth let through as ``mcp_user``."""
+    scope = {"type": "http", "path": "/mcp", "state": {"mcp_user": mcp_user}}
+    request_context = ServerRequestContext(
+        request_id=1,
+        protocol_version="2026-07-28",
+        method="tools/call",
+        meta=None,
+        session=MagicMock(),
+        lifespan_context=None,
+        request=Request(scope),
+    )
+    return Context(request_context=request_context)
 
 
 def _bearer_request(token: str) -> Request:
@@ -113,66 +113,6 @@ def _bearer_request(token: str) -> Request:
             "headers": [(b"authorization", f"Bearer {token}".encode())],
         }
     )
-
-
-# ---------------------------------------------------------------------------
-# Auth middleware (HTTP level)
-# ---------------------------------------------------------------------------
-
-
-class TestMCPAuthMiddleware:
-    @pytest.mark.asyncio
-    async def test_no_auth_header_returns_401(self, async_client: AsyncClient) -> None:
-        response = await async_client.post(
-            "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-        )
-        assert response.status_code == 401
-        body = response.json()
-        assert body["error"]["code"] == 401
-
-    @pytest.mark.asyncio
-    async def test_unknown_api_key_returns_403(
-        self, async_client: AsyncClient, real_services: Services
-    ) -> None:
-        response = await async_client.post(
-            "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            headers={"Authorization": "Bearer not-a-real-token"},
-        )
-        assert response.status_code == 403
-
-    @pytest.mark.asyncio
-    async def test_valid_bearer_token_passes_auth_then_hits_host_check(
-        self, async_client: AsyncClient, bearer_token: str, real_services: Services
-    ) -> None:
-        from src.mcp_server.server import get_mcp_session_manager
-
-        # ASGITransport skips the lifespan, which normally runs the session manager.
-        async with get_mcp_session_manager().run():
-            response = await async_client.post(
-                "/mcp",
-                content=json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2024-11-05",
-                            "capabilities": {},
-                            "clientInfo": {"name": "test", "version": "1.0"},
-                        },
-                    }
-                ),
-                headers={
-                    "Authorization": f"Bearer {bearer_token}",
-                    "Content-Type": "application/json",
-                },
-            )
-        # Auth passed and the request reached the transport, which rejects the
-        # non-localhost Host (plan finding F2). Track 2 fixes the allowlist and
-        # replaces this with a full initialize → tools/call test.
-        assert response.status_code == 421
 
 
 class TestApiKeyAuth:
@@ -223,7 +163,7 @@ class TestApiKeyAuth:
         api_key, raw_key = await real_services.api_key.create(mcp_user.id, "old")
         await real_services.api_key.deactivate(api_key.id, mcp_user.id)
 
-        with pytest.raises(ForbiddenError, match="Invalid or revoked"):
+        with pytest.raises(InvalidTokenError, match="Invalid or revoked"):
             await _authenticate_request(_bearer_request(raw_key))
 
 
@@ -235,7 +175,7 @@ class TestApiKeyAuth:
 class TestSearchDocumentsIntegration:
     @pytest.mark.asyncio
     async def test_search_returns_results(
-        self, as_user: User, mcp_workspace: uuid.UUID, real_services: Services
+        self, as_user: McpContext, mcp_workspace: uuid.UUID, real_services: Services
     ) -> None:
         search_svc = MagicMock()
         search_svc.search = AsyncMock(
@@ -257,7 +197,7 @@ class TestSearchDocumentsIntegration:
         real_services.search = search_svc  # type: ignore[misc]
 
         result = await search_documents(
-            workspace_id=str(mcp_workspace), query="test", top_k=5
+            as_user, workspace_id=str(mcp_workspace), query="test", top_k=5
         )
 
         search_svc.search.assert_awaited_once_with(
@@ -269,62 +209,9 @@ class TestSearchDocumentsIntegration:
 
     @pytest.mark.asyncio
     async def test_search_rejects_non_member(
-        self, as_user: User, real_services: Services
+        self, as_user: McpContext, real_services: Services
     ) -> None:
         with pytest.raises(ForbiddenError):
-            await search_documents(workspace_id=str(uuid.uuid4()), query="test")
-
-
-# ---------------------------------------------------------------------------
-# Resources — fully real
-# ---------------------------------------------------------------------------
-
-
-class TestWorkspaceResources:
-    @pytest.fixture
-    async def document_id(
-        self, db_session: AsyncSession, mcp_user: User, mcp_workspace: uuid.UUID
-    ) -> uuid.UUID:
-        doc = await SQLAlchemyDocumentRepository(db_session).create(
-            workspace_id=mcp_workspace,
-            title="Sample Doc",
-            content_type=ContentType.PLAINTEXT,
-            file_path="/tmp/sample.txt",
-            file_size_bytes=1024,
-            uploaded_by=mcp_user.id,
-        )
-        return doc.id
-
-    @pytest.mark.asyncio
-    async def test_documents_resource_lists_workspace_documents(
-        self,
-        as_user: User,
-        mcp_workspace: uuid.UUID,
-        document_id: uuid.UUID,
-        real_services: Services,
-    ) -> None:
-        docs = await list_workspace_documents(str(mcp_workspace))
-
-        assert [d["id"] for d in docs] == [str(document_id)]
-        assert docs[0]["title"] == "Sample Doc"
-        assert "created_at" in docs[0]
-
-    @pytest.mark.asyncio
-    async def test_stats_resource_counts_documents(
-        self,
-        as_user: User,
-        mcp_workspace: uuid.UUID,
-        document_id: uuid.UUID,
-        real_services: Services,
-    ) -> None:
-        data = await get_workspace_stats(str(mcp_workspace))
-
-        assert data["document_count"] == 1
-        assert data["chunk_count"] == 0
-
-    @pytest.mark.asyncio
-    async def test_resources_reject_non_member(
-        self, as_user: User, real_services: Services
-    ) -> None:
-        with pytest.raises(ForbiddenError):
-            await list_workspace_documents(str(uuid.uuid4()))
+            await search_documents(
+                as_user, workspace_id=str(uuid.uuid4()), query="test"
+            )

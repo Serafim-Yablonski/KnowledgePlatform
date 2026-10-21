@@ -17,17 +17,14 @@ dependencies = [
     "redis==6.4.0",
     "pypdf==6.10.2",
     "structlog==25.5.0",
-    "opentelemetry-api==1.40.0",
-    "opentelemetry-sdk==1.40.0",
-    "opentelemetry-instrumentation-fastapi==0.61b0",
-    "opentelemetry-instrumentation-celery==0.61b0",
-    "logfire==4.32.1",
+    "opentelemetry-api==1.45.1",
+    "logfire[asyncpg,celery,fastapi,httpx]==5.2.0",
     "httpx==0.28.1",
     "bcrypt>=4.0.0",
     "PyJWT>=2.8",
     "python-multipart==0.0.27",
     "pgvector==0.4.2",
-    "mcp==1.27.0",
+    "mcp==2.3.0",
     "tiktoken==0.12.0",
     "langgraph-checkpoint-postgres>=3.1.0",
 ]
@@ -58,6 +55,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ["-v", "--tb=short"]
+# Logfire warns when a span adopts a caller's trace context; the API must never do
+# that (tests/unit/test_observability.py), so the warning fails the run.
+filterwarnings = ["error:Found propagated trace context:RuntimeWarning"]
 
 [tool.coverage.run]
 source = ["src"]

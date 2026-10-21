@@ -1,12 +1,10 @@
-import contextlib
 from typing import Any
 
-import logfire
-from celery import Celery
-from celery.signals import worker_shutdown
+from celery import Celery, signals
 
 from src.core.config import settings
 from src.core.logging import setup_logging
+from src.core.observability import configure_logfire, instrument_libraries
 from src.core.redis import close_sync_redis
 
 # Structural constants — queue names do not vary by environment.
@@ -46,28 +44,36 @@ celery_app.conf.update(
     },
 )
 
-# Configure logfire for Celery worker processes.
-# FastAPI processes do this via setup_observability(); calling twice is safe.
-if settings.LOGFIRE_TOKEN:
-    logfire.configure(
-        token=settings.LOGFIRE_TOKEN,
-        service_name=settings.SERVICE_NAME,
+# Worker setup runs from Celery signals, never at import: the API process imports
+# this module lazily (health check, task enqueueing), and process-global setup
+# here would overwrite the API's own logging and tracing config.
+
+
+# Connecting this signal is how Celery hands logging over: without a receiver it
+# clears the root logger's handlers (worker_hijack_root_logger), dropping ours.
+@signals.setup_logging.connect(weak=False)  # type: ignore[untyped-decorator]
+def _configure_worker_logging(**kwargs: Any) -> None:
+    setup_logging(environment=settings.ENVIRONMENT, log_level=settings.LOG_LEVEL)
+
+
+# Per process, after the prefork pool forks (and again for each replacement child
+# under worker_max_tasks_per_child): Logfire's exporter thread wouldn't survive
+# being created in the parent before the fork.
+@signals.worker_process_init.connect(weak=False)  # type: ignore[untyped-decorator]
+def _configure_worker_tracing(**kwargs: Any) -> None:
+    # Task trace context comes only from our API via the broker: trusted, so a
+    # task's spans join the request that enqueued it.
+    configure_logfire(
+        token=settings.LOGFIRE_TOKEN or None,
         environment=settings.ENVIRONMENT,
-    )
-else:
-    logfire.configure(
-        send_to_logfire=False,
         service_name=settings.SERVICE_NAME,
-        environment=settings.ENVIRONMENT,
+        trust_incoming_trace_context=True,
     )
-logfire.instrument_celery()
-with contextlib.suppress(RuntimeError):
-    logfire.instrument_httpx()
-setup_logging(environment=settings.ENVIRONMENT, log_level=settings.LOG_LEVEL)
+    instrument_libraries()
 
 
 # Problem 7 fix: release the lazily-created sync Redis client when the worker
 # exits so connections are closed cleanly rather than abandoned.
-@worker_shutdown.connect  # type: ignore[untyped-decorator]
+@signals.worker_shutdown.connect  # type: ignore[untyped-decorator]
 def _on_worker_shutdown(**kwargs: Any) -> None:
     close_sync_redis()

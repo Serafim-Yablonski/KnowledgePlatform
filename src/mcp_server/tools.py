@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import functools
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from src.composition import open_services
-from src.core.exceptions import InputValidationError
+from src.core.exceptions import AppError, InputValidationError, RateLimitError
 from src.core.redis import get_async_redis_client
-from src.mcp_server.auth import get_mcp_user
+from src.mcp_server.auth import McpContext, get_mcp_user
 
 
 def _parse_workspace_id(workspace_id: str) -> uuid.UUID:
@@ -38,6 +41,7 @@ async def _mcp_rate_limit(
 
 
 async def search_documents(
+    ctx: McpContext,
     workspace_id: Annotated[str, Field(description="UUID of the workspace to search")],
     query: Annotated[
         str,
@@ -50,7 +54,7 @@ async def search_documents(
         Field(description="Maximum number of results to return (1–20)", ge=1, le=20),
     ] = 5,
 ) -> list[dict[str, Any]]:
-    user = get_mcp_user()
+    user = get_mcp_user(ctx)
     await _mcp_rate_limit(user.id, "mcp_search", 20, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
     async with open_services() as services:
@@ -71,6 +75,7 @@ async def search_documents(
 
 
 async def ask_question(
+    ctx: McpContext,
     workspace_id: Annotated[
         str, Field(description="UUID of the workspace whose documents to query")
     ],
@@ -83,7 +88,7 @@ async def ask_question(
         ),
     ],
 ) -> dict[str, Any]:
-    user = get_mcp_user()
+    user = get_mcp_user(ctx)
     await _mcp_rate_limit(user.id, "mcp_ask", 10, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
     async with open_services() as services:
@@ -113,6 +118,7 @@ async def ask_question(
 
 
 async def start_research(
+    ctx: McpContext,
     workspace_id: Annotated[
         str, Field(description="UUID of the workspace to research")
     ],
@@ -133,7 +139,7 @@ async def start_research(
         ),
     ] = 3,
 ) -> dict[str, Any]:
-    user = get_mcp_user()
+    user = get_mcp_user(ctx)
     await _mcp_rate_limit(user.id, "mcp_research_start", 5, 60)
     ws_uuid = _parse_workspace_id(workspace_id)
     async with open_services() as services:
@@ -150,6 +156,7 @@ async def start_research(
 
 
 async def get_research_status(
+    ctx: McpContext,
     thread_id: Annotated[
         str,
         Field(description="Thread ID returned by start_research"),
@@ -159,7 +166,7 @@ async def get_research_status(
         Field(description="UUID of the workspace that owns this research thread"),
     ],
 ) -> dict[str, Any]:
-    user = get_mcp_user()
+    user = get_mcp_user(ctx)
     ws_uuid = _parse_workspace_id(workspace_id)
     async with open_services() as services:
         workspace_svc = services.workspace
@@ -185,22 +192,8 @@ async def get_research_status(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Session-scoped workspace tools
-# ---------------------------------------------------------------------------
-
-
-async def list_workspaces() -> list[dict[str, Any]]:
-    from src.mcp_server.auth import get_mcp_user
-    from src.mcp_server.session import (
-        get_current_session_id,
-        get_or_create_session_state,
-    )
-
-    user = get_mcp_user()
-    session_id = get_current_session_id() or str(user.id)
-    get_or_create_session_state(session_id, user)
-
+async def list_workspaces(ctx: McpContext) -> list[dict[str, Any]]:
+    user = get_mcp_user(ctx)
     async with open_services() as services:
         workspace_svc = services.workspace
         workspaces = await workspace_svc.list_for_user(user)
@@ -219,78 +212,70 @@ async def list_workspaces() -> list[dict[str, Any]]:
     return results
 
 
-async def set_active_workspace(
-    workspace_id: Annotated[
-        str,
-        Field(description="The workspace ID from list_workspaces"),
-    ],
-) -> dict[str, Any]:
-    from src.mcp_server.auth import get_mcp_user
-    from src.mcp_server.session import (
-        get_current_session_id,
-        get_or_create_session_state,
-    )
-
-    user = get_mcp_user()
-    ws_uuid = _parse_workspace_id(workspace_id)
-    session_id = get_current_session_id() or str(user.id)
-
-    async with open_services() as services:
-        workspace_svc = services.workspace
-        _, membership = await workspace_svc.get_workspace_for_user(ws_uuid, user.id)
-        role = membership.role
-        ws_info = await workspace_svc.get_by_id(ws_uuid)
-
-    state = get_or_create_session_state(session_id, user)
-    state.active_workspace_id = ws_uuid
-    state.active_workspace_name = ws_info.name
-    state.active_workspace_role = role
-
-    return {
-        "active_workspace_id": str(ws_uuid),
-        "name": ws_info.name,
-        "role": str(role),
-        "member_count": ws_info.member_count,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
 
-def register_tools(mcp: FastMCP) -> None:
-    mcp.add_tool(
+def _app_errors_as_tool_errors(
+    fn: Callable[..., Awaitable[Any]],
+) -> Callable[..., Awaitable[Any]]:
+    """Let the model read an AppError's detail; any other exception stays opaque.
+
+    The SDK shows the model a ToolError's text but only "Error executing tool <name>"
+    for anything else, so services' anticipated failures ("Not a member…") would be
+    lost. ``detail`` is what REST already shows the same user. ``functools.wraps``
+    keeps the signature the SDK builds the schema and finds ``ctx`` from.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except RateLimitError as exc:
+            # REST sends the wait in Retry-After; the model has only this text.
+            raise ToolError(
+                f"{exc.detail} — retry in {exc.retry_after} seconds"
+            ) from exc
+        except AppError as exc:
+            raise ToolError(exc.detail) from exc
+
+    return wrapper
+
+
+def _add_tool(
+    mcp: MCPServer, fn: Callable[..., Awaitable[Any]], *, description: str
+) -> None:
+    mcp.add_tool(_app_errors_as_tool_errors(fn), description=description)
+
+
+def register_tools(mcp: MCPServer) -> None:
+    _add_tool(
+        mcp,
         list_workspaces,
         description=(
-            "List all workspaces you have access to. Call this first to discover "
-            "available workspaces, then use set_active_workspace to select one. "
-            "All subsequent search, ask, and research calls will use the active "
-            "workspace."
+            "List the workspaces you belong to, with your role in each. Call this "
+            "first: every other tool takes a workspace id from here as workspace_id."
         ),
     )
-    mcp.add_tool(
-        set_active_workspace,
-        description=(
-            "Set the active workspace for this session. Must be called after "
-            "list_workspaces before any search, ask, or research operations."
-        ),
-    )
-    mcp.add_tool(
+    _add_tool(
+        mcp,
         search_documents,
         description=(
             "Search the workspace's knowledge base for relevant document chunks. "
             "Returns ranked results with relevance scores."
         ),
     )
-    mcp.add_tool(
+    _add_tool(
+        mcp,
         ask_question,
         description=(
             "Ask a question about the workspace's documents. Returns a structured "
             "answer with source citations and a confidence score."
         ),
     )
-    mcp.add_tool(
+    _add_tool(
+        mcp,
         start_research,
         description=(
             "Start a multi-step research workflow that plans queries, retrieves "
@@ -298,7 +283,8 @@ def register_tools(mcp: FastMCP) -> None:
             "Returns a thread_id to track progress."
         ),
     )
-    mcp.add_tool(
+    _add_tool(
+        mcp,
         get_research_status,
         description=(
             "Check the status of a running research workflow. Returns current state "

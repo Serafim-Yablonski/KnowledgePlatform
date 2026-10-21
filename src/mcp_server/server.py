@@ -1,30 +1,28 @@
-"""MCP server — protocol adapter mounted as a FastAPI sub-application at /mcp."""
+"""MCP server — protocol adapter served by the FastAPI application at /mcp."""
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp
 
 from src.mcp_server.auth import MCPAuthMiddleware
 
-# Set during create_mcp_app() so the main lifespan can call session_manager.run().
-_mcp_session_manager: StreamableHTTPSessionManager | None = None
 
+def create_mcp_app() -> tuple[ASGIApp, StreamableHTTPSessionManager]:
+    """Return the MCP Streamable HTTP handler behind auth middleware, and its manager.
 
-def create_mcp_app() -> ASGIApp:
-    """Return an ASGI app: FastMCP (Streamable HTTP) wrapped with auth middleware.
+    The caller serves the handler at its MCP path (``/mcp``). It is the session
+    manager's own handler, not MCPServer's ``streamable_http_app()`` Starlette app:
+    that app routes ``/mcp`` again, so the path would have to match in two places,
+    and its error middleware would answer an SDK crash before ours does.
 
-    Mounted at / by the main FastAPI application (FastMCP's inner route is /mcp,
-    making the effective endpoint http://host/mcp). Shares the same database
-    engine and Redis pool initialised during the main app's lifespan.
-
-    The caller MUST enter get_mcp_session_manager().run() in the app lifespan —
-    the StreamableHTTPSessionManager requires an anyio task group to handle requests.
+    The caller MUST enter the returned manager's run() in its app lifespan — the
+    manager needs an anyio task group to handle requests, and run() works only once
+    per instance, so every app gets its own manager.
     """
-    global _mcp_session_manager
-
-    mcp = FastMCP(
+    mcp = MCPServer(
         "knowledge-platform",
         instructions=(
             "AI-powered knowledge base for engineering teams. "
@@ -34,21 +32,19 @@ def create_mcp_app() -> ASGIApp:
         ),
     )
 
-    from src.mcp_server.resources import register_resources
     from src.mcp_server.tools import register_tools
 
     register_tools(mcp)
-    register_resources(mcp)
 
-    asgi_app = mcp.streamable_http_app()
-    _mcp_session_manager = mcp.session_manager
-    return MCPAuthMiddleware(asgi_app)
-
-
-def get_mcp_session_manager() -> StreamableHTTPSessionManager:
-    """Return the session manager created by create_mcp_app()."""
-    if _mcp_session_manager is None:
-        raise RuntimeError(
-            "create_mcp_app() must be called before get_mcp_session_manager()"
-        )
-    return _mcp_session_manager
+    # Creates the session manager. The SDK's DNS-rebinding guard is off: it ties the
+    # spec's Origin check to a Host allowlist (exact hosts only — every real hostname
+    # got 421 until configured) and runs after our middleware, so auth's 401 would
+    # pre-empt the 403 the spec requires. MCPAuthMiddleware checks Origin first
+    # instead. Must be explicit: the default host (127.0.0.1) switches the guard on.
+    mcp.streamable_http_app(
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        ),
+    )
+    manager = mcp.session_manager
+    return MCPAuthMiddleware(manager.handle_request), manager
