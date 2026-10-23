@@ -37,12 +37,13 @@ class SQLAlchemySearchRepository:
             WITH ranked AS (
                 SELECT
                     c.id,
+                    c.chunk_index,
                     c.document_id,
                     d.title  AS document_title,
                     c.text,
                     1 - (c.embedding <=> (:query_embedding)::vector({EMBEDDING_DIMS}))
                              AS similarity_score,
-                    c.metadata_
+                    NULLIF(c.metadata_ ->> 'section', '') AS section
                 FROM  document_chunks c
                 JOIN  documents d ON c.document_id = d.id
                 WHERE d.workspace_id = :workspace_id
@@ -74,11 +75,12 @@ class SQLAlchemySearchRepository:
         return [
             SearchResult(
                 chunk_id=row.id,
+                chunk_index=row.chunk_index,
                 document_id=row.document_id,
                 document_title=row.document_title,
                 chunk_text=row.text,
                 score=float(row.similarity_score),
-                chunk_metadata=row.metadata_ or {},
+                section=row.section,
             )
             for row in rows
         ]

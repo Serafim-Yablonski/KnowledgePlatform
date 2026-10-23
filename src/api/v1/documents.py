@@ -11,10 +11,11 @@ from src.core.dependencies import (
 )
 from src.core.rate_limit import workspace_rate_limit
 from src.domain.documents import (
+    DEFAULT_PAGE_SIZE,
+    DocumentPageSize,
     DocumentStatus,
     DocumentUpdateInput,
     DocumentUpload,
-    encode_cursor,
 )
 from src.models.user import User
 from src.models.workspace import Workspace
@@ -64,14 +65,14 @@ async def upload_document(
 async def list_documents(
     workspace: Workspace = Depends(get_current_workspace),
     cursor: str | None = Query(default=None),
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    limit: Annotated[DocumentPageSize, Query()] = DEFAULT_PAGE_SIZE,
     doc_status: DocumentStatus | None = Query(default=None, alias="status"),
     service: DocumentService = Depends(get_document_service),
 ) -> PaginatedResponse[DocumentResponse]:
     page = await service.list(workspace.id, cursor, limit, doc_status)
     return PaginatedResponse(
         items=[DocumentResponse.model_validate(d) for d in page.items],
-        next_cursor=encode_cursor(page.next_cursor) if page.next_cursor else None,
+        next_cursor=page.next_cursor,
         has_more=page.has_more,
     )
 

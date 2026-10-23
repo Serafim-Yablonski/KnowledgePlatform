@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # the worker scenario, which configures Logfire from settings, never exports.
 _OFFLINE_ENV = {**os.environ, "LOGFIRE_TOKEN": ""}
 
+# probe() uses the MCP SDK's private `_otel` module, the exact path `_meta` takes;
+# an SDK upgrade that renames it fails every test here at once, never silently.
 # probe() / probe_rest() print how a span started under an incoming traceparent
 # turns out: "recording=<bool> adopted=<bool>". probe() takes the path the MCP SDK
 # takes for `_meta`; probe_rest() sends the HTTP header through an app's FastAPI
@@ -70,12 +72,12 @@ def probe_libraries(label):
 """
 
 
-def _run(scenario: str) -> list[str]:
+def _run(scenario: str, env: dict[str, str] = _OFFLINE_ENV) -> list[str]:
     code = _PROBE + textwrap.dedent(scenario)
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=ROOT,
-        env=_OFFLINE_ENV,
+        env=env,
         capture_output=True,
         text=True,
         timeout=60,
@@ -83,6 +85,33 @@ def _run(scenario: str) -> list[str]:
     )
     assert result.returncode == 0, result.stderr
     return [line for line in result.stdout.splitlines() if line.startswith("probe ")]
+
+
+def test_no_token_exports_nothing_even_with_one_in_the_environment() -> None:
+    # Logfire falls back to a LOGFIRE_TOKEN environment variable when it is given
+    # none, so "no token" has to switch exporting off explicitly.
+    lines = _run(
+        """
+        import logfire
+        from src.core.observability import configure_logfire
+
+        configure_logfire(
+            token=None,
+            environment="test",
+            service_name="kp",
+            trust_incoming_trace_context=False,
+        )
+        print(f"probe send={logfire.DEFAULT_LOGFIRE_INSTANCE.config.send_to_logfire}")
+        """,
+        # Without pytest's variables: under PYTEST_VERSION Logfire never exports by
+        # default, which would hide the fallback.
+        env={
+            **{k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")},
+            "LOGFIRE_TOKEN": "pylf_v1_us_not_a_real_token",
+        },
+    )
+
+    assert lines == ["probe send=False"]
 
 
 def test_api_ignores_client_trace_context() -> None:
@@ -213,3 +242,42 @@ def test_worker_logging_is_ours_not_celerys() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["1", "ProcessorFormatter"]
+
+
+def test_traced_embedding_calls_carry_no_api_key() -> None:
+    # Outbound HTTP is traced in both processes, and a span records the full URL.
+    # A refused connection still ends a span, so no network is needed.
+    lines = _run(
+        """
+        import asyncio
+        import httpx
+        import src.ai.embeddings as embeddings
+        from src.core.observability import setup_observability
+
+        setup_observability(token=None, environment="test", service_name="kp")
+        exporter = InMemorySpanExporter()
+        trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+        embeddings._GEMINI_BASE = "http://127.0.0.1:9/v1beta/models"
+
+        async def call():
+            async with httpx.AsyncClient() as client:
+                service = embeddings.EmbeddingService(
+                    "SECRET-KEY", "gemini-embedding-001", 8, http_client=client
+                )
+                try:
+                    await service.embed_query("q")
+                except RuntimeError:
+                    pass
+
+        asyncio.run(call())
+        spans = [s for s in exporter.get_finished_spans() if s.name == "POST"]
+        leaked = any(
+            "SECRET-KEY" in str(v)
+            for s in spans
+            for v in [*(s.attributes or {}).values(), s.name]
+        )
+        print(f"probe embedding: http_spans={len(spans)} key_in_trace={leaked}")
+        """
+    )
+
+    assert lines == ["probe embedding: http_spans=1 key_in_trace=False"]

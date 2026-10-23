@@ -58,7 +58,8 @@ def _configure_worker_logging(**kwargs: Any) -> None:
 
 # Per process, after the prefork pool forks (and again for each replacement child
 # under worker_max_tasks_per_child): Logfire's exporter thread wouldn't survive
-# being created in the parent before the fork.
+# being created in the parent before the fork. Only the prefork (compose's default)
+# and solo pools send this signal: under threads/gevent/eventlet tracing stays off.
 @signals.worker_process_init.connect(weak=False)  # type: ignore[untyped-decorator]
 def _configure_worker_tracing(**kwargs: Any) -> None:
     # Task trace context comes only from our API via the broker: trusted, so a

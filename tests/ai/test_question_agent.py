@@ -23,10 +23,12 @@ def _make_search_response(
     items = [
         SearchResult(
             chunk_id=uuid.uuid4(),
+            chunk_index=0,
             chunk_text=r["chunk_text"],
             document_id=r["document_id"],
             document_title=r.get("title", "Test Doc"),
             score=r.get("score", 0.9),
+            section=None,
         )
         for r in results
     ]

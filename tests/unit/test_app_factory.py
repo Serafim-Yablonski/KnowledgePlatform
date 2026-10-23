@@ -14,6 +14,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 from starlette.testclient import TestClient
+from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 
 import src.main
@@ -137,16 +138,21 @@ def test_mcp_route_never_hands_a_websocket_to_mcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # MCPAuthMiddleware handles http scopes only; the router must close a websocket
-    # to /mcp before the middleware sees it.
-    async def _must_not_run(*args: object) -> None:
-        raise AssertionError("MCP auth saw a websocket scope")
+    # to /mcp before the middleware sees it. A spy on the middleware itself: a stub
+    # deeper inside could never run, since Request(scope) rejects a websocket first.
+    seen: list[str] = []
 
-    monkeypatch.setattr(src.mcp_server.auth, "_authenticate_request", _must_not_run)
+    async def _spy(self: object, scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(scope["type"])
+        await send({"type": "websocket.close"})  # a regression fails, not hangs
+
+    monkeypatch.setattr(src.mcp_server.auth.MCPAuthMiddleware, "__call__", _spy)
 
     client = TestClient(create_app())  # not entered: no lifespan, so no DB or Redis
 
     with pytest.raises(WebSocketDisconnect), client.websocket_connect("/mcp"):
         pass
+    assert seen == []
 
 
 @pytest.mark.asyncio

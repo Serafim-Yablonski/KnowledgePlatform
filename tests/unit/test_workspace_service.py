@@ -93,11 +93,18 @@ class StubWorkspaceRepository:
     async def get_by_slug(self, slug: str) -> Workspace | None:
         return next((w for w in self._workspaces.values() if w.slug == slug), None)
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]:
-        member_ws_ids = {
-            m.workspace_id for m in self._memberships if m.user_id == user_id
-        }
-        return [w for w in self._workspaces.values() if w.id in member_ws_ids]
+    async def list_for_user_with_counts(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Workspace, int]]:
+        mine = sorted(
+            (m for m in self._memberships if m.user_id == user_id),
+            key=lambda m: m.joined_at,
+            reverse=True,
+        )
+        return [
+            (self._workspaces[m.workspace_id], await self.count_members(m.workspace_id))
+            for m in mine
+        ]
 
     async def add_member(
         self,

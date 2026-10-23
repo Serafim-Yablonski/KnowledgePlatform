@@ -168,18 +168,21 @@ class TestEvalRunnerCaseLogic:
         search_results: list[dict],  # type: ignore[type-arg]
         slug_to_id: dict[str, uuid.UUID] | None = None,
     ) -> EvalRunner:
-        from src.schemas.search import SearchResponse, SearchResultItem
+        from src.domain.search import SearchResult, SearchResults
 
         items = [
-            SearchResultItem(
+            SearchResult(
+                chunk_id=uuid.uuid4(),
+                chunk_index=i,
                 chunk_text=r["chunk_text"],
                 document_id=r["document_id"],
                 document_title=r.get("title", "Doc"),
                 score=r.get("score", 0.9),
+                section=None,
             )
-            for r in search_results
+            for i, r in enumerate(search_results)
         ]
-        response = SearchResponse(results=items, query="q", total_results=len(items))
+        response = SearchResults(results=items, query="q", total_results=len(items))
 
         search_svc = MagicMock()
         search_svc.search = AsyncMock(return_value=response)

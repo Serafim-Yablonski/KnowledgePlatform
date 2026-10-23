@@ -10,9 +10,15 @@ from unittest.mock import patch
 import pytest
 
 from src.core.config import get_settings
-from src.core.exceptions import ForbiddenError, InputValidationError, NotFoundError
+from src.core.exceptions import (
+    ConflictError,
+    ForbiddenError,
+    InputValidationError,
+    NotFoundError,
+)
 from src.domain.documents import (
     ALLOWED_CONTENT_TYPES,
+    ChunkText,
     ContentType,
     Cursor,
     DocumentStatus,
@@ -22,7 +28,12 @@ from src.domain.documents import (
 from src.domain.roles import WorkspaceRole
 from src.models.document import Document
 from src.models.user import User
-from src.services.document import DocumentService
+from src.services.document import (
+    FAILED_DETAIL,
+    INVALID_CURSOR_DETAIL,
+    NOT_INDEXED_DETAIL,
+    DocumentService,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,6 +101,9 @@ def _make_upload_file(
 class StubDocumentRepository:
     def __init__(self) -> None:
         self._store: dict[uuid.UUID, Document] = {}
+        # list_by_workspace returns next_cursor and records the cursor it was given.
+        self.next_cursor: Cursor | None = None
+        self.received_cursor: Cursor | None = None
 
     async def create(
         self,
@@ -139,10 +153,41 @@ class StubDocumentRepository:
         cursor: Cursor | None = None,
         status: DocumentStatus | None = None,
     ) -> tuple[list[Document], Cursor | None]:
+        self.received_cursor = cursor
         docs = [d for d in self._store.values() if d.workspace_id == workspace_id]
         if status is not None:
             docs = [d for d in docs if d.status == status]
-        return docs, None
+        return docs, self.next_cursor
+
+
+class StubChunkRepository:
+    """In memory, filtered like the real query: document, version, start, order."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[uuid.UUID, int, ChunkText]] = []
+        self.calls = 0
+
+    def add(self, doc: Document, version: int, *indexes: int) -> None:
+        for i in indexes:
+            text = ChunkText(chunk_index=i, section=None, chunk_text=f"v{version} {i}")
+            self.rows.append((doc.id, version, text))
+
+    def _of(self, document_id: uuid.UUID, version: int) -> list[ChunkText]:
+        return sorted(
+            (c for d, v, c in self.rows if d == document_id and v == version),
+            key=lambda c: c.chunk_index,
+        )
+
+    async def read_page(
+        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+    ) -> list[ChunkText]:
+        self.calls += 1
+        chunks = self._of(document_id, version)
+        return [c for c in chunks if c.chunk_index >= start][:limit]
+
+    async def count(self, document_id: uuid.UUID, *, version: int) -> int:
+        self.calls += 1
+        return len(self._of(document_id, version))
 
 
 class MockSession:
@@ -157,7 +202,11 @@ class MockSession:
 
 def _make_service() -> tuple[DocumentService, StubDocumentRepository]:
     repo = StubDocumentRepository()
-    service = DocumentService(repo=repo, session=MockSession())  # type: ignore[arg-type]
+    service = DocumentService(
+        repo=repo,
+        chunk_repo=StubChunkRepository(),
+        session=MockSession(),  # type: ignore[arg-type]
+    )
     return service, repo
 
 
@@ -390,7 +439,11 @@ async def test_write_file_size_exceeded_cleanup(tmp_path: Path) -> None:
     import src.services.document as svc_mod
 
     repo = StubDocumentRepository()
-    service = DocumentService(repo=repo, session=MockSession())  # type: ignore[arg-type]
+    service = DocumentService(
+        repo=repo,
+        chunk_repo=StubChunkRepository(),
+        session=MockSession(),  # type: ignore[arg-type]
+    )
     user = _make_user()
     workspace_id = uuid.uuid4()
 
@@ -467,10 +520,27 @@ async def test_list_returns_only_workspace_docs() -> None:
     assert page.has_more is False
 
 
+async def test_list_hands_out_a_cursor_it_accepts_back() -> None:
+    # Both adapters pass next_cursor through unchanged, so the service owns the format.
+    service, repo = _make_service()
+    position = Cursor(created_at=datetime(2026, 10, 22, 12, 0, 0, 1), id=uuid.uuid4())
+    repo.next_cursor = position
+
+    page = await service.list(uuid.uuid4())
+    assert isinstance(page.next_cursor, str)
+    assert page.has_more is True
+
+    await service.list(uuid.uuid4(), cursor_str=page.next_cursor)
+    assert repo.received_cursor == position
+
+
 async def test_list_invalid_cursor_raises_validation_error() -> None:
     service, _ = _make_service()
-    with pytest.raises(InputValidationError, match="cursor"):
+    with pytest.raises(InputValidationError) as exc_info:
         await service.list(uuid.uuid4(), cursor_str="not-a-cursor")
+    # The detail reaches MCP's model too, so it says how to recover.
+    assert exc_info.value.detail == INVALID_CURSOR_DETAIL
+    assert "next_cursor" in INVALID_CURSOR_DETAIL
 
 
 async def test_get_workspace_stats() -> None:
@@ -505,3 +575,95 @@ async def test_update_nonexistent_document_raises_not_found() -> None:
             uuid.uuid4(),
             DocumentUpdateInput(title="X"),
         )
+
+
+# ---------------------------------------------------------------------------
+# read
+# ---------------------------------------------------------------------------
+
+
+def _reader(
+    status: DocumentStatus = DocumentStatus.INDEXED,
+) -> tuple[DocumentService, StubChunkRepository, Document]:
+    repo, chunks = StubDocumentRepository(), StubChunkRepository()
+    service = DocumentService(
+        repo=repo,
+        chunk_repo=chunks,
+        session=MockSession(),  # type: ignore[arg-type]
+    )
+    doc = _make_document(uuid.uuid4(), uuid.uuid4())
+    doc.status = status
+    doc.version = 2
+    repo._store[doc.id] = doc
+    # Chunks 0-4 of the current version; version 1's are stale.
+    chunks.add(doc, 2, 0, 1, 2, 3, 4)
+    chunks.add(doc, 1, *range(9))
+    return service, chunks, doc
+
+
+async def test_read_returns_a_page_of_the_current_version() -> None:
+    service, _, doc = _reader()
+
+    page = await service.read(doc.workspace_id, doc.id, start_chunk=1, max_chunks=2)
+
+    assert (page.document_id, page.title, page.total_chunks) == (doc.id, doc.title, 5)
+    assert [c.chunk_text for c in page.chunks] == ["v2 1", "v2 2"]
+    assert page.next_start_chunk == 3
+
+
+async def test_read_last_page_has_no_next_start() -> None:
+    service, _, doc = _reader()
+
+    page = await service.read(doc.workspace_id, doc.id, start_chunk=3, max_chunks=2)
+
+    assert [c.chunk_index for c in page.chunks] == [3, 4]
+    assert page.next_start_chunk is None
+
+
+async def test_read_next_start_is_the_next_stored_index() -> None:
+    # Not start + page size: positions come from the stored rows.
+    service, chunks, doc = _reader()
+    chunks.rows = [r for r in chunks.rows if r[2].chunk_index != 3 or r[1] != 2]
+
+    page = await service.read(doc.workspace_id, doc.id, start_chunk=1, max_chunks=2)
+
+    assert page.next_start_chunk == 4
+
+
+async def test_read_scopes_the_document_to_the_workspace() -> None:
+    service, chunks, doc = _reader()
+
+    with pytest.raises(NotFoundError):
+        await service.read(uuid.uuid4(), doc.id)
+    assert chunks.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [
+        (DocumentStatus.PENDING, NOT_INDEXED_DETAIL),
+        (DocumentStatus.PROCESSING, NOT_INDEXED_DETAIL),
+        (DocumentStatus.READY, NOT_INDEXED_DETAIL),
+        # Retrying a failed document would loop, so it says so.
+        (DocumentStatus.FAILED, FAILED_DETAIL),
+    ],
+)
+async def test_read_refuses_a_document_that_is_not_indexed(
+    status: DocumentStatus, detail: str
+) -> None:
+    service, chunks, doc = _reader(status)
+
+    with pytest.raises(ConflictError) as exc_info:
+        await service.read(doc.workspace_id, doc.id)
+    assert exc_info.value.detail == detail
+    assert chunks.calls == 0
+
+
+async def test_read_past_the_end_names_the_chunk_count() -> None:
+    service, _, doc = _reader()
+
+    with pytest.raises(InputValidationError) as exc_info:
+        await service.read(doc.workspace_id, doc.id, start_chunk=5)
+    assert exc_info.value.detail == (
+        "start_chunk 5 is past the end: the document has 5 chunks, numbered from 0"
+    )

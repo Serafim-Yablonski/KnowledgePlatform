@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,22 +18,27 @@ from src.ai.graphs.state import (
     ResearchPlan,
     ResearchState,
 )
-from src.schemas.search import SearchResponse, SearchResultItem
+from src.domain.search import SearchResult, SearchResults
 
 
 def _make_search_service(results: list[dict] | None = None) -> MagicMock:  # type: ignore[type-arg]
     items = [
-        SearchResultItem(
+        SearchResult(
+            chunk_id=uuid.uuid4(),
+            chunk_index=i,
             chunk_text=r.get("text", "sample text"),
-            document_id=r.get("document_id", "00000000-0000-0000-0000-000000000001"),
+            document_id=uuid.UUID(
+                r.get("document_id", "00000000-0000-0000-0000-000000000001")
+            ),
             document_title=r.get("title", "Doc A"),
             score=r.get("score", 0.9),
+            section=None,
         )
-        for r in (results or [{"text": "relevant content about the topic"}])
+        for i, r in enumerate(results or [{"text": "relevant content about the topic"}])
     ]
     svc = MagicMock()
     svc.search = AsyncMock(
-        return_value=SearchResponse(
+        return_value=SearchResults(
             results=items, query="test", total_results=len(items)
         )
     )

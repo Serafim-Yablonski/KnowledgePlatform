@@ -39,11 +39,12 @@ async def search_documents(
     return SearchResponse(
         results=[
             SearchResultItem(
-                chunk_text=r.chunk_text,
                 document_id=r.document_id,
                 document_title=r.document_title,
+                chunk_index=r.chunk_index,
+                section=r.section,
+                chunk_text=r.chunk_text,
                 score=r.score,
-                chunk_metadata=r.chunk_metadata,
             )
             for r in domain.results
         ],

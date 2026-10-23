@@ -24,6 +24,7 @@ from src.core.http import get_async_http_client
 from src.core.redis import get_async_redis_client
 from src.repositories.api_key import SQLAlchemyApiKeyRepository
 from src.repositories.api_key_cached import CachedApiKeyRepository
+from src.repositories.chunk import SQLAlchemyChunkRepository
 from src.repositories.document import SQLAlchemyDocumentRepository
 from src.repositories.search import SQLAlchemySearchRepository
 from src.repositories.user import SQLAlchemyUserRepository
@@ -90,6 +91,7 @@ class Services:
     def document(self) -> DocumentService:
         return DocumentService(
             repo=SQLAlchemyDocumentRepository(self._session),
+            chunk_repo=SQLAlchemyChunkRepository(self._session),
             session=self._session,
         )
 

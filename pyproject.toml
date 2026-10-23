@@ -20,6 +20,8 @@ dependencies = [
     "opentelemetry-api==1.45.1",
     "logfire[asyncpg,celery,fastapi,httpx]==5.2.0",
     "httpx==0.28.1",
+    # The MCP SDK client's HTTP library; tests build its clients directly.
+    "httpx2==2.14.0",
     "bcrypt>=4.0.0",
     "PyJWT>=2.8",
     "python-multipart==0.0.27",

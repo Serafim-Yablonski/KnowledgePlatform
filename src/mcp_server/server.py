@@ -10,6 +10,30 @@ from starlette.types import ASGIApp
 from src.mcp_server.auth import MCPAuthMiddleware
 
 
+def build_mcp_server() -> MCPServer:
+    """The server with its instructions and every tool registered, not yet served.
+
+    Instructions reach a client only in the server/discover result, and only some
+    clients show them to their model, so they summarise the loop; each tool's
+    description must stand on its own. The research tools stay out of them until
+    Track 4 (a failed run reports "running" forever).
+    """
+    mcp = MCPServer(
+        "knowledge-platform",
+        instructions=(
+            "Knowledge base of a team's documents, grouped into workspaces. Typical "
+            "loop: list_workspaces, then search_documents to locate content (or "
+            "list_documents to browse), then read_document around a hit, and search "
+            "again if needed. Cite sources by document title and chunk_index."
+        ),
+    )
+
+    from src.mcp_server.tools import register_tools
+
+    register_tools(mcp)
+    return mcp
+
+
 def create_mcp_app() -> tuple[ASGIApp, StreamableHTTPSessionManager]:
     """Return the MCP Streamable HTTP handler behind auth middleware, and its manager.
 
@@ -22,25 +46,13 @@ def create_mcp_app() -> tuple[ASGIApp, StreamableHTTPSessionManager]:
     manager needs an anyio task group to handle requests, and run() works only once
     per instance, so every app gets its own manager.
     """
-    mcp = MCPServer(
-        "knowledge-platform",
-        instructions=(
-            "AI-powered knowledge base for engineering teams. "
-            "Use search_documents to find relevant chunks, ask_question for "
-            "direct Q&A with citations, and start_research / get_research_status "
-            "for multi-step research workflows."
-        ),
-    )
+    mcp = build_mcp_server()
 
-    from src.mcp_server.tools import register_tools
-
-    register_tools(mcp)
-
-    # Creates the session manager. The SDK's DNS-rebinding guard is off: it ties the
-    # spec's Origin check to a Host allowlist (exact hosts only — every real hostname
-    # got 421 until configured) and runs after our middleware, so auth's 401 would
-    # pre-empt the 403 the spec requires. MCPAuthMiddleware checks Origin first
-    # instead. Must be explicit: the default host (127.0.0.1) switches the guard on.
+    # Creates the session manager. The SDK's DNS-rebinding guard is off: it can't
+    # check Origin without also checking Host against an exact allowlist (every
+    # unlisted hostname gets 421), and it runs after our middleware. MCPAuthMiddleware
+    # checks Origin itself, first. Must be explicit: the default host (127.0.0.1)
+    # switches the guard on.
     mcp.streamable_http_app(
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=False

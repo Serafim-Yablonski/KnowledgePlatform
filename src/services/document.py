@@ -7,25 +7,41 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.core.exceptions import InputValidationError, NotFoundError
+from src.core.exceptions import ConflictError, InputValidationError, NotFoundError
 from src.domain.documents import (
     ALLOWED_CONTENT_TYPES,
+    DEFAULT_PAGE_SIZE,
     Cursor,
+    DocumentChunks,
     DocumentPage,
     DocumentStatus,
     DocumentUpdateInput,
     DocumentUpload,
     decode_cursor,
+    encode_cursor,
 )
 from src.domain.roles import Permission, WorkspaceRole, require_permission
 from src.domain.workspace import WorkspaceStats
 from src.models.document import Document
 from src.models.user import User
-from src.repositories.protocols import DocumentRepositoryProtocol
+from src.repositories.protocols import (
+    ChunkRepositoryProtocol,
+    DocumentRepositoryProtocol,
+)
 
 logger = structlog.get_logger(__name__)
 
 _CHUNK = 65536
+
+# Reaches the MCP model as well as REST clients, so it says how to recover.
+INVALID_CURSOR_DETAIL = (
+    "Invalid pagination cursor: pass next_cursor from the previous page unchanged, "
+    "or omit it for the first page"
+)
+# read() refuses documents without searchable text; each message says whether waiting
+# helps.
+NOT_INDEXED_DETAIL = "Document is still being processed; try again shortly"
+FAILED_DETAIL = "Document processing failed; it has no readable content"
 
 _MAGIC_BYTES: dict[str, bytes] = {
     "application/pdf": b"%PDF",
@@ -73,9 +89,11 @@ class DocumentService:
     def __init__(
         self,
         repo: DocumentRepositoryProtocol,
+        chunk_repo: ChunkRepositoryProtocol,
         session: AsyncSession,
     ) -> None:
         self._repo = repo
+        self._chunks = chunk_repo
         self._session = session
 
     async def create(
@@ -153,20 +171,51 @@ class DocumentService:
         self,
         workspace_id: uuid.UUID,
         cursor_str: str | None = None,
-        limit: int = 20,
+        limit: int = DEFAULT_PAGE_SIZE,
         status: DocumentStatus | None = None,
     ) -> DocumentPage[Document]:
         try:
             cursor: Cursor | None = decode_cursor(cursor_str) if cursor_str else None
         except ValueError as exc:
-            raise InputValidationError("Invalid pagination cursor") from exc
+            raise InputValidationError(INVALID_CURSOR_DETAIL) from exc
         docs, next_cursor = await self._repo.list_by_workspace(
             workspace_id, limit=limit, cursor=cursor, status=status
         )
         return DocumentPage(
             items=list(docs),
-            next_cursor=next_cursor,
-            has_more=next_cursor is not None,
+            next_cursor=encode_cursor(next_cursor) if next_cursor else None,
+        )
+
+    async def read(
+        self,
+        workspace_id: uuid.UUID,
+        document_id: uuid.UUID,
+        start_chunk: int = 0,
+        max_chunks: int = 8,
+    ) -> DocumentChunks:
+        """Up to ``max_chunks`` of the current version's chunks from ``start_chunk``."""
+        doc = await self.get(workspace_id, document_id)
+        if doc.status == DocumentStatus.FAILED:
+            raise ConflictError(FAILED_DETAIL)
+        if doc.status != DocumentStatus.INDEXED:
+            raise ConflictError(NOT_INDEXED_DETAIL)
+        # One extra row tells whether more follow, and where they start.
+        chunks = await self._chunks.read_page(
+            doc.id, version=doc.version, start=start_chunk, limit=max_chunks + 1
+        )
+        total = await self._chunks.count(doc.id, version=doc.version)
+        if not chunks:
+            raise InputValidationError(
+                f"start_chunk {start_chunk} is past the end: the document has "
+                f"{total} chunks, numbered from 0"
+            )
+        more = len(chunks) > max_chunks
+        return DocumentChunks(
+            document_id=doc.id,
+            title=doc.title,
+            total_chunks=total,
+            chunks=chunks[:max_chunks],
+            next_start_chunk=chunks[max_chunks].chunk_index if more else None,
         )
 
     async def get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats:

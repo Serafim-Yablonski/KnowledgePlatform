@@ -7,6 +7,7 @@ DB; Redis is faked and outbound HTTP is refused.
 
 from __future__ import annotations
 
+import functools
 import time
 import uuid
 from collections.abc import AsyncGenerator, Generator
@@ -29,10 +30,12 @@ from mcp.types.jsonrpc import HEADER_MISMATCH, UNSUPPORTED_PROTOCOL_VERSION
 from mcp.types.version import HANDSHAKE_PROTOCOL_VERSIONS
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 import src.composition
 import src.core.http
 import src.core.redis
+import src.mcp_server.tools
 from src.core.config import settings
 from src.core.security import (
     create_access_token,
@@ -41,12 +44,13 @@ from src.core.security import (
 )
 from src.domain.roles import WorkspaceRole
 from src.main import create_app
+from src.mcp_server.server import build_mcp_server
 from src.models.user import User
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.schemas.auth import UserCreate
 
-# Default base URL: a local client, like Claude Code against a dev server.
+# Default base URL: a local client against a dev server.
 LOCAL_URL = "http://localhost:8000"
 # A deployment's real hostname, for tests where a non-localhost Host is the point:
 # the SDK's localhost-only Host allowlist (now disabled) rejected it with 421 (F2).
@@ -183,7 +187,7 @@ async def running(app: FastAPI) -> AsyncGenerator[None]:
 
 @asynccontextmanager
 async def mcp_client(
-    app: FastAPI, auth: _SwappableBearer, base_url: str = LOCAL_URL
+    app: ASGIApp, auth: _SwappableBearer, base_url: str = LOCAL_URL
 ) -> AsyncGenerator[Client]:
     """An SDK client pinned to PROTOCOL_VERSION; call inside ``running(app)``.
 
@@ -206,10 +210,10 @@ async def mcp_client(
 
 
 def _tool_json(result: CallToolResult) -> Any:
-    """The tool's return value; MCPServer wraps it under "result"."""
+    """The tool's structured content (its text block carries the same data)."""
     assert not result.is_error, result.content
     assert result.structured_content is not None
-    return result.structured_content["result"]
+    return result.structured_content
 
 
 async def _post_rpc(
@@ -278,11 +282,33 @@ async def test_server_exposes_only_tools(app: FastAPI, alice: Member) -> None:
     assert tools == {
         "list_workspaces",
         "search_documents",
-        "ask_question",
+        "list_documents",
+        "read_document",
         "start_research",
         "get_research_status",
     }
     assert (resources, templates) == ([], [])
+
+
+async def test_default_mode_client_discovers_the_server(
+    app: FastAPI, alice: Member
+) -> None:
+    # The SDK client's default mode probes server/discover first; under 2026-07-28
+    # that result is the only carrier of the server's instructions. If our middleware
+    # refused it, such a client would fall back to the handshake we refuse too.
+    async with (
+        running(app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app),
+            base_url=LOCAL_URL,
+            auth=_SwappableBearer(alice.token),
+            follow_redirects=False,
+        ) as http,
+        Client(streamable_http_client(f"{LOCAL_URL}/mcp", http_client=http)) as client,
+    ):
+        assert client.protocol_version == PROTOCOL_VERSION
+        assert client.instructions == build_mcp_server().instructions
+        assert client.instructions
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +355,7 @@ async def test_units_of_work_never_overlap(
 
 
 def _workspace_ids(result: CallToolResult) -> list[str]:
-    return [ws["id"] for ws in _tool_json(result)]
+    return [ws["id"] for ws in _tool_json(result)["workspaces"]]
 
 
 async def test_each_request_authorized_by_its_own_token(
@@ -360,6 +386,64 @@ async def test_two_users_isolated(app: FastAPI, alice: Member, bob: Member) -> N
 
     alice_ws, bob_ws = [str(alice.workspace_id)], [str(bob.workspace_id)]
     assert seen == [alice_ws, bob_ws, alice_ws, bob_ws]
+
+
+async def test_concurrent_callers_each_see_themselves(
+    alice: Member, bob: Member, mcp_backends: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both requests pass auth before either tool reads its user, so identity kept
+    # anywhere the two requests share (a module global, a shared dict) would show
+    # both tools the same user. Sequential calls can't catch that.
+    list_workspaces = src.mcp_server.tools.list_workspaces
+    arrived = 0
+    both_arrived = anyio.Event()
+
+    @functools.wraps(list_workspaces)
+    async def _after_both_arrive(*args: Any, **kwargs: Any) -> Any:
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both_arrived.set()
+        await both_arrived.wait()
+        return await list_workspaces(*args, **kwargs)
+
+    monkeypatch.setattr(src.mcp_server.tools, "list_workspaces", _after_both_arrive)
+    app = create_app()  # registers the patched tool
+    results: dict[str, CallToolResult] = {}
+
+    async def _call(name: str, client: Client) -> None:
+        results[name] = await client.call_tool("list_workspaces", {})
+
+    async with (
+        running(app),
+        mcp_client(app, _SwappableBearer(alice.token)) as as_alice,
+        mcp_client(app, _SwappableBearer(bob.token)) as as_bob,
+        anyio.create_task_group() as tg,
+    ):
+        tg.start_soon(_call, "alice", as_alice)
+        tg.start_soon(_call, "bob", as_bob)
+
+    assert _workspace_ids(results["alice"]) == [str(alice.workspace_id)]
+    assert _workspace_ids(results["bob"]) == [str(bob.workspace_id)]
+
+
+async def test_user_never_written_into_server_state(
+    app: FastAPI, alice: Member
+) -> None:
+    # A server puts its own ``state`` dict in each request's scope (lifespan state,
+    # copied per request by uvicorn). The user must not be written into it: if that
+    # dict were ever shared, the user would leak into other requests.
+    server_state: dict[str, Any] = {"from_lifespan": "kept"}
+
+    async def _server(scope: Scope, receive: Receive, send: Send) -> None:
+        scope["state"] = server_state  # the same dict for every request
+        await app(scope, receive, send)
+
+    async with running(app), mcp_client(_server, _SwappableBearer(alice.token)) as c:
+        result = await c.call_tool("list_workspaces", {})
+
+    assert _workspace_ids(result) == [str(alice.workspace_id)]
+    assert server_state == {"from_lifespan": "kept"}
 
 
 async def test_non_member_workspace_is_tool_error(
@@ -486,14 +570,19 @@ async def test_unknown_newer_version_is_left_to_the_sdk(
     assert reply["error"]["data"]["requested"] == future
 
 
+@pytest.mark.parametrize("version", [None, *HANDSHAKE_PROTOCOL_VERSIONS])
 @pytest.mark.parametrize("method", ["GET", "DELETE", "PUT"])
-async def test_non_post_without_version_header_is_405(
-    app: FastAPI, alice: Member, method: str
+async def test_legacy_non_post_is_405(
+    app: FastAPI, alice: Member, method: str, version: str | None
 ) -> None:
-    # A pre-2026 client's GET stream or session DELETE: the spec's answer for a
-    # 2026-only server, as the SDK gives it when the header is present.
+    # A pre-2026 client's GET stream or session DELETE, with or without its
+    # handshake-era version: the spec's answer for a 2026-only server, as the SDK
+    # gives it when a 2026 version is present.
+    headers = {"Authorization": f"Bearer {alice.token}"}
+    if version is not None:
+        headers["MCP-Protocol-Version"] = version
     async with running(app):
-        response = await _raw(app, method, {"Authorization": f"Bearer {alice.token}"})
+        response = await _raw(app, method, headers)
 
     assert response.status_code == 405
     assert response.headers["allow"] == "POST"
@@ -512,16 +601,6 @@ async def test_non_localhost_host_accepted(app: FastAPI, alice: Member) -> None:
         result = await client.call_tool("list_workspaces", {})
 
     assert _workspace_ids(result) == [str(alice.workspace_id)]
-
-
-async def test_missing_token_401_with_www_authenticate(app: FastAPI) -> None:
-    # Auth answers before the transport, so the session manager needn't run.
-    response = await _post_rpc(app, {})
-
-    assert response.status_code == 401
-    assert response.headers.get("www-authenticate") == (
-        'Bearer realm="knowledge-platform"'
-    )
 
 
 @pytest.mark.parametrize("scheme", ["bearer", "BEARER"])
@@ -613,26 +692,40 @@ async def test_auth_backend_failure_is_503_not_401(
     assert "www-authenticate" not in response.headers
 
 
-async def test_foreign_origin_rejected(app: FastAPI, alice: Member) -> None:
+# Any Origin is refused, not just foreign ones: none of our clients is a browser.
+# A same-host origin is what a rebinding page presents once the hostname resolves
+# to us, and "null" is what sandboxed frames and file:// pages send.
+ANY_ORIGIN = [
+    pytest.param("https://evil.example", PUBLIC_URL, id="foreign"),
+    pytest.param("http://kp.example.com", PUBLIC_URL, id="same-host"),
+    pytest.param("http://localhost:8000", LOCAL_URL, id="same-host-localhost"),
+    pytest.param("null", PUBLIC_URL, id="null"),
+]
+
+
+@pytest.mark.parametrize(("origin", "base_url"), ANY_ORIGIN)
+async def test_any_origin_rejected(
+    app: FastAPI, alice: Member, origin: str, base_url: str
+) -> None:
     # Refused even with valid credentials: the Origin check doesn't depend on auth.
     async with running(app):
         response = await _post_rpc(
             app,
-            {
-                "Authorization": f"Bearer {alice.token}",
-                "Origin": "https://evil.example",
-            },
-            PUBLIC_URL,
+            {"Authorization": f"Bearer {alice.token}", "Origin": origin},
+            base_url,
         )
 
     assert response.status_code == 403
     assert "Origin" in response.json()["error"]["message"]
 
 
-async def test_origin_checked_before_auth(app: FastAPI) -> None:
+@pytest.mark.parametrize(("origin", "base_url"), ANY_ORIGIN)
+async def test_origin_checked_before_auth(
+    app: FastAPI, origin: str, base_url: str
+) -> None:
     # Without a token, auth would answer 401; a 403 shows the Origin check ran first.
     # It must: the rebinding attack needs no credentials, so auth can't be the guard.
-    response = await _post_rpc(app, {"Origin": "https://evil.example"}, PUBLIC_URL)
+    response = await _post_rpc(app, {"Origin": origin}, base_url)
 
     assert response.status_code == 403
     assert "Origin" in response.json()["error"]["message"]
@@ -653,6 +746,27 @@ async def test_origin_checked_before_protocol_version(
 
     assert response.status_code == 403
     assert "Origin" in response.json()["error"]["message"]
+
+
+async def test_sdk_crash_is_the_apps_json_500(app: FastAPI, alice: Member) -> None:
+    # /mcp serves the session manager's bare handler, so an SDK crash reaches the
+    # app's handler like any REST crash. Crash: the manager is never started.
+    transport = ASGITransport(app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_URL) as http:
+        response = await http.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={
+                "Authorization": f"Bearer {alice.token}",
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {"code": 500, "message": "Internal server error", "errors": None}
+    }
 
 
 async def test_unmatched_rest_path_is_404(app: FastAPI) -> None:

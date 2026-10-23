@@ -2,6 +2,7 @@ import uuid
 from typing import Protocol
 
 from src.domain.documents import (
+    ChunkText,
     ContentType,
     Cursor,
     DocumentStatus,
@@ -12,7 +13,6 @@ from src.domain.search import SearchResult
 from src.domain.user import UserCreationInput
 from src.domain.workspace import WorkspaceStats, WorkspaceUpdateInput
 from src.models.api_key import ApiKey
-from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
@@ -46,8 +46,6 @@ class WorkspaceRepositoryProtocol(Protocol):
     ) -> Workspace: ...
 
     async def get_by_slug(self, slug: str) -> Workspace | None: ...
-
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]: ...
 
     async def list_for_user_with_counts(
         self, user_id: uuid.UUID
@@ -114,13 +112,11 @@ class DocumentRepositoryProtocol(Protocol):
 
 
 class ChunkRepositoryProtocol(Protocol):
-    async def create_batch(self, chunks: list[DocumentChunk]) -> None: ...
+    async def read_page(
+        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+    ) -> list[ChunkText]: ...
 
-    async def delete_by_document_version(
-        self, document_id: uuid.UUID, below_version: int
-    ) -> int: ...
-
-    async def get_by_document(self, document_id: uuid.UUID) -> list[DocumentChunk]: ...
+    async def count(self, document_id: uuid.UUID, *, version: int) -> int: ...
 
 
 class SearchRepositoryProtocol(Protocol):

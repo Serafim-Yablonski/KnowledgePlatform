@@ -2,8 +2,9 @@
 
 The middleware stores the user in the request's ASGI ``state``; the SDK hands each
 tool the Request that carried its call, so identity follows every request. Not a
-ContextVar: in stateful mode the session task copies the ContextVars of the request
-that started it, so tools saw that user forever (F1).
+ContextVar: whether one follows each request depends on how the SDK carries context
+between its tasks — ``mcp`` 1.x copied the session opener's into the session task,
+so tools saw that user forever (F1). The Request is handed over explicitly.
 """
 
 from __future__ import annotations
@@ -165,7 +166,7 @@ class MCPAuthMiddleware:
             await response(scope, receive, send)
             return
 
-        # Servers give each request its own copy of ``state`` (uvicorn copies it per
-        # request), so the user can't leak into another request.
-        scope.setdefault("state", {})[_USER_STATE_KEY] = user
+        # A copy of the server's ``state``, never the dict itself: the user can't leak
+        # into another request even if a server shared that dict between requests.
+        scope["state"] = {**scope.get("state", {}), _USER_STATE_KEY: user}
         await self._app(scope, receive, send)

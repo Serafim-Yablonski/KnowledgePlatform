@@ -116,7 +116,7 @@ def _make_repo(
     inner.remove_member = AsyncMock(return_value=None)
     inner.create = AsyncMock(return_value=workspace)
     inner.get_by_slug = AsyncMock(return_value=workspace)
-    inner.list_for_user = AsyncMock(return_value=[])
+    inner.list_for_user_with_counts = AsyncMock(return_value=[])
     inner.list_members = AsyncMock(return_value=[])
     inner.count_members = AsyncMock(return_value=0)
     inner.count_owners_for_update = AsyncMock(return_value=0)
@@ -416,7 +416,7 @@ async def test_non_cached_methods_do_not_interact_with_cache() -> None:
 
     await repo.create("name", "slug", uuid.uuid4(), "desc")
     await repo.get_by_slug("slug")
-    await repo.list_for_user(uuid.uuid4())
+    await repo.list_for_user_with_counts(uuid.uuid4())
     await repo.list_members(ws.id)
     await repo.count_members(ws.id)
     await repo.count_owners_for_update(ws.id)

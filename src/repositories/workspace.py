@@ -66,20 +66,6 @@ class SQLAlchemyWorkspaceRepository:
         )
         return result.first()
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]:
-        # JOIN via membership so only workspaces the user belongs to are returned,
-        # ordered by most recently joined first.
-        result = await self._session.scalars(
-            select(Workspace)
-            .join(
-                WorkspaceMembership,
-                WorkspaceMembership.workspace_id == Workspace.id,
-            )
-            .where(WorkspaceMembership.user_id == user_id)
-            .order_by(WorkspaceMembership.joined_at.desc())
-        )
-        return list(result.all())
-
     async def list_for_user_with_counts(
         self, user_id: uuid.UUID
     ) -> list[tuple[Workspace, int]]:

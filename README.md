@@ -60,7 +60,7 @@ graph TD
 | LLM (`LLM_MODEL`) | `google-gla:gemini-2.5-flash-lite` — configurable to any PydanticAI provider:model |
 | Strong LLM (`LLM_STRONG_MODEL`) | `google-gla:gemini-2.5-flash` (eval judge) — swap to `anthropic:claude-*` with one env change |
 | Background tasks | Celery 5 + Redis 7                                                         |
-| Protocol adapter | MCP Python SDK 1.27 (Streamable HTTP)                                      |
+| Protocol adapter | MCP Python SDK 2.3 (Streamable HTTP, protocol 2026-07-28 and later)        |
 | Observability | OpenTelemetry SDK + Pydantic Logfire                                       |
 | Logging | structlog (structured JSON, trace_id on every line)                        |
 | Package manager | uv                                                                         |
@@ -114,10 +114,10 @@ Once the stack is running:
 ### Connect an MCP client
 
 ```bash
-make mcp-config   # creates an API key and prints ready-to-paste config for Claude Desktop / Cursor
+make mcp-config   # creates an API key and prints how to connect a client
 ```
 
-This calls the running API to create a key, then prints the exact JSON block to add to your MCP client config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS). After that, Claude Code and Claude Desktop can call `search_documents`, `ask_question`, and `run_research` as native tools.
+This calls the running API to create a key, then prints the `claude mcp add` command for Claude Code, plus the URL and `Authorization` header for any other client. The server speaks only the handshake-free MCP protocol (revision 2026-07-28 and later): clients on the older, session-based revisions are refused with the spec's `HeaderMismatch` / `UnsupportedProtocolVersion` errors, and bridges such as `mcp-remote` aren't supported. Connected clients get `list_workspaces`, `search_documents`, `list_documents`, `read_document`, `start_research` and `get_research_status` as tools. Each tool's description says when to use it, what it returns and what to call next; the server's instructions (sent only in the `server/discover` result, which not every client fetches or shows its model) summarise the loop: list workspaces, search or browse, read around a hit, cite by document title and `chunk_index`. Question answering (`ask`) stays REST-only: an MCP client is already an LLM, so it gets the evidence instead of a second model's answer.
 
 ## API documentation
 
@@ -223,13 +223,21 @@ make trace-demo    # seed data, ask a question, start research
 | [003](docs/decisions/003-repository-protocols.md) | Repository protocols | Services depend on `typing.Protocol`, not SQLAlchemy implementations |
 | [004](docs/decisions/004-multi-tenancy-workspace.md) | Multi-tenancy via workspaces | Row-level isolation; every query scoped to `workspace_id` |
 | [005](docs/decisions/005-cursor-pagination.md) | Cursor-based pagination | `(created_at, id)` composite cursor; no OFFSET |
-| [006](docs/decisions/006-logfire-observability.md) | Logfire over self-hosted Jaeger | Standard OTel instrumentation; swap exporter without code changes |
+| [006](docs/decisions/006-logfire-observability.md) | Logfire over self-hosted Jaeger | Standard OTel instrumentation; another backend needs the exporter and a dozen direct `logfire` calls changed |
 | [007](docs/decisions/007-celery-sync-db.md) | Celery sync DB engine | Separate `create_engine` (psycopg3 sync) for Celery workers |
 | [008](docs/decisions/008-embedding-provider.md) | Embedding provider & cache | Gemini `gemini-embedding-001`; Redis 24-hour cache keyed on model+dims |
 | [009](docs/decisions/009-sliding-window-rate-limit.md) | Sliding-window rate limiting | Redis sorted-set implementation; no fixed-window burst |
 | [010](docs/decisions/010-pydanticai-over-langchain.md) | PydanticAI over LangChain | Typed deps injection, `TestModel` for zero-API-call tests |
 | [011](docs/decisions/011-langgraph-checkpointer.md) | LangGraph PostgreSQL checkpointer | `AsyncPostgresSaver` for crash recovery; Redis pub/sub for SSE streaming |
 | [012](docs/decisions/012-mcp-shared-services.md) | MCP as protocol adapter | MCP server shares service layer with REST; zero logic duplication |
-| [013](docs/decisions/013-mcp-api-key-auth.md) | MCP API key auth | API key for local demo; pure ASGI middleware avoids SSE buffering |
+| [013](docs/decisions/013-mcp-api-key-auth.md) | MCP API key auth | *Superseded by 021* (API-key decision stands) |
 | [014](docs/decisions/014-pgvector-hnsw.md) | pgvector HNSW over IVFFlat | No training step needed; correct results on freshly seeded workspaces |
 | [015](docs/decisions/015-docker-multistage.md) | Docker multi-stage build | Runtime image contains no build tools; uv lockfile is source of truth |
+| [016](docs/decisions/016-search-cache-invalidation.md) | Search cache invalidation | Every document update or delete drops the workspace's cached searches (`SCAN`+`DEL`) after commit |
+| [017](docs/decisions/017-orm-objects-at-api-boundary.md) | ORM objects at the API boundary | ORM objects may reach routes as data carriers; routes return response schemas and need relationships eager-loaded |
+| [018](docs/decisions/018-composition-root.md) | One composition root | `src/composition.py` alone builds repositories and services, for FastAPI, MCP and evals |
+| [019](docs/decisions/019-api-key-last-used-throttle.md) | API key last-used throttle | `last_used_at` written at most once per key per 5 minutes (Redis `SET NX`); failures never block a request |
+| [020](docs/decisions/020-trace-context-trust.md) | Trace-context trust boundary | API ignores callers' `traceparent`; worker trusts only our broker; no setup at import |
+| [021](docs/decisions/021-mcp-sdk2-handshake-free.md) | MCP on SDK 2.x, handshake-free only | Pre-2026 requests refused before the SDK; Origin first; `AppError` detail reaches the model |
+| [022](docs/decisions/022-search-query-length-cap.md) | Search query length cap | 2,000 chars for REST and MCP, derived from the embedding model's 2,048-token input limit (silently truncated beyond) |
+| [023](docs/decisions/023-mcp-retrieval-first-tools.md) | MCP retrieval-first tools | Four read-only retrieval tools with typed outputs and annotations; no `ask_question` or resources over MCP; descriptions are the contract |

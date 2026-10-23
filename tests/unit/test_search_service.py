@@ -30,11 +30,12 @@ def _make_service(
 def _result(score: float = 0.9) -> SearchResult:
     return SearchResult(
         chunk_id=uuid.uuid4(),
+        chunk_index=0,
         document_id=uuid.uuid4(),
         document_title="Test Doc",
         chunk_text="some text",
         score=score,
-        chunk_metadata={},
+        section=None,
     )
 
 

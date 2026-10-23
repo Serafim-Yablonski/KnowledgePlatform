@@ -25,20 +25,15 @@ def configure_logfire(
     switch our recording off, and its trace id would become ours. Logfire's default
     (None) trusts it and warns once.
     """
-    if token:
-        logfire.configure(
-            token=token,
-            service_name=service_name,
-            environment=environment,
-            distributed_tracing=trust_incoming_trace_context,
-        )
-    else:
-        logfire.configure(
-            send_to_logfire=False,
-            service_name=service_name,
-            environment=environment,
-            distributed_tracing=trust_incoming_trace_context,
-        )
+    logfire.configure(
+        token=token,
+        # Explicit: given no token, Logfire would fall back to a LOGFIRE_TOKEN
+        # environment variable and export anyway.
+        send_to_logfire=bool(token),
+        service_name=service_name,
+        environment=environment,
+        distributed_tracing=trust_incoming_trace_context,
+    )
 
 
 def instrument_app(app: FastAPI) -> None:

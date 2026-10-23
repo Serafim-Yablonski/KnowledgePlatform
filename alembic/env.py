@@ -12,7 +12,9 @@ from src.models import Base
 alembic_config = context.config
 
 if alembic_config.config_file_name is not None:
-    fileConfig(alembic_config.config_file_name)
+    # The default would disable every logger that already exists — all of them when
+    # migrations run inside another process (the test suite), not via the CLI.
+    fileConfig(alembic_config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
