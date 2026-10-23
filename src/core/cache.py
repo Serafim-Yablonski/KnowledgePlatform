@@ -50,6 +50,20 @@ class ResponseCache:
                 "cache write failed — value not cached", key=key, error=repr(exc)
             )
 
+    async def claim(self, key: str, ttl: int) -> bool:
+        """Set ``key`` only if absent (SET NX); True means the caller won the slot.
+
+        Fails closed: if Redis is down nobody wins, since a slot Redis can't arbitrate
+        isn't exclusive. Callers that must still do their work handle False themselves.
+        """
+        try:
+            return bool(
+                await self._redis.set(f"{self._prefix}:{key}", 1, nx=True, ex=ttl)
+            )
+        except RedisError as exc:
+            logger.warning("cache claim failed — skipping", key=key, error=repr(exc))
+            return False
+
     async def delete(self, key: str) -> None:
         try:
             await self._redis.delete(f"{self._prefix}:{key}")
@@ -96,9 +110,11 @@ class ResponseCache:
         cached = await self.get(key)
         if cached is not _MISS:
             return deserializer(cached)
-        result = await factory()
-        await self.set(key, serializer(result), ttl)
-        return result
+        data = serializer(await factory())
+        await self.set(key, data, ttl)
+        # Return what a hit would, not the factory's object: callers get the same kind
+        # of value on both paths (for ORM rows, a detached copy no session can expire).
+        return deserializer(data)
 
 
 class CacheKeys:
@@ -122,6 +138,10 @@ class CacheKeys:
     @staticmethod
     def api_key(key_hash: str) -> str:
         return f"api_key:{key_hash}"
+
+    @staticmethod
+    def api_key_touched(key_id: uuid.UUID) -> str:
+        return f"api_key_touched:{key_id}"
 
     # Glob pattern for delete_pattern() — used when deleting a workspace to
     # invalidate all membership cache entries for that workspace in one pass.

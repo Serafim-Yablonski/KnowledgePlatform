@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from src.ai.embeddings import EmbeddingService
 
 _DIMS = 768
-_MODEL = "text-embedding-005"
+_MODEL = "gemini-embedding-001"
 _API_KEY = "test-key"
 
 
@@ -61,7 +63,7 @@ async def test_batch_splitting_250_texts_makes_three_api_calls() -> None:
 
     call_sizes: list[int] = []
 
-    async def fake_post(url: str, json: Any) -> _MockResponse:  # type: ignore[override]
+    async def fake_post(url: str, json: Any, **_: Any) -> _MockResponse:  # type: ignore[override]
         n = len(json["requests"])
         call_sizes.append(n)
         return _MockResponse(200, _gemini_response(["x"] * n))
@@ -85,7 +87,7 @@ async def test_retry_on_429_then_success() -> None:
     service = _make_service()
     call_count = 0
 
-    async def fake_post(url: str, json: Any) -> _MockResponse:  # type: ignore[override]
+    async def fake_post(url: str, json: Any, **_: Any) -> _MockResponse:  # type: ignore[override]
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -113,7 +115,7 @@ async def test_4xx_raises_immediately_without_retry() -> None:
     service = _make_service()
     call_count = 0
 
-    async def fake_post(url: str, json: Any) -> _MockResponse:  # type: ignore[override]
+    async def fake_post(url: str, json: Any, **_: Any) -> _MockResponse:  # type: ignore[override]
         nonlocal call_count
         call_count += 1
         return _MockResponse(400, {"error": "bad request"})
@@ -135,7 +137,7 @@ async def test_4xx_raises_immediately_without_retry() -> None:
 async def test_embed_query_returns_single_vector() -> None:
     service = _make_service()
 
-    async def fake_post(url: str, json: Any) -> _MockResponse:  # type: ignore[override]
+    async def fake_post(url: str, json: Any, **_: Any) -> _MockResponse:  # type: ignore[override]
         return _MockResponse(200, _gemini_response(["query"]))
 
     with patch("httpx.AsyncClient") as mock_client_cls:
@@ -149,3 +151,28 @@ async def test_embed_query_returns_single_vector() -> None:
 
     assert isinstance(result, list)
     assert len(result) == _DIMS
+
+
+async def test_api_key_is_sent_as_a_header_not_in_the_url(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A URL is recorded wherever the request is traced or logged (httpx logs each
+    # request's URL at INFO); the key must still authenticate every call.
+    caplog.set_level(logging.INFO, logger="httpx")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_gemini_response(["query"]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = EmbeddingService(
+            api_key=_API_KEY, model=_MODEL, dimensions=_DIMS, http_client=client
+        )
+        await service.embed_query("query")
+
+    [request] = requests
+    assert _API_KEY not in str(request.url)
+    assert request.headers["x-goog-api-key"] == _API_KEY
+    assert "HTTP Request: POST" in caplog.text
+    assert _API_KEY not in caplog.text

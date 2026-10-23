@@ -6,7 +6,7 @@ import bcrypt
 import jwt
 
 from src.core.config import settings
-from src.core.exceptions import ForbiddenError
+from src.core.exceptions import InvalidTokenError
 from src.schemas.auth import TokenPayload
 
 
@@ -60,4 +60,4 @@ def decode_token(token: str) -> TokenPayload:
         )
         return TokenPayload.model_validate(raw)
     except jwt.PyJWTError as exc:
-        raise ForbiddenError("Invalid or expired token") from exc
+        raise InvalidTokenError("Invalid or expired token") from exc

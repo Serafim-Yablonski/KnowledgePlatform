@@ -1,0 +1,11 @@
+# 024. The RAG Eval Harness Is Removed Until It Can Fail
+Status: Accepted | Date: 2026-10-23
+
+## Context
+The harness (`src/ai/eval/`, `evals/`, `make eval`) claimed to prove retrieval works, but its design couldn't tell good configurations from bad ones. The corpus was 8 documents of ~700 words on unrelated topics, and relevance was scored per document, so any embedding model, chunk size or threshold would route a Postgres question to the Postgres document. Precision@5 counted chunks mapped to document ids without deduplication, so one relevant document scored 1.0 only if all five hits came from it. Faithfulness was judged against chunks from the runner's own search, not the ones the agent retrieved with its own query. Judge failures counted as 0.0, and `expected_answer` was loaded but never compared. It had never produced a baseline (`results/baseline.json` held no metrics), and its CI job was commented out.
+
+## Decision
+Delete the harness, its judge agent (`src/ai/agents/judge.py`), dataset, results, tests and make targets. `LLM_STRONG_MODEL` stays because research synthesis uses it. An eval comes back as plan step 12a, before the chunk-size bound (step 12) that needs it. It will be retrieval-only, with chunk-level ground truth stored as quoted answer spans, so a chunk is relevant if it contains the span and the ground truth survives re-chunking. The corpus will have overlapping topics, so retrieval has to rank rather than route. Refusal will be measured across `min_score` values, and every case will be checked by hand.
+
+## Consequences
+Until step 12a, nothing measures retrieval quality: chunking and `min_score = 0.3` stay unjustified, and the README says so. With cached embeddings, the rebuilt retrieval eval is deterministic, so one run is meaningful. An LLM-judged answer eval is out of scope until a judge is checked against human ratings. **Rejected: keeping the harness labelled "experimental".** A reader sees the code, not the label, and its flaws show up in a few minutes of reading. **Rejected: repairing it in place.** The dataset is the expensive part, and ids at the document level can't be upgraded to chunk-level ground truth. **Rejected: chunk-id ground truth.** It breaks every time the chunker changes, and comparing chunkings is what the eval is for.

@@ -1,6 +1,7 @@
 import uuid
 
 import sqlalchemy as sa
+from sqlalchemy import orm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.documents import (
@@ -12,6 +13,11 @@ from src.domain.documents import (
 from src.domain.workspace import WorkspaceStats
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
+
+# No reader here needs raw_text, the whole extracted text (only the workers do, through
+# their own queries); raiseload makes a later read fail at the access site instead of
+# lazy-loading it.
+_WITHOUT_RAW_TEXT = orm.defer(Document.raw_text, raiseload=True)
 
 
 class SQLAlchemyDocumentRepository:
@@ -26,6 +32,7 @@ class SQLAlchemyDocumentRepository:
         file_path: str,
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
+        original_filename: str | None,
     ) -> Document:
         doc = Document(
             workspace_id=workspace_id,
@@ -34,6 +41,7 @@ class SQLAlchemyDocumentRepository:
             file_path=file_path,
             file_size_bytes=file_size_bytes,
             uploaded_by=uploaded_by,
+            original_filename=original_filename,
             status=DocumentStatus.PENDING,
             version=1,
         )
@@ -45,9 +53,13 @@ class SQLAlchemyDocumentRepository:
         await self._session.refresh(doc)
         return doc
 
-    async def get_by_id(self, document_id: uuid.UUID) -> Document | None:
+    async def get_by_id(
+        self, workspace_id: uuid.UUID, document_id: uuid.UUID
+    ) -> Document | None:
         result = await self._session.scalars(
-            sa.select(Document).where(Document.id == document_id)
+            sa.select(Document)
+            .options(_WITHOUT_RAW_TEXT)
+            .where(Document.id == document_id, Document.workspace_id == workspace_id)
         )
         return result.first()
 
@@ -71,7 +83,11 @@ class SQLAlchemyDocumentRepository:
         cursor: Cursor | None = None,
         status: DocumentStatus | None = None,
     ) -> tuple[list[Document], Cursor | None]:
-        query = sa.select(Document).where(Document.workspace_id == workspace_id)
+        query = (
+            sa.select(Document)
+            .options(_WITHOUT_RAW_TEXT)
+            .where(Document.workspace_id == workspace_id)
+        )
         if cursor is not None:
             # Uses composite index on (workspace_id, created_at, id).
             query = query.where(

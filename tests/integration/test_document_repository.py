@@ -2,8 +2,11 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+import sqlalchemy as sa
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.documents import ContentType, Cursor, DocumentStatus
@@ -50,6 +53,7 @@ async def _create_doc(
     title: str = "Doc",
     status: DocumentStatus = DocumentStatus.PENDING,
     created_at_offset_seconds: float = 0,
+    raw_text: str | None = None,
 ) -> Document:
     repo = SQLAlchemyDocumentRepository(session)
     doc = await repo.create(
@@ -59,9 +63,12 @@ async def _create_doc(
         file_path=f"/tmp/{uuid.uuid4()}.txt",
         file_size_bytes=100,
         uploaded_by=uploaded_by,
+        original_filename=None,
     )
     if status != DocumentStatus.PENDING:
         doc.status = status
+    if raw_text is not None:
+        doc.raw_text = raw_text
     if created_at_offset_seconds:
         doc.created_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(
             seconds=created_at_offset_seconds
@@ -206,6 +213,92 @@ async def test_status_filter_returns_only_matching(
     assert len(all_docs) == 3
 
 
+async def test_list_does_not_select_raw_text(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # A page is up to 100 documents; their whole extracted text would be read and
+    # thrown away, since no list response shows it.
+    doc = await _create_doc(
+        db_session, test_workspace.id, test_user.id, raw_text="x" * 10_000
+    )
+    statements: list[str] = []
+    engine = db_session.bind.sync_engine  # type: ignore[union-attr]
+
+    def _record(*args: Any) -> None:
+        statements.append(args[2])
+
+    repo = SQLAlchemyDocumentRepository(db_session)
+    sa.event.listen(engine, "before_cursor_execute", _record)
+    try:
+        docs, _ = await repo.list_by_workspace(test_workspace.id)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", _record)
+
+    assert [d.id for d in docs] == [doc.id]
+    assert len(statements) == 1
+    assert "raw_text" not in statements[0]
+    assert "title" in statements[0]
+
+
+async def test_listed_raw_text_raises_instead_of_lazy_loading(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # A later read must fail where it happens, not turn into a query per row.
+    await _create_doc(db_session, test_workspace.id, test_user.id, raw_text="body")
+    # Otherwise the identity map hands back the already loaded object.
+    db_session.expunge_all()
+
+    repo = SQLAlchemyDocumentRepository(db_session)
+    docs, _ = await repo.list_by_workspace(test_workspace.id)
+
+    # MissingGreenlet (a lazy load under async) is an InvalidRequestError too.
+    with pytest.raises(InvalidRequestError, match="raiseload"):
+        _ = docs[0].raw_text
+
+
+async def test_get_by_id_does_not_select_raw_text(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # read_document looks the document up once per page; its text is not needed.
+    doc = await _create_doc(
+        db_session, test_workspace.id, test_user.id, raw_text="x" * 10_000
+    )
+    db_session.expunge_all()
+    statements: list[str] = []
+    engine = db_session.bind.sync_engine  # type: ignore[union-attr]
+
+    def _record(*args: Any) -> None:
+        statements.append(args[2])
+
+    repo = SQLAlchemyDocumentRepository(db_session)
+    sa.event.listen(engine, "before_cursor_execute", _record)
+    try:
+        fetched = await repo.get_by_id(test_workspace.id, doc.id)
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", _record)
+
+    assert fetched is not None
+    assert fetched.id == doc.id
+    assert len(statements) == 1
+    assert "raw_text" not in statements[0]
+    assert "title" in statements[0]
+
+
+async def test_fetched_raw_text_raises_instead_of_lazy_loading(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    doc = await _create_doc(db_session, test_workspace.id, test_user.id, raw_text="b")
+    db_session.expunge_all()
+
+    fetched = await SQLAlchemyDocumentRepository(db_session).get_by_id(
+        test_workspace.id, doc.id
+    )
+
+    assert fetched is not None
+    with pytest.raises(InvalidRequestError, match="raiseload"):
+        _ = fetched.raw_text
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -222,15 +315,25 @@ async def test_create_and_get_by_id(
         file_path="/tmp/hello.pdf",
         file_size_bytes=2048,
         uploaded_by=test_user.id,
+        original_filename="hello.pdf",
     )
     doc_id = doc.id  # save before flush/commit expiry
     await db_session.flush()
 
-    fetched = await repo.get_by_id(doc_id)
+    fetched = await repo.get_by_id(test_workspace.id, doc_id)
     assert fetched is not None
     assert fetched.title == "Hello"
+    assert fetched.original_filename == "hello.pdf"
     assert fetched.status == DocumentStatus.PENDING
     assert fetched.version == 1
+
+
+async def test_get_by_id_scoped_to_workspace(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    doc = await _create_doc(db_session, test_workspace.id, test_user.id)
+    repo = SQLAlchemyDocumentRepository(db_session)
+    assert await repo.get_by_id(uuid.uuid4(), doc.id) is None
 
 
 async def test_update_increments_version(
@@ -250,4 +353,4 @@ async def test_delete_removes_record(
     doc_id = doc.id
     repo = SQLAlchemyDocumentRepository(db_session)
     await repo.delete(doc)
-    assert await repo.get_by_id(doc_id) is None
+    assert await repo.get_by_id(test_workspace.id, doc_id) is None

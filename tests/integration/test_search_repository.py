@@ -87,6 +87,7 @@ async def _create_chunk(
     text: str = "chunk text",
     version: int = 1,
     chunk_index: int = 0,
+    metadata: dict[str, str] | None = None,
 ) -> DocumentChunk:
     chunk = DocumentChunk(
         document_id=document_id,
@@ -94,7 +95,7 @@ async def _create_chunk(
         text=text,
         embedding=embedding,
         token_count=len(text.split()),
-        metadata_={},
+        metadata_=metadata or {},
         version=version,
     )
     session.add(chunk)
@@ -133,6 +134,62 @@ async def test_similar_chunk_ranks_first(
     assert results[0].chunk_id == chunk_v1.id
     assert results[1].chunk_id == chunk_v2.id
     assert results[0].score > results[1].score
+
+
+async def test_each_hit_carries_its_chunk_position(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # A hit is located within its document by chunk_index (read around it); the
+    # best match sits at position 2 so a constant or a row number can't pass.
+    doc = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
+    chunks = [
+        await _create_chunk(db_session, doc.id, embedding, chunk_index=i)
+        for i, embedding in enumerate([_V2, _LOW_SIM, _V1])
+    ]
+
+    repo = SQLAlchemySearchRepository(db_session)
+    results = await repo.search_similar(
+        workspace_id=test_workspace.id,
+        embedding=_QUERY_NEAR_V1,
+        top_k=5,
+        min_score=0.0,
+    )
+
+    assert results[0].chunk_id == chunks[2].id
+    assert {r.chunk_id: r.chunk_index for r in results} == {
+        c.id: c.chunk_index for c in chunks
+    }
+
+
+async def test_hit_section_is_the_markdown_heading_or_none(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # Markdown chunks store their heading path; plaintext/PDF chunks store only a
+    # copy of the document id, and a markdown file without headings an empty one.
+    doc = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
+    stored = [
+        {"section": "Setup > Install"},
+        {"document_id": str(doc.id)},
+        {"section": ""},
+    ]
+    chunks = [
+        await _create_chunk(db_session, doc.id, _V1, chunk_index=i, metadata=m)
+        for i, m in enumerate(stored)
+    ]
+
+    repo = SQLAlchemySearchRepository(db_session)
+    results = await repo.search_similar(
+        workspace_id=test_workspace.id,
+        embedding=_QUERY_NEAR_V1,
+        top_k=5,
+        min_score=0.0,
+    )
+
+    assert {r.chunk_id: r.section for r in results} == {
+        chunks[0].id: "Setup > Install",
+        chunks[1].id: None,
+        chunks[2].id: None,
+    }
 
 
 @pytest.mark.asyncio

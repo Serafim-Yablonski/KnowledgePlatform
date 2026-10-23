@@ -17,17 +17,16 @@ dependencies = [
     "redis==6.4.0",
     "pypdf==6.10.2",
     "structlog==25.5.0",
-    "opentelemetry-api==1.40.0",
-    "opentelemetry-sdk==1.40.0",
-    "opentelemetry-instrumentation-fastapi==0.61b0",
-    "opentelemetry-instrumentation-celery==0.61b0",
-    "logfire==4.32.1",
+    "opentelemetry-api==1.45.1",
+    "logfire[asyncpg,celery,fastapi,httpx]==5.2.0",
     "httpx==0.28.1",
+    # The MCP SDK client's HTTP library; tests build its clients directly.
+    "httpx2==2.14.0",
     "bcrypt>=4.0.0",
     "PyJWT>=2.8",
     "python-multipart==0.0.27",
     "pgvector==0.4.2",
-    "mcp==1.27.0",
+    "mcp==2.3.0",
     "tiktoken==0.12.0",
     "langgraph-checkpoint-postgres>=3.1.0",
 ]
@@ -43,6 +42,7 @@ dev = [
     "mypy==1.20.2",
     "ruff==0.15.12",
     "fakeredis>=2.35.1",
+    "import-linter==2.15",
 ]
 
 [build-system]
@@ -57,6 +57,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ["-v", "--tb=short"]
+# Logfire warns when a span adopts a caller's trace context; the API must never do
+# that (tests/unit/test_observability.py), so the warning fails the run.
+filterwarnings = ["error:Found propagated trace context:RuntimeWarning"]
 
 [tool.coverage.run]
 source = ["src"]
@@ -85,8 +88,44 @@ target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20"]
 ignore = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
+
+[tool.importlinter]
+root_package = "src"
+include_external_packages = true
+# Annotation-only imports create no runtime coupling.
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+# Everything else receives finished services.
+name = "Only the composition root builds repositories"
+type = "forbidden"
+source_modules = [
+    "src.ai",
+    "src.api",
+    "src.core",
+    "src.domain",
+    "src.main",
+    "src.mcp_server",
+    "src.models",
+    "src.schemas",
+    "src.services",
+    "src.workers",
+]
+forbidden_modules = ["src.repositories"]
+ignore_imports = [
+    # Not debt: services depend on repository interfaces by design (dependency injection).
+    "src.** -> src.repositories.protocols",
+]
+# Adapters reach repositories only through src.composition, which is the point.
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Business logic is framework-free"
+type = "forbidden"
+source_modules = ["src.services", "src.repositories", "src.domain"]
+forbidden_modules = ["fastapi", "starlette"]

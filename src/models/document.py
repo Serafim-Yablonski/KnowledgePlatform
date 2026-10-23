@@ -32,6 +32,8 @@ class Document(HasIDMixin, Base):
     )
     raw_text: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     file_path: Mapped[str] = mapped_column(sa.String(1024), nullable=False)
+    # The name on the uploader's machine; None if it had none or predates the column.
+    original_filename: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
     file_size_bytes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True

@@ -120,7 +120,8 @@ async def test_login_wrong_password(async_client: AsyncClient) -> None:
         _LOGIN_URL,
         json={"email": email, "password": "wrongpassword"},
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == 'Bearer realm="knowledge-platform"'
 
 
 async def test_login_nonexistent_email(async_client: AsyncClient) -> None:
@@ -128,7 +129,8 @@ async def test_login_nonexistent_email(async_client: AsyncClient) -> None:
         _LOGIN_URL,
         json={"email": "nobody@example.com", "password": _DEFAULT_PASSWORD},
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == 'Bearer realm="knowledge-platform"'
 
 
 async def test_login_error_message_does_not_reveal_existence(
@@ -167,13 +169,18 @@ async def test_me_with_valid_token(async_client: AsyncClient) -> None:
 async def test_me_without_token(async_client: AsyncClient) -> None:
     resp = await async_client.get(_ME_URL)
     assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == 'Bearer realm="knowledge-platform"'
 
 
 async def test_me_with_invalid_token(async_client: AsyncClient) -> None:
     resp = await async_client.get(
         _ME_URL, headers={"Authorization": "Bearer invalid.token.here"}
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert (
+        resp.headers["www-authenticate"]
+        == 'Bearer realm="knowledge-platform", error="invalid_token"'
+    )
 
 
 async def test_me_with_refresh_token_fails(async_client: AsyncClient) -> None:
@@ -181,7 +188,11 @@ async def test_me_with_refresh_token_fails(async_client: AsyncClient) -> None:
     resp = await async_client.get(
         _ME_URL, headers={"Authorization": f"Bearer {tokens['refresh_token']}"}
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert (
+        resp.headers["www-authenticate"]
+        == 'Bearer realm="knowledge-platform", error="invalid_token"'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,14 +216,22 @@ async def test_refresh_with_access_token_fails(async_client: AsyncClient) -> Non
     resp = await async_client.post(
         _REFRESH_URL, json={"refresh_token": tokens["access_token"]}
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert (
+        resp.headers["www-authenticate"]
+        == 'Bearer realm="knowledge-platform", error="invalid_token"'
+    )
 
 
 async def test_refresh_with_invalid_token(async_client: AsyncClient) -> None:
     resp = await async_client.post(
         _REFRESH_URL, json={"refresh_token": "not.a.valid.token"}
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert (
+        resp.headers["www-authenticate"]
+        == 'Bearer realm="knowledge-platform", error="invalid_token"'
+    )
 
 
 async def test_refresh_with_deactivated_user(
@@ -228,4 +247,8 @@ async def test_refresh_with_deactivated_user(
     resp = await async_client.post(
         _REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert (
+        resp.headers["www-authenticate"]
+        == 'Bearer realm="knowledge-platform", error="invalid_token"'
+    )

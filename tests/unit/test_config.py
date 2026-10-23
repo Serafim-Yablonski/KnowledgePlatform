@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.core.config import DatabaseSettings, Settings
+from src.core.config import DatabaseSettings, Settings, get_settings, settings
 from src.core.security import hash_password, verify_password
 
 
@@ -37,3 +37,12 @@ def test_async_url_derived_from_standard_postgresql_scheme() -> None:
     s = DatabaseSettings(DATABASE_URL="postgresql://user:pass@localhost/db")
     assert s.ASYNC_DATABASE_URL.startswith("postgresql+asyncpg://")
     assert "+asyncpg" in s.ASYNC_DATABASE_URL
+
+
+def test_settings_override_reaches_get_settings(
+    settings_override: pytest.MonkeyPatch,
+) -> None:
+    # Code reads settings both ways: the module-level object and get_settings().
+    settings_override.setattr(settings, "MAX_UPLOAD_SIZE_MB", 1)
+
+    assert get_settings().MAX_UPLOAD_SIZE_MB == 1

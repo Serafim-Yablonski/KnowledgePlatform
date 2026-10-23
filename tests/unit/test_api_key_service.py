@@ -8,8 +8,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog.testing
 
-from src.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from src.core.exceptions import ConflictError, InvalidTokenError, NotFoundError
 from src.services.api_key import ApiKeyService
 
 
@@ -45,6 +46,7 @@ def _make_repo(
     repo.get_by_hash = AsyncMock(return_value=existing_key)
     repo.list_for_user = AsyncMock(return_value=user_keys or [])
     repo.deactivate = AsyncMock(return_value=None)
+    repo.touch_last_used = AsyncMock(return_value=None)
     repo.invalidate_all_for_user = AsyncMock(return_value=None)
     return repo
 
@@ -112,12 +114,13 @@ class TestAuthenticate:
 
         assert user is expected_user
         repo.get_by_hash.assert_awaited_once_with(key_hash)
+        repo.touch_last_used.assert_awaited_once_with(mock_key.id)
 
     @pytest.mark.asyncio
     async def test_wrong_key_raises(self) -> None:
         repo = _make_repo(existing_key=None)
         service = ApiKeyService(repo)
-        with pytest.raises(ForbiddenError):
+        with pytest.raises(InvalidTokenError):
             await service.authenticate("wrongkey")
 
     @pytest.mark.asyncio
@@ -126,7 +129,7 @@ class TestAuthenticate:
         mock_key = _make_api_key(is_active=False)
         repo = _make_repo(existing_key=mock_key)
         service = ApiKeyService(repo)
-        with pytest.raises(ForbiddenError, match="revoked"):
+        with pytest.raises(InvalidTokenError, match="revoked"):
             await service.authenticate(raw_key)
 
     @pytest.mark.asyncio
@@ -137,8 +140,28 @@ class TestAuthenticate:
         mock_key = _make_api_key(is_active=True, user=inactive_user)
         repo = _make_repo(existing_key=mock_key)
         service = ApiKeyService(repo)
-        with pytest.raises(ForbiddenError, match="revoked"):
+        with pytest.raises(InvalidTokenError, match="revoked"):
             await service.authenticate(raw_key)
+        repo.touch_last_used.assert_not_awaited()
+
+
+class TestRecordUse:
+    @pytest.mark.asyncio
+    async def test_bookkeeping_failure_does_not_fail_auth(self) -> None:
+        raw_key = "keywhoseusagewritefails"
+        expected_user = MagicMock()
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        mock_key = _make_api_key(key_hash=key_hash, user=expected_user)
+        repo = _make_repo(existing_key=mock_key)
+        repo.touch_last_used = AsyncMock(side_effect=RuntimeError("DB hiccup"))
+        service = ApiKeyService(repo)
+
+        with structlog.testing.capture_logs() as logs:
+            assert await service.authenticate(raw_key) is expected_user
+
+        # Swallowed, but not silently: the cause must reach the log.
+        [entry] = [e for e in logs if e["event"] == "failed to record api key use"]
+        assert "DB hiccup" in entry["error"]
 
 
 class TestInvalidateUserKeys:

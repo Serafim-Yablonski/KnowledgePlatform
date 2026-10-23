@@ -29,10 +29,12 @@ class EmbeddingService:
         dimensions: int,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
-        self._url = f"{_GEMINI_BASE}/{model}:batchEmbedContents?key={api_key}"
+        self._url = f"{_GEMINI_BASE}/{model}:batchEmbedContents"
+        # In a header, not the URL's ?key=: traces and httpx's request log record
+        # the full URL, never request headers.
+        self._headers = {"x-goog-api-key": api_key}
         # Shared client injected from app lifespan (FastAPI path). Celery tasks
         # pass None and get a per-call client instead.
         self._http_client = http_client
@@ -91,7 +93,9 @@ class EmbeddingService:
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                response = await client.post(self._url, json=payload)
+                response = await client.post(
+                    self._url, json=payload, headers=self._headers
+                )
             except httpx.RequestError as exc:
                 raise RuntimeError(f"Embedding API request failed: {exc}") from exc
 

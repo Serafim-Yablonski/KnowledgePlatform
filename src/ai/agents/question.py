@@ -90,9 +90,7 @@ async def get_document_details(
     except ValueError:
         return {"error": f"Invalid document ID: {document_id!r}"}
     try:
-        doc = await ctx.deps.document_service._get_by_id(
-            ctx.deps.workspace_id, doc_uuid
-        )
+        doc = await ctx.deps.document_service.get(ctx.deps.workspace_id, doc_uuid)
     except NotFoundError:
         return {"error": f"Document {document_id!r} not found"}
     return {

@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from src.models.api_key import ApiKey
 from src.models.user import User
 from src.repositories.api_key_cached import (
@@ -320,3 +322,44 @@ async def test_non_cached_methods_do_not_interact_with_cache() -> None:
 
     assert cache._store == {}
     assert cache.delete_calls == []
+
+
+# ---------------------------------------------------------------------------
+# touch_last_used — throttled through a Redis claim
+# ---------------------------------------------------------------------------
+
+
+async def test_touch_last_used_writes_once_per_window() -> None:
+    from fakeredis.aioredis import FakeRedis
+
+    from src.core.cache import ResponseCache
+
+    inner = MagicMock()
+    inner.touch_last_used = AsyncMock(return_value=None)
+    repo = CachedApiKeyRepository(inner, ResponseCache(FakeRedis()))
+    key_id = uuid.uuid4()
+
+    await repo.touch_last_used(key_id)
+    await repo.touch_last_used(key_id)
+    await repo.touch_last_used(uuid.uuid4())  # other keys have their own window
+
+    assert inner.touch_last_used.await_count == 2
+
+
+async def test_failed_touch_is_not_retried_within_window() -> None:
+    # Deliberate (ADR-019): during a DB outage each key costs one failed write per
+    # window, not one per request.
+    from fakeredis.aioredis import FakeRedis
+
+    from src.core.cache import ResponseCache
+
+    inner = MagicMock()
+    inner.touch_last_used = AsyncMock(side_effect=[RuntimeError("DB down"), None])
+    repo = CachedApiKeyRepository(inner, ResponseCache(FakeRedis()))
+    key_id = uuid.uuid4()
+
+    with pytest.raises(RuntimeError):
+        await repo.touch_last_used(key_id)
+    await repo.touch_last_used(key_id)
+
+    assert inner.touch_last_used.await_count == 1

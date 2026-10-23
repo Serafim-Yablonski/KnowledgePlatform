@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -93,11 +94,18 @@ class StubWorkspaceRepository:
     async def get_by_slug(self, slug: str) -> Workspace | None:
         return next((w for w in self._workspaces.values() if w.slug == slug), None)
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]:
-        member_ws_ids = {
-            m.workspace_id for m in self._memberships if m.user_id == user_id
-        }
-        return [w for w in self._workspaces.values() if w.id in member_ws_ids]
+    async def list_for_user_with_counts(
+        self, user_id: uuid.UUID
+    ) -> list[tuple[Workspace, int]]:
+        mine = sorted(
+            (m for m in self._memberships if m.user_id == user_id),
+            key=lambda m: m.joined_at,
+            reverse=True,
+        )
+        return [
+            (self._workspaces[m.workspace_id], await self.count_members(m.workspace_id))
+            for m in mine
+        ]
 
     async def add_member(
         self,
@@ -190,7 +198,27 @@ def _make_service(
     user_store = {u.id: u for u in users}
     ws_repo = StubWorkspaceRepository(user_store=user_store)
     user_repo = StubUserRepository(users)
-    return WorkspaceService(ws_repo, user_repo), ws_repo, user_repo
+    return (
+        WorkspaceService(ws_repo, user_repo, RecordingFileStore()),
+        ws_repo,
+        user_repo,
+    )
+
+
+class RecordingFileStore:
+    """Records which workspaces' files were removed, in order with ``events``."""
+
+    def __init__(self, events: list[object] | None = None) -> None:
+        self.events = events if events is not None else []
+
+    async def save(self, *args: Any) -> str:
+        raise AssertionError("WorkspaceService never stores files")
+
+    async def remove(self, key: str) -> None:
+        raise AssertionError("WorkspaceService removes whole workspaces only")
+
+    async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
+        self.events.append(("files removed", workspace_id))
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +629,66 @@ async def test_member_cannot_delete_workspace() -> None:
         await service.delete(
             owner, ws_repo._workspaces[created.id], WorkspaceRole.MEMBER
         )
+
+
+def _deleting_service() -> tuple[
+    WorkspaceService, StubWorkspaceRepository, RecordingFileStore, list[object]
+]:
+    events: list[object] = []
+    ws_repo = StubWorkspaceRepository(user_store={})
+    files = RecordingFileStore(events)
+    delete_rows = ws_repo.delete
+
+    async def recording_delete(workspace_id: uuid.UUID) -> None:
+        await delete_rows(workspace_id)
+        events.append(("rows deleted", workspace_id))
+
+    ws_repo.delete = recording_delete  # type: ignore[method-assign]
+    return (
+        WorkspaceService(ws_repo, StubUserRepository([]), files),
+        ws_repo,
+        files,
+        events,
+    )
+
+
+async def test_delete_removes_files_after_the_rows() -> None:
+    service, ws_repo, _, events = _deleting_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    await service.delete(owner, ws_repo._workspaces[created.id], WorkspaceRole.OWNER)
+
+    assert events == [("rows deleted", created.id), ("files removed", created.id)]
+
+
+async def test_failed_row_delete_keeps_the_files() -> None:
+    service, ws_repo, files, _ = _deleting_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    async def db_down(workspace_id: uuid.UUID) -> None:
+        raise ConnectionError("database unavailable")
+
+    ws_repo.delete = db_down  # type: ignore[method-assign]
+
+    with pytest.raises(ConnectionError):
+        await service.delete(
+            owner, ws_repo._workspaces[created.id], WorkspaceRole.OWNER
+        )
+    assert files.events == []
+
+
+async def test_forbidden_delete_touches_no_files() -> None:
+    service, ws_repo, files, _ = _deleting_service()
+    owner = _make_user()
+    created = await service.create(owner, "Team")
+
+    with pytest.raises(ForbiddenError):
+        await service.delete(
+            owner, ws_repo._workspaces[created.id], WorkspaceRole.ADMIN
+        )
+    assert files.events == []
 
 
 async def test_delete_removes_memberships() -> None:

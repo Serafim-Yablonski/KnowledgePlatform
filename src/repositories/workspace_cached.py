@@ -168,9 +168,6 @@ class CachedWorkspaceRepository:
     async def get_by_slug(self, slug: str) -> Workspace | None:
         return await self._inner.get_by_slug(slug)
 
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]:
-        return await self._inner.list_for_user(user_id)
-
     async def list_for_user_with_counts(
         self, user_id: uuid.UUID
     ) -> list[tuple[Workspace, int]]:

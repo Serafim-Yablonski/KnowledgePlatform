@@ -10,7 +10,13 @@ from src.core.dependencies import (
     get_document_service,
 )
 from src.core.rate_limit import workspace_rate_limit
-from src.domain.documents import DocumentStatus, DocumentUpdateInput, encode_cursor
+from src.domain.documents import (
+    DEFAULT_PAGE_SIZE,
+    DocumentPageSize,
+    DocumentStatus,
+    DocumentUpdateInput,
+    DocumentUpload,
+)
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.schemas.document import DocumentResponse, DocumentUpdate, PaginatedResponse
@@ -36,15 +42,23 @@ router = APIRouter(
     dependencies=[Depends(_upload_rate_limit)],
 )
 async def upload_document(
-    title: Annotated[str, Form(min_length=1, max_length=255)],
     file: UploadFile,
     request: Request,
     workspace: Workspace = Depends(get_current_workspace),
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
+    # Optional: defaults to the file's name without its extension. The service
+    # checks the cleaned title again (NFC can change the length).
+    title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> DocumentResponse:
+    upload = DocumentUpload(
+        filename=file.filename or "",
+        content_type=file.content_type or "",
+        declared_size=file.size,
+        stream=file.file,
+    )
     doc = await service.create(
-        actor, workspace, request.state.workspace_role, title, file
+        actor, workspace.id, request.state.workspace_role, title, upload
     )
     return DocumentResponse.model_validate(doc)
 
@@ -53,14 +67,14 @@ async def upload_document(
 async def list_documents(
     workspace: Workspace = Depends(get_current_workspace),
     cursor: str | None = Query(default=None),
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    limit: Annotated[DocumentPageSize, Query()] = DEFAULT_PAGE_SIZE,
     doc_status: DocumentStatus | None = Query(default=None, alias="status"),
     service: DocumentService = Depends(get_document_service),
 ) -> PaginatedResponse[DocumentResponse]:
-    page = await service.list(workspace, cursor, limit, doc_status)
+    page = await service.list(workspace.id, cursor, limit, doc_status)
     return PaginatedResponse(
         items=[DocumentResponse.model_validate(d) for d in page.items],
-        next_cursor=encode_cursor(page.next_cursor) if page.next_cursor else None,
+        next_cursor=page.next_cursor,
         has_more=page.has_more,
     )
 
@@ -71,7 +85,7 @@ async def get_document(
     workspace: Workspace = Depends(get_current_workspace),
     service: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    doc = await service.get(workspace, document_id)
+    doc = await service.get(workspace.id, document_id)
     return DocumentResponse.model_validate(doc)
 
 
@@ -86,7 +100,7 @@ async def update_document(
 ) -> DocumentResponse:
     domain_data = DocumentUpdateInput(title=data.title)
     doc = await service.update(
-        actor, workspace, request.state.workspace_role, document_id, domain_data
+        actor, workspace.id, request.state.workspace_role, document_id, domain_data
     )
     return DocumentResponse.model_validate(doc)
 
@@ -99,4 +113,4 @@ async def delete_document(
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
 ) -> None:
-    await service.delete(actor, workspace, request.state.workspace_role, document_id)
+    await service.delete(actor, workspace.id, request.state.workspace_role, document_id)

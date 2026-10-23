@@ -1,7 +1,8 @@
 import uuid
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from src.domain.documents import (
+    ChunkText,
     ContentType,
     Cursor,
     DocumentStatus,
@@ -12,7 +13,6 @@ from src.domain.search import SearchResult
 from src.domain.user import UserCreationInput
 from src.domain.workspace import WorkspaceStats, WorkspaceUpdateInput
 from src.models.api_key import ApiKey
-from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
@@ -46,8 +46,6 @@ class WorkspaceRepositoryProtocol(Protocol):
     ) -> Workspace: ...
 
     async def get_by_slug(self, slug: str) -> Workspace | None: ...
-
-    async def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]: ...
 
     async def list_for_user_with_counts(
         self, user_id: uuid.UUID
@@ -89,9 +87,12 @@ class DocumentRepositoryProtocol(Protocol):
         file_path: str,
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
+        original_filename: str | None,
     ) -> Document: ...
 
-    async def get_by_id(self, document_id: uuid.UUID) -> Document | None: ...
+    async def get_by_id(
+        self, workspace_id: uuid.UUID, document_id: uuid.UUID
+    ) -> Document | None: ...
 
     async def update(
         self, document: Document, data: DocumentUpdateInput
@@ -112,13 +113,11 @@ class DocumentRepositoryProtocol(Protocol):
 
 
 class ChunkRepositoryProtocol(Protocol):
-    async def create_batch(self, chunks: list[DocumentChunk]) -> None: ...
+    async def read_page(
+        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+    ) -> list[ChunkText]: ...
 
-    async def delete_by_document_version(
-        self, document_id: uuid.UUID, below_version: int
-    ) -> int: ...
-
-    async def get_by_document(self, document_id: uuid.UUID) -> list[DocumentChunk]: ...
+    async def count(self, document_id: uuid.UUID, *, version: int) -> int: ...
 
 
 class SearchRepositoryProtocol(Protocol):
@@ -146,6 +145,32 @@ class ApiKeyRepositoryProtocol(Protocol):
 
     async def count_active_for_user(self, user_id: uuid.UUID) -> int: ...
 
+    async def touch_last_used(self, key_id: uuid.UUID) -> None: ...
+
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None: ...
 
     async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None: ...
+
+
+class FileStoreProtocol(Protocol):
+    """Where uploaded files live. A key identifies one stored file."""
+
+    async def save(
+        self,
+        workspace_id: uuid.UUID,
+        document_id: uuid.UUID,
+        content_type: ContentType,
+        stream: BinaryIO,
+    ) -> str:
+        """Store durably and return the key. Never overwrites (``FileExistsError``);
+        a failed save leaves nothing behind."""
+        ...
+
+    async def remove(self, key: str) -> None:
+        """Remove one stored file; a missing file is not an error."""
+        ...
+
+    async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
+        """Remove every file stored for the workspace, best-effort: failures are
+        logged and the rest is still removed."""
+        ...

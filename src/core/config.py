@@ -77,12 +77,12 @@ class AuthSettings(BaseSettings):
 class AISettings(BaseSettings):
     model_config = _ENV_CONFIG
 
-    LLM_MODEL: str = "google-gla:gemini-2.0-flash"
-    LLM_STRONG_MODEL: str = "anthropic:claude-sonnet-4-5"
+    LLM_MODEL: str = "google-gla:gemini-3.5-flash-lite"
+    LLM_STRONG_MODEL: str = "google-gla:gemini-3.8-flash"
     GOOGLE_API_KEY: str = ""
     ANTHROPIC_API_KEY: str = ""
     EMBEDDING_PROVIDER: str = "google"
-    EMBEDDING_MODEL: str = "text-embedding-005"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_DIMENSIONS: int = 768
 
@@ -109,21 +109,6 @@ class AppSettings(BaseSettings):
     TRUSTED_PROXY_IPS: str = "127.0.0.1"
 
 
-class MCPSettings(BaseSettings):
-    model_config = _ENV_CONFIG
-
-    # Bearer token auth reuses the JWT stack. API key is a simpler alternative
-    # for local development — set both variables to enable it.
-    MCP_API_KEY: str | None = None
-    MCP_API_KEY_USER_EMAIL: str | None = None
-
-    @model_validator(mode="after")
-    def _mcp_key_min_length(self) -> Self:
-        if self.MCP_API_KEY is not None and len(self.MCP_API_KEY) < 32:
-            raise ValueError("MCP_API_KEY must be at least 32 characters")
-        return self
-
-
 class CacheSettings(BaseSettings):
     model_config = _ENV_CONFIG
 
@@ -131,6 +116,8 @@ class CacheSettings(BaseSettings):
     CACHE_TTL_MEMBERSHIP: int = 300
     # Safety-net TTL — revocation propagates via explicit cache.delete(), not expiry.
     CACHE_TTL_API_KEY: int = 300
+    # Resolution of api_keys.last_used_at: at most one DB write per key per window.
+    API_KEY_LAST_USED_RESOLUTION: int = 300
 
 
 class CelerySettings(BaseSettings):
@@ -200,7 +187,6 @@ class Settings(
     AISettings,
     ObservabilitySettings,
     AppSettings,
-    MCPSettings,
     CacheSettings,
     CelerySettings,
     RateLimitSettings,

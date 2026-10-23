@@ -51,6 +51,20 @@ class SQLAlchemyApiKeyRepository:
         )
         return int(result or 0)
 
+    async def touch_last_used(self, key_id: uuid.UUID) -> None:
+        # Server-side now(): the column is a naive timestamp, so no Python tz handling.
+        try:
+            await self._session.execute(
+                sa.update(ApiKey)
+                .where(ApiKey.id == key_id)
+                .values(last_used_at=func.now())
+            )
+            await self._session.commit()
+        except BaseException:
+            # Leave the shared session usable for whatever runs after auth.
+            await self._session.rollback()
+            raise
+
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None:
         await self._session.execute(
             sa.update(ApiKey)

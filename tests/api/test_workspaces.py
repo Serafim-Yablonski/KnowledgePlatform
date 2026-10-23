@@ -1,5 +1,8 @@
 """Full-stack API tests for workspace endpoints."""
 
+import io
+from pathlib import Path
+
 import pytest
 from httpx import AsyncClient
 
@@ -419,6 +422,29 @@ async def test_owner_can_delete_workspace(async_client: AsyncClient) -> None:
     # Workspace is no longer accessible (non-member now)
     get_resp = await async_client.get(f"{_WORKSPACES}/{ws_id}", headers=_auth(token))
     assert get_resp.status_code == 403
+
+
+async def test_deleting_a_workspace_removes_its_files(
+    async_client: AsyncClient, tmp_path: Path
+) -> None:
+    # tmp_path is the UPLOAD_DIR here (tests/api/conftest.py).
+    token, _ = await _register_and_token(async_client)
+    create_resp = await async_client.post(
+        _WORKSPACES, json={"name": "Files WS"}, headers=_auth(token)
+    )
+    ws_id = create_resp.json()["id"]
+    upload = await async_client.post(
+        f"{_WORKSPACES}/{ws_id}/documents",
+        headers=_auth(token),
+        files={"file": ("a.txt", io.BytesIO(b"text"), "text/plain")},
+    )
+    assert upload.status_code == 201
+    assert (tmp_path / ws_id).is_dir()
+
+    resp = await async_client.delete(f"{_WORKSPACES}/{ws_id}", headers=_auth(token))
+
+    assert resp.status_code == 204
+    assert not (tmp_path / ws_id).exists()
 
 
 async def test_non_owner_member_cannot_delete_workspace(

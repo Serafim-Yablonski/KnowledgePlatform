@@ -1,6 +1,10 @@
 from sqlalchemy.exc import IntegrityError
 
-from src.core.exceptions import ConflictError, ForbiddenError
+from src.core.exceptions import (
+    ConflictError,
+    InvalidTokenError,
+    UnauthorizedError,
+)
 from src.core.security import (
     create_access_token,
     create_refresh_token,
@@ -30,9 +34,9 @@ class AuthService:
     async def login(self, email: str, password: str) -> TokenPair:
         user = await self._repo.get_by_email(email)
         if user is None or not await verify_password(password, user.hashed_password):
-            raise ForbiddenError("Invalid credentials")
+            raise UnauthorizedError("Invalid credentials")
         if not user.is_active:
-            raise ForbiddenError("Invalid credentials")
+            raise UnauthorizedError("Invalid credentials")
         return TokenPair(
             access_token=create_access_token(user.id),
             refresh_token=create_refresh_token(user.id),
@@ -41,10 +45,10 @@ class AuthService:
     async def refresh(self, refresh_token: str) -> TokenPair:
         payload = decode_token(refresh_token)
         if payload.type != "refresh":
-            raise ForbiddenError("Invalid token type")
+            raise InvalidTokenError("Invalid token type")
         user = await self._repo.get_by_id(payload.sub)
         if user is None or not user.is_active:
-            raise ForbiddenError("User not found or inactive")
+            raise InvalidTokenError("User not found or inactive")
         return TokenPair(
             access_token=create_access_token(user.id),
             refresh_token=create_refresh_token(user.id),
@@ -53,8 +57,8 @@ class AuthService:
     async def get_current_user(self, token: str) -> User:
         payload = decode_token(token)
         if payload.type != "access":
-            raise ForbiddenError("Invalid token type")
+            raise InvalidTokenError("Invalid token type")
         user = await self._repo.get_by_id(payload.sub)
         if user is None or not user.is_active:
-            raise ForbiddenError("User not found or inactive")
+            raise InvalidTokenError("User not found or inactive")
         return user

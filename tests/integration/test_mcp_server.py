@@ -1,32 +1,50 @@
-"""Integration tests for the MCP server.
+"""Integration tests for the MCP server against real PostgreSQL.
 
-Tests cover:
-- Auth middleware (HTTP level) — no MCP protocol needed
-- Full tool calls via the MCP endpoint with bearer-token auth
-- Resource access with workspace membership enforcement
-
-The MCP server is mounted at /mcp in the main FastAPI app, so we reuse the
-existing `async_client` fixture (httpx + ASGITransport, real PostgreSQL).
+Tools and auth run on real services built by the composition root over
+the test DB session; only external calls are faked: Gemini's HTTP API (the real
+EmbeddingService runs) and rate limiting.
+Protocol-level tests through the MCP client live in test_mcp_protocol.py.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
+from contextlib import ExitStack, asynccontextmanager
+from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
-from httpx import AsyncClient
+import sqlalchemy as sa
+from fakeredis.aioredis import FakeRedis
+from mcp.server.context import ServerRequestContext
+from mcp.server.mcpserver import Context
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
 
-from src.core.security import create_access_token
+from src.composition import Services
+from src.core.exceptions import ForbiddenError, InvalidTokenError, NotFoundError
+from src.domain.documents import ContentType, DocumentStatus
 from src.domain.roles import WorkspaceRole
-from src.domain.search import SearchResult, SearchResults
-from src.domain.workspace import WorkspaceStats
-from src.mcp_server.auth import _current_user
-from src.mcp_server.resources import get_workspace_stats, list_workspace_documents
-from src.mcp_server.tools import search_documents
+from src.mcp_server.auth import McpContext, _authenticate_request
+from src.mcp_server.schemas import (
+    ChunkContent,
+    DocumentSummary,
+    SearchHit,
+    SearchHits,
+)
+from src.mcp_server.tools import (
+    list_documents,
+    list_workspaces,
+    read_document,
+    search_documents,
+)
+from src.models.chunk import EMBEDDING_DIMS, DocumentChunk
+from src.models.document import Document
 from src.models.user import User
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
@@ -62,338 +80,412 @@ async def mcp_workspace(db_session: AsyncSession, mcp_user: User) -> uuid.UUID:
     return ws.id
 
 
+_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIMS - 1)
+
+
 @pytest.fixture
-def bearer_token(mcp_user: User) -> str:
-    return create_access_token(mcp_user.id)
+def embedded() -> list[str]:
+    """Texts the fake Gemini API was asked to embed."""
+    return []
 
 
-# ---------------------------------------------------------------------------
-# Auth middleware (HTTP level)
-# ---------------------------------------------------------------------------
+@pytest.fixture
+async def services(
+    db_session: AsyncSession, embedded: list[str]
+) -> AsyncGenerator[Services]:
+    def gemini(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        embedded.extend(r["content"]["parts"][0]["text"] for r in body["requests"])
+        return httpx.Response(200, json={"embeddings": [{"values": _VECTOR}]})
+
+    fake_redis = FakeRedis()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gemini)) as http:
+        yield Services(db_session, fake_redis, http_client=http)
+    await fake_redis.aclose()
 
 
-class TestMCPAuthMiddleware:
-    @pytest.mark.asyncio
-    async def test_no_auth_header_returns_401(self, async_client: AsyncClient) -> None:
-        response = await async_client.post(
-            "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+@pytest.fixture
+def real_services(services: Services) -> Generator[Services]:
+    """Route every MCP entry point's open_services() to the test-DB services."""
+
+    @asynccontextmanager
+    async def _open() -> AsyncGenerator[Services]:
+        yield services
+
+    with ExitStack() as stack:
+        for module in ("auth", "tools"):
+            stack.enter_context(patch(f"src.mcp_server.{module}.open_services", _open))
+        stack.enter_context(
+            patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock())
         )
-        assert response.status_code == 401
-        body = response.json()
-        assert body["error"]["code"] == 401
+        yield services
 
-    @pytest.mark.asyncio
-    async def test_invalid_bearer_token_returns_403(
-        self, async_client: AsyncClient, db_session: AsyncSession
-    ) -> None:
-        from contextlib import asynccontextmanager
-        from unittest.mock import patch
 
-        from fakeredis.aioredis import FakeRedis
+@pytest.fixture
+def as_user(mcp_user: User) -> McpContext:
+    """The tool Context of a request MCP auth let through as ``mcp_user``."""
+    scope = {"type": "http", "path": "/mcp", "state": {"mcp_user": mcp_user}}
+    request_context = ServerRequestContext(
+        request_id=1,
+        protocol_version="2026-07-28",
+        method="tools/call",
+        meta=None,
+        session=MagicMock(),
+        lifespan_context=None,
+        request=Request(scope),
+    )
+    return Context(request_context=request_context)
 
-        @asynccontextmanager
-        async def _fake_session() -> AsyncGenerator[AsyncSession]:
-            yield db_session
 
-        with (
-            patch("src.mcp_server.auth.get_session", new=_fake_session),
-            # _authenticate_db_api_key calls get_redis() directly (not via FastAPI
-            # DI), so the async_client's dependency_overrides don't apply here.
-            patch("src.core.redis.get_redis", return_value=FakeRedis()),
-        ):
-            response = await async_client.post(
-                "/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-                headers={"Authorization": "Bearer not-a-real-token"},
-            )
-        assert response.status_code == 403
-
-    @pytest.mark.asyncio
-    async def test_valid_bearer_token_passes_auth(
-        self, async_client: AsyncClient, bearer_token: str
-    ) -> None:
-        response = await async_client.post(
-            "/mcp",
-            content=json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "1.0"},
-                    },
-                }
-            ),
-            headers={
-                "Authorization": f"Bearer {bearer_token}",
-                "Content-Type": "application/json",
-            },
-        )
-        # Auth passed — MCP protocol response (not a 403)
-        assert response.status_code != 403
-
-    @pytest.mark.asyncio
-    async def test_api_key_auth(self, mcp_user: User, db_session: AsyncSession) -> None:
-        from contextlib import asynccontextmanager
-
-        from starlette.requests import Request
-
-        from src.mcp_server.auth import _authenticate_request
-
-        @asynccontextmanager
-        async def _test_session() -> AsyncGenerator[AsyncSession]:
-            yield db_session
-
-        scope: dict = {
+def _bearer_request(token: str) -> Request:
+    return Request(
+        {
             "type": "http",
             "method": "POST",
             "path": "/mcp",
             "query_string": b"",
-            "headers": [(b"x-api-key", b"test-api-key")],
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
         }
-        request = Request(scope)
+    )
 
-        with (
-            patch("src.mcp_server.auth.settings") as mock_settings,
-            patch(
-                "src.mcp_server.auth.get_session", side_effect=lambda: _test_session()
-            ),
-        ):
-            mock_settings.MCP_API_KEY = "test-api-key"
-            mock_settings.MCP_API_KEY_USER_EMAIL = mcp_user.email
 
-            user = await _authenticate_request(request)
+class TestApiKeyAuth:
+    @pytest.mark.asyncio
+    async def test_db_api_key_authenticates_and_records_use(
+        self, mcp_user: User, db_session: AsyncSession, real_services: Services
+    ) -> None:
+        api_key, raw_key = await real_services.api_key.create(mcp_user.id, "laptop")
+        assert api_key.last_used_at is None
 
-        assert user.email == mcp_user.email
+        user = await _authenticate_request(_bearer_request(raw_key))
+
+        assert user.id == mcp_user.id
+        await db_session.refresh(api_key)
+        assert api_key.last_used_at is not None
+
+    @pytest.mark.asyncio
+    async def test_failed_use_write_does_not_break_auth_on_cache_miss(
+        self,
+        mcp_user: User,
+        db_session: AsyncSession,
+        real_services: Services,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Regression (ADR-019): on a cache miss the key is loaded into the session;
+        # the failed UPDATE's rollback must not expire the user auth returns.
+        _, raw_key = await real_services.api_key.create(mcp_user.id, "laptop")
+        user_id = mcp_user.id
+        db_session.expunge_all()  # like production: a fresh session per auth
+
+        real_execute = db_session.execute
+
+        async def _fail_updates(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(statement, sa.Update):
+                raise OperationalError("UPDATE api_keys", {}, Exception("DB hiccup"))
+            return await real_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db_session, "execute", _fail_updates)
+
+        user = await _authenticate_request(_bearer_request(raw_key))
+
+        assert user.id == user_id
+
+    @pytest.mark.asyncio
+    async def test_deactivated_api_key_is_rejected(
+        self, mcp_user: User, real_services: Services
+    ) -> None:
+        api_key, raw_key = await real_services.api_key.create(mcp_user.id, "old")
+        await real_services.api_key.deactivate(api_key.id, mcp_user.id)
+
+        with pytest.raises(InvalidTokenError, match="Invalid or revoked"):
+            await _authenticate_request(_bearer_request(raw_key))
 
 
 # ---------------------------------------------------------------------------
-# Tool integration — call tool functions directly with real DB + ContextVar
+# Tools — real membership checks and real queries
 # ---------------------------------------------------------------------------
+
+
+async def _workspace_of(session: AsyncSession, user: User, name: str) -> uuid.UUID:
+    repo = SQLAlchemyWorkspaceRepository(session)
+    ws = await repo.create(
+        name=name, slug=f"{name.lower()}-{uuid.uuid4().hex[:8]}", created_by_id=user.id
+    )
+    await repo.add_member(workspace_id=ws.id, user_id=user.id, role=WorkspaceRole.OWNER)
+    return ws.id
+
+
+async def _indexed_doc(
+    session: AsyncSession, workspace_id: uuid.UUID, user: User, *, version: int
+) -> Document:
+    doc = Document(
+        workspace_id=workspace_id,
+        title=f"Doc v{version}",
+        content_type=ContentType.MARKDOWN,
+        file_path=f"/tmp/{uuid.uuid4()}.md",
+        file_size_bytes=100,
+        uploaded_by=user.id,
+        status=DocumentStatus.INDEXED,
+        version=version,
+    )
+    session.add(doc)
+    await session.flush()
+    return doc
+
+
+async def _chunk(
+    session: AsyncSession,
+    doc: Document,
+    *,
+    version: int,
+    index: int,
+    section: str | None,
+) -> None:
+    session.add(
+        DocumentChunk(
+            document_id=doc.id,
+            chunk_index=index,
+            text=f"chunk {index} of v{version}",
+            embedding=_VECTOR,
+            token_count=5,
+            metadata_={} if section is None else {"section": section},
+            version=version,
+        )
+    )
+    await session.flush()
+
+
+async def _listed_doc(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    user: User,
+    *,
+    created_at: datetime,
+    status: DocumentStatus,
+) -> Document:
+    doc = Document(
+        workspace_id=workspace_id,
+        title=f"{status} at {created_at:%H:%M:%S.%f}",
+        content_type=ContentType.PLAINTEXT,
+        file_path=f"/tmp/{uuid.uuid4()}.txt",
+        file_size_bytes=100,
+        uploaded_by=user.id,
+        status=status,
+        version=1,
+        created_at=created_at,
+    )
+    session.add(doc)
+    await session.flush()
+    return doc
 
 
 class TestSearchDocumentsIntegration:
-    @pytest.mark.asyncio
-    async def test_search_returns_results(
+    async def test_search_runs_the_real_query(
         self,
-        mcp_user: User,
-        mcp_workspace: uuid.UUID,
         db_session: AsyncSession,
+        mcp_user: User,
+        as_user: McpContext,
+        mcp_workspace: uuid.UUID,
+        real_services: Services,
+        embedded: list[str],
     ) -> None:
-        search_response = SearchResults(
-            results=[
-                SearchResult(
-                    chunk_id=uuid.uuid4(),
-                    chunk_text="relevant chunk",
-                    document_id=uuid.uuid4(),
-                    document_title="Test Doc",
-                    score=0.88,
-                    chunk_metadata={},
-                )
-            ],
-            query="test",
-            total_results=1,
+        # Every chunk below has the query's own vector, so only the SQL's filters
+        # can tell them apart: a stale version, and another workspace the user is
+        # also a member of (filtered by the query, not by membership).
+        other = await _workspace_of(db_session, mcp_user, "Other")
+        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user, version=2)
+        foreign = await _indexed_doc(db_session, other, mcp_user, version=1)
+        await _chunk(db_session, doc, version=1, index=0, section="Old")
+        await _chunk(db_session, doc, version=2, index=4, section="Setup > Install")
+        await _chunk(db_session, foreign, version=1, index=0, section=None)
+
+        result = await search_documents(
+            as_user, workspace_id=mcp_workspace, query="how to install", top_k=5
         )
 
-        token = _current_user.set(mcp_user)
-        try:
-            with (
-                patch(
-                    "src.mcp_server.tools._make_search_service"
-                ) as mock_search_factory,
-                patch(
-                    "src.mcp_server.tools._make_workspace_service"
-                ) as mock_ws_factory,
-                patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock()),
-                patch("src.mcp_server.tools.get_session") as mock_gs,
-                patch(
-                    "src.mcp_server.tools.get_async_redis_client",
-                    return_value=MagicMock(),
-                ),
-            ):
-                from contextlib import asynccontextmanager
-
-                @asynccontextmanager
-                async def _fake_session() -> AsyncGenerator[MagicMock]:
-                    yield MagicMock()
-
-                mock_gs.side_effect = lambda: _fake_session()
-
-                mock_ws_svc = MagicMock()
-                mock_ws_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.MEMBER)
-                mock_ws_factory.return_value = mock_ws_svc
-
-                mock_search_svc = MagicMock()
-                mock_search_svc.search = AsyncMock(return_value=search_response)
-                mock_search_factory.return_value = mock_search_svc
-
-                result = await search_documents(
-                    workspace_id=str(mcp_workspace),
-                    query="test",
-                    top_k=5,
+        assert embedded == ["how to install"]
+        assert result == SearchHits(
+            results=[
+                SearchHit(
+                    document_id=doc.id,
+                    document_title="Doc v2",
+                    chunk_index=4,
+                    section="Setup > Install",
+                    chunk_text="chunk 4 of v2",
+                    score=1.0,
                 )
-        finally:
-            _current_user.reset(token)
-
-        assert isinstance(result, list)
-        assert len(result) == 1
-        assert result[0]["chunk_text"] == "relevant chunk"
-        assert result[0]["document_title"] == "Test Doc"
+            ]
+        )
 
     @pytest.mark.asyncio
     async def test_search_rejects_non_member(
+        self, as_user: McpContext, real_services: Services
+    ) -> None:
+        with pytest.raises(ForbiddenError):
+            await search_documents(as_user, workspace_id=uuid.uuid4(), query="test")
+
+
+class TestListWorkspacesIntegration:
+    async def test_one_query_and_no_lookups_per_workspace(
         self,
-        mcp_user: User,
         db_session: AsyncSession,
-    ) -> None:
-        other_workspace_id = uuid.uuid4()
-
-        token = _current_user.set(mcp_user)
-        try:
-            with (
-                patch(
-                    "src.mcp_server.tools._make_workspace_service"
-                ) as mock_ws_factory,
-                patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock()),
-                patch("src.mcp_server.tools.get_session") as mock_gs,
-                patch(
-                    "src.mcp_server.tools.get_async_redis_client",
-                    return_value=MagicMock(),
-                ),
-            ):
-                from contextlib import asynccontextmanager
-
-                from src.core.exceptions import ForbiddenError
-
-                @asynccontextmanager
-                async def _fake_session() -> AsyncGenerator[MagicMock]:
-                    yield MagicMock()
-
-                mock_gs.side_effect = lambda: _fake_session()
-
-                mock_ws_svc = MagicMock()
-                mock_ws_svc.get_user_role = AsyncMock(
-                    side_effect=ForbiddenError("Not a member")
-                )
-                mock_ws_factory.return_value = mock_ws_svc
-
-                with pytest.raises(ForbiddenError):
-                    await search_documents(
-                        workspace_id=str(other_workspace_id),
-                        query="test",
-                    )
-        finally:
-            _current_user.reset(token)
-
-
-# ---------------------------------------------------------------------------
-# Resource integration
-# ---------------------------------------------------------------------------
-
-
-class TestWorkspaceResources:
-    @pytest.mark.asyncio
-    async def test_documents_resource_returns_json(
-        self,
         mcp_user: User,
-        mcp_workspace: uuid.UUID,
+        as_user: McpContext,
+        real_services: Services,
     ) -> None:
-        token = _current_user.set(mcp_user)
+        # A lookup per workspace multiplied the cost by the number of workspaces,
+        # and failed the whole listing if one membership vanished in between.
+        repo = SQLAlchemyWorkspaceRepository(db_session)
+        created = []
+        for i, description in enumerate(["Runbooks and postmortems", None, "ML"]):
+            ws = await repo.create(
+                name=f"ws-{i}",
+                slug=f"ws-{i}-{uuid.uuid4().hex[:8]}",
+                created_by_id=mcp_user.id,
+                description=description,
+            )
+            await repo.add_member(ws.id, mcp_user.id, WorkspaceRole.VIEWER)
+            created.append(ws)
+
+        statements: list[str] = []
+        engine = db_session.bind.sync_engine  # type: ignore[union-attr]
+
+        def _record(*args: Any) -> None:
+            statements.append(args[2])
+
+        sa.event.listen(engine, "before_cursor_execute", _record)
         try:
-            with (
-                patch(
-                    "src.mcp_server.resources._make_workspace_service"
-                ) as mock_ws_factory,
-                patch(
-                    "src.mcp_server.resources._make_document_service"
-                ) as mock_doc_factory,
-                patch("src.mcp_server.resources.get_session") as mock_gs,
-            ):
-                from contextlib import asynccontextmanager
-
-                @asynccontextmanager
-                async def _fake_session() -> AsyncGenerator[MagicMock]:
-                    yield MagicMock()
-
-                mock_gs.side_effect = lambda: _fake_session()
-
-                mock_ws_svc = MagicMock()
-                mock_ws_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.OWNER)
-                mock_ws_factory.return_value = mock_ws_svc
-
-                import datetime
-
-                mock_doc = MagicMock()
-                mock_doc.id = uuid.uuid4()
-                mock_doc.title = "Sample Doc"
-                mock_doc.content_type = "text/plain"
-                mock_doc.status = "ready"
-                mock_doc.version = 1
-                mock_doc.file_size_bytes = 1024
-                mock_doc.created_at = datetime.datetime(2025, 1, 1, tzinfo=datetime.UTC)
-
-                mock_doc_svc = MagicMock()
-                mock_doc_svc._list_by_workspace_id = AsyncMock(return_value=[mock_doc])
-                mock_doc_factory.return_value = mock_doc_svc
-
-                raw = await list_workspace_documents(str(mcp_workspace))
+            result = await list_workspaces(as_user)
         finally:
-            _current_user.reset(token)
+            sa.event.remove(engine, "before_cursor_execute", _record)
 
-        docs = raw
-        assert isinstance(docs, list)
-        assert len(docs) == 1
-        assert docs[0]["title"] == "Sample Doc"
-        assert "created_at" in docs[0]
+        # The cache starts empty, so a lookup per workspace would reach the DB.
+        assert len(statements) == 1
+        assert {(w.id, w.name, w.description) for w in result.workspaces} == {
+            (ws.id, ws.name, ws.description) for ws in created
+        }
 
-    @pytest.mark.asyncio
-    async def test_stats_resource_returns_json(
+
+class TestListDocumentsIntegration:
+    async def test_pages_through_the_real_listing(
         self,
+        db_session: AsyncSession,
         mcp_user: User,
+        as_user: McpContext,
         mcp_workspace: uuid.UUID,
+        real_services: Services,
     ) -> None:
-        token = _current_user.set(mcp_user)
-        try:
-            with (
-                patch(
-                    "src.mcp_server.resources._make_workspace_service"
-                ) as mock_ws_factory,
-                patch(
-                    "src.mcp_server.resources._make_document_service"
-                ) as mock_doc_factory,
-                patch("src.mcp_server.resources.get_session") as mock_gs,
-            ):
-                from contextlib import asynccontextmanager
+        # Pages of 2 over t3 | t2 t2 | t1 t1: the t2 tie straddles the first page
+        # boundary, so only the cursor's id tie-breaker keeps both. The newest
+        # document sits in another workspace the user also belongs to: only the
+        # query's filter keeps it out. Every status is listed, unlike search.
+        t1, t2, t3 = (datetime(2026, 10, 23, 9, 0, s, 250_000) for s in (1, 2, 3))
+        other = await _workspace_of(db_session, mcp_user, "Other")
+        await _listed_doc(
+            db_session,
+            other,
+            mcp_user,
+            created_at=datetime(2026, 10, 23, 10, 0),
+            status=DocumentStatus.INDEXED,
+        )
+        seeded = [
+            await _listed_doc(
+                db_session, mcp_workspace, mcp_user, created_at=at, status=status
+            )
+            for at, status in [
+                (t1, DocumentStatus.INDEXED),
+                (t1, DocumentStatus.FAILED),
+                (t2, DocumentStatus.PENDING),
+                (t2, DocumentStatus.INDEXED),
+                (t3, DocumentStatus.PROCESSING),
+            ]
+        ]
 
-                @asynccontextmanager
-                async def _fake_session() -> AsyncGenerator[MagicMock]:
-                    yield MagicMock()
+        listed: list[DocumentSummary] = []
+        page_sizes: list[int] = []
+        cursor: str | None = None
+        for _ in range(10):  # bounded: a cursor that never advances fails, not hangs
+            page = await list_documents(
+                as_user, workspace_id=mcp_workspace, cursor=cursor, limit=2
+            )
+            listed.extend(page.documents)
+            page_sizes.append(len(page.documents))
+            cursor = page.next_cursor
+            if cursor is None:
+                break
 
-                mock_gs.side_effect = lambda: _fake_session()
+        newest_first = sorted(seeded, key=lambda d: (d.created_at, d.id), reverse=True)
+        assert page_sizes == [2, 2, 1]
+        assert listed == [
+            DocumentSummary(
+                id=d.id,
+                title=d.title,
+                content_type=d.content_type,
+                status=d.status,
+                created_at=d.created_at,
+            )
+            for d in newest_first
+        ]
 
-                mock_ws_svc = MagicMock()
-                mock_ws_svc.get_user_role = AsyncMock(return_value=WorkspaceRole.OWNER)
-                mock_ws_factory.return_value = mock_ws_svc
 
-                stats = WorkspaceStats(
-                    document_count=3,
-                    chunk_count=42,
-                    total_tokens_indexed=15000,
-                    last_document_updated_at=None,
-                )
-                mock_doc_svc = MagicMock()
-                mock_doc_svc._get_workspace_stats = AsyncMock(return_value=stats)
-                mock_doc_factory.return_value = mock_doc_svc
+class TestReadDocumentIntegration:
+    async def test_reads_the_current_version_to_the_end(
+        self,
+        db_session: AsyncSession,
+        mcp_user: User,
+        as_user: McpContext,
+        mcp_workspace: uuid.UUID,
+        real_services: Services,
+    ) -> None:
+        # Version 1's chunks are stale; pages of 2 over 5 chunks end with a short one.
+        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user, version=2)
+        for i in range(7):
+            await _chunk(db_session, doc, version=1, index=i, section=None)
+        for i in (4, 0, 3, 1, 2):
+            await _chunk(db_session, doc, version=2, index=i, section="## Ops")
 
-                raw = await get_workspace_stats(str(mcp_workspace))
-        finally:
-            _current_user.reset(token)
+        read: list[ChunkContent] = []
+        page_sizes: list[int] = []
+        totals: set[int] = set()
+        start: int | None = 0
+        for _ in range(10):  # bounded: a start that never advances fails, not hangs
+            assert start is not None
+            page = await read_document(
+                as_user,
+                workspace_id=mcp_workspace,
+                document_id=doc.id,
+                start_chunk=start,
+                max_chunks=2,
+            )
+            read.extend(page.chunks)
+            page_sizes.append(len(page.chunks))
+            totals.add(page.total_chunks)
+            start = page.next_start_chunk
+            if start is None:
+                break
 
-        data = raw
-        assert data["document_count"] == 3
-        assert data["chunk_count"] == 42
-        assert data["total_tokens_indexed"] == 15000
-        assert data["last_document_updated_at"] is None
+        assert page_sizes == [2, 2, 1]
+        assert totals == {5}
+        assert read == [
+            ChunkContent(chunk_index=i, section="## Ops", chunk_text=f"chunk {i} of v2")
+            for i in range(5)
+        ]
+
+    async def test_document_of_another_workspace_is_not_found(
+        self,
+        db_session: AsyncSession,
+        mcp_user: User,
+        as_user: McpContext,
+        mcp_workspace: uuid.UUID,
+        real_services: Services,
+    ) -> None:
+        # The user belongs to both workspaces, so only the document lookup's
+        # workspace filter refuses the pairing.
+        other = await _workspace_of(db_session, mcp_user, "Other")
+        foreign = await _indexed_doc(db_session, other, mcp_user, version=1)
+        await _chunk(db_session, foreign, version=1, index=0, section=None)
+
+        with pytest.raises(NotFoundError):
+            await read_document(
+                as_user, workspace_id=mcp_workspace, document_id=foreign.id
+            )

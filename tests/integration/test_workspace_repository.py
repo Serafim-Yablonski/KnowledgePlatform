@@ -1,13 +1,16 @@
 """Integration tests for SQLAlchemyWorkspaceRepository against real PostgreSQL 18."""
 
 import uuid
+from datetime import datetime
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.roles import WorkspaceRole
 from src.domain.workspace import WorkspaceUpdateInput
 from src.models.user import User
+from src.models.workspace import WorkspaceMembership
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.schemas.auth import UserCreate
@@ -145,3 +148,58 @@ async def test_update_persists_to_db(db_session: AsyncSession, test_user: User) 
     fetched = await repo.get_by_id(ws.id)
     assert fetched is not None
     assert fetched.name == "After Update"
+
+
+# ---------------------------------------------------------------------------
+# list_for_user_with_counts
+# ---------------------------------------------------------------------------
+
+
+async def _join(
+    db_session: AsyncSession,
+    repo: SQLAlchemyWorkspaceRepository,
+    workspace_id: uuid.UUID,
+    user: User,
+    day: int,
+) -> None:
+    """Add ``user`` as joined on a given day: now() is one value per transaction."""
+    await repo.add_member(workspace_id, user.id, WorkspaceRole.MEMBER)
+    await db_session.execute(
+        update(WorkspaceMembership)
+        .where(
+            WorkspaceMembership.workspace_id == workspace_id,
+            WorkspaceMembership.user_id == user.id,
+        )
+        .values(joined_at=datetime(2026, 1, day))
+    )
+
+
+async def test_list_for_user_with_counts(
+    db_session: AsyncSession,
+    workspace_repo: SQLAlchemyWorkspaceRepository,
+    test_user: User,
+) -> None:
+    other = await SQLAlchemyUserRepository(db_session).create(
+        UserCreate(email=f"ws-other-{uuid.uuid4()}@example.com", password="pw123456"),
+        hashed_password="$2b$12$testhash",
+    )
+    ws = {}
+    for name in ("first", "second", "third", "not-mine"):
+        ws[name] = await workspace_repo.create(
+            name=name, slug=f"{name}-{uuid.uuid4().hex[:8]}", created_by_id=other.id
+        )
+    await _join(db_session, workspace_repo, ws["first"].id, test_user, day=1)
+    await _join(db_session, workspace_repo, ws["third"].id, test_user, day=2)
+    await _join(db_session, workspace_repo, ws["second"].id, test_user, day=3)
+    # Another member joined most recently: the order follows the caller's joins.
+    await _join(db_session, workspace_repo, ws["first"].id, other, day=5)
+    await _join(db_session, workspace_repo, ws["not-mine"].id, other, day=4)
+
+    rows = await workspace_repo.list_for_user_with_counts(test_user.id)
+
+    # Only the caller's workspaces, newest join first; the count is every member.
+    assert [(w.name, count) for w, count in rows] == [
+        ("second", 1),
+        ("third", 1),
+        ("first", 2),
+    ]

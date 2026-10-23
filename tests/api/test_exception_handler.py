@@ -8,6 +8,7 @@ from src.core.exceptions import (
     ConflictError,
     ForbiddenError,
     InputValidationError,
+    InvalidTokenError,
     NotFoundError,
     RateLimitError,
     UnauthorizedError,
@@ -40,6 +41,23 @@ def test_unauthorized_error() -> None:
     response = _client_raising(UnauthorizedError("token expired")).get("/_test/raise")
     assert response.status_code == 401
     assert response.json()["error"]["code"] == 401
+    # RFC 6750 §3: no error code when the request carried no credentials.
+    assert response.headers["www-authenticate"] == 'Bearer realm="knowledge-platform"'
+
+
+def test_invalid_token_error() -> None:
+    response = _client_raising(InvalidTokenError("bad token")).get("/_test/raise")
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == "bad token"
+    assert response.headers["www-authenticate"] == (
+        'Bearer realm="knowledge-platform", error="invalid_token"'
+    )
+
+
+def test_forbidden_error_has_no_auth_challenge() -> None:
+    # 403 means "authenticated, not allowed": re-authenticating would not help.
+    response = _client_raising(ForbiddenError("access denied")).get("/_test/raise")
+    assert "www-authenticate" not in response.headers
 
 
 def test_forbidden_error() -> None:

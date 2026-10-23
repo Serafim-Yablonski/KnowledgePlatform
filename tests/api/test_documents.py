@@ -1,9 +1,13 @@
 """Full-stack API tests for document endpoints."""
 
+import base64
 import io
+import json
 
+import pytest
 from httpx import AsyncClient
 
+from src.services.document import INVALID_CURSOR_DETAIL, NOT_UTF8_DETAIL
 from tests.api.conftest import UserFactory
 
 _REGISTER = "/api/v1/auth/register"
@@ -91,6 +95,65 @@ async def test_upload_over_size_limit_returns_422(async_client: AsyncClient) -> 
         files={"file": ("big.pdf", io.BytesIO(oversized), "application/pdf")},
     )
     assert resp.status_code == 422
+
+
+async def test_upload_non_utf8_text_returns_422_and_stores_no_document(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Encoding WS")
+    # cp1252 "é" (0xE9) past the first 8 bytes: the old header check accepted it.
+    content = "Meeting résumé".encode("cp1252")
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        data={"title": "Legacy"},
+        files={"file": ("notes.txt", io.BytesIO(content), "text/plain")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["message"] == NOT_UTF8_DETAIL
+
+    listing = await async_client.get(_docs_url(ws_id), headers=_auth(token))
+    assert listing.json()["items"] == []
+
+
+async def test_upload_with_dotdot_filename_is_stored(async_client: AsyncClient) -> None:
+    # ".." once resolved to the workspace directory itself: IsADirectoryError, a 500.
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Dotdot WS")
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        data={"title": "Dots"},
+        files={"file": ("..", io.BytesIO(b"plain text"), "text/plain")},
+    )
+    assert resp.status_code == 201
+
+
+async def test_upload_without_title_takes_it_from_the_filename(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Named WS")
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        files={"file": ("report-v3.pdf", io.BytesIO(b"%PDF-1.4 x"), "application/pdf")},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert (body["title"], body["original_filename"]) == ("report-v3", "report-v3.pdf")
+
+    # The original filename is provenance: renaming changes only the title.
+    patch_resp = await async_client.patch(
+        f"{_docs_url(ws_id)}/{body['id']}",
+        headers=_auth(token),
+        json={"title": "Renamed"},
+    )
+    assert patch_resp.json()["original_filename"] == "report-v3.pdf"
 
 
 async def test_upload_unsupported_mime_returns_422(async_client: AsyncClient) -> None:
@@ -277,6 +340,22 @@ async def test_list_returns_has_more_false_when_no_more_pages(
     assert body["next_cursor"] is None
 
 
+async def test_list_limit_is_bounded(async_client: AsyncClient) -> None:
+    # The same bounds as MCP's list_documents (shared DocumentPageSize).
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Limit WS")
+    url = _docs_url(ws_id)
+
+    codes = [
+        (
+            await async_client.get(url, headers=_auth(token), params={"limit": n})
+        ).status_code
+        for n in (0, 1, 100, 101)
+    ]
+
+    assert codes == [422, 200, 200, 422]
+
+
 # ---------------------------------------------------------------------------
 # Status filter
 # ---------------------------------------------------------------------------
@@ -379,3 +458,38 @@ async def test_invalid_cursor_returns_422(async_client: AsyncClient) -> None:
         params={"cursor": "not-valid-base64!!"},
     )
     assert resp.status_code == 422
+
+
+_ID = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            ["2026-10-22T12:00:00", "6f9619ff-8b86-d011-b42d-00cf4fc964ff"], id="list"
+        ),
+        pytest.param(7, id="int"),
+        pytest.param(
+            {
+                "created_at": "2026-10-22T12:00:00+00:00",
+                "id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+            },
+            id="tz-aware",
+        ),
+    ],
+)
+async def test_forged_cursor_is_rejected_with_a_fix(
+    async_client: AsyncClient, payload: object
+) -> None:
+    # Regression: these decoded past the old checks and crashed with a 500.
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Forged Cursor WS")
+    cursor = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+    resp = await async_client.get(
+        _docs_url(ws_id), headers=_auth(token), params={"cursor": cursor}
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["message"] == INVALID_CURSOR_DETAIL

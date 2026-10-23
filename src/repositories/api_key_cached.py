@@ -151,3 +151,11 @@ class CachedApiKeyRepository:
 
     async def count_active_for_user(self, user_id: uuid.UUID) -> int:
         return await self._inner.count_active_for_user(user_id)
+
+    async def touch_last_used(self, key_id: uuid.UUID) -> None:
+        # Throttled: the first request in each window writes, the rest skip the DB.
+        # The cached key isn't invalidated — auth never reads last_used_at from it.
+        if await self._cache.claim(
+            CacheKeys.api_key_touched(key_id), settings.API_KEY_LAST_USED_RESOLUTION
+        ):
+            await self._inner.touch_last_used(key_id)

@@ -5,7 +5,8 @@ FROM python:3.14-slim AS builder
 
 WORKDIR /app
 
-RUN pip install uv --no-cache-dir
+# Same uv version as CI (.github/workflows/ci.yml).
+COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /bin/uv
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev

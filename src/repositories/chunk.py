@@ -5,32 +5,42 @@ import uuid
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.documents import ChunkText
 from src.models.chunk import DocumentChunk
+
+# As in search: plaintext/PDF chunks carry no section, markdown's preamble carries "".
+_SECTION = sa.func.nullif(DocumentChunk.metadata_["section"].as_string(), "")
 
 
 class SQLAlchemyChunkRepository:
+    """Reads one version of a document's chunks; the caller scopes the document."""
+
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create_batch(self, chunks: list[DocumentChunk]) -> None:
-        self._session.add_all(chunks)
-        await self._session.flush()
-
-    async def delete_by_document_version(
-        self, document_id: uuid.UUID, below_version: int
-    ) -> int:
-        result = await self._session.execute(
-            sa.delete(DocumentChunk).where(
+    async def read_page(
+        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+    ) -> list[ChunkText]:
+        rows = await self._session.execute(
+            sa.select(DocumentChunk.chunk_index, _SECTION, DocumentChunk.text)
+            .where(
                 DocumentChunk.document_id == document_id,
-                DocumentChunk.version < below_version,
+                DocumentChunk.version == version,
+                DocumentChunk.chunk_index >= start,
+            )
+            .order_by(DocumentChunk.chunk_index)
+            .limit(limit)
+        )
+        return [
+            ChunkText(chunk_index=index, section=section, chunk_text=text)
+            for index, section, text in rows.all()
+        ]
+
+    async def count(self, document_id: uuid.UUID, *, version: int) -> int:
+        total = await self._session.scalar(
+            sa.select(sa.func.count()).where(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.version == version,
             )
         )
-        return result.rowcount  # type: ignore[attr-defined, no-any-return]
-
-    async def get_by_document(self, document_id: uuid.UUID) -> list[DocumentChunk]:
-        result = await self._session.execute(
-            sa.select(DocumentChunk)
-            .where(DocumentChunk.document_id == document_id)
-            .order_by(DocumentChunk.chunk_index)
-        )
-        return list(result.scalars().all())
+        return total or 0
