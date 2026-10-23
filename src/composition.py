@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from functools import cached_property
+from pathlib import Path
 
 import httpx
 import redis.asyncio as aioredis
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ai.embeddings import EmbeddingService
 from src.core.cache import ResponseCache
-from src.core.config import get_settings
+from src.core.config import get_settings, settings
 from src.core.database import get_session
 from src.core.http import get_async_http_client
 from src.core.redis import get_async_redis_client
@@ -26,6 +27,7 @@ from src.repositories.api_key import SQLAlchemyApiKeyRepository
 from src.repositories.api_key_cached import CachedApiKeyRepository
 from src.repositories.chunk import SQLAlchemyChunkRepository
 from src.repositories.document import SQLAlchemyDocumentRepository
+from src.repositories.file_store import LocalFileStore
 from src.repositories.search import SQLAlchemySearchRepository
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
@@ -85,7 +87,13 @@ class Services:
         return WorkspaceService(
             workspace_repo=CachedWorkspaceRepository(inner, self._cache),
             user_repo=SQLAlchemyUserRepository(self._session),
+            files=self.files,
         )
+
+    @cached_property
+    def files(self) -> LocalFileStore:
+        # The singleton, not get_settings(): that builds a fresh Settings per call.
+        return LocalFileStore(Path(settings.UPLOAD_DIR))
 
     @cached_property
     def document(self) -> DocumentService:
@@ -93,6 +101,7 @@ class Services:
             repo=SQLAlchemyDocumentRepository(self._session),
             chunk_repo=SQLAlchemyChunkRepository(self._session),
             session=self._session,
+            files=self.files,
         )
 
     @cached_property

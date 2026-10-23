@@ -77,12 +77,12 @@ class AuthSettings(BaseSettings):
 class AISettings(BaseSettings):
     model_config = _ENV_CONFIG
 
-    LLM_MODEL: str = "google-gla:gemini-2.0-flash"
-    LLM_STRONG_MODEL: str = "anthropic:claude-sonnet-4-5"
+    LLM_MODEL: str = "google-gla:gemini-3.5-flash-lite"
+    LLM_STRONG_MODEL: str = "google-gla:gemini-3.8-flash"
     GOOGLE_API_KEY: str = ""
     ANTHROPIC_API_KEY: str = ""
     EMBEDDING_PROVIDER: str = "google"
-    EMBEDDING_MODEL: str = "text-embedding-005"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_DIMENSIONS: int = 768
 

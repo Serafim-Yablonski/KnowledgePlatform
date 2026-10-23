@@ -7,7 +7,7 @@ import json
 import pytest
 from httpx import AsyncClient
 
-from src.services.document import INVALID_CURSOR_DETAIL
+from src.services.document import INVALID_CURSOR_DETAIL, NOT_UTF8_DETAIL
 from tests.api.conftest import UserFactory
 
 _REGISTER = "/api/v1/auth/register"
@@ -95,6 +95,65 @@ async def test_upload_over_size_limit_returns_422(async_client: AsyncClient) -> 
         files={"file": ("big.pdf", io.BytesIO(oversized), "application/pdf")},
     )
     assert resp.status_code == 422
+
+
+async def test_upload_non_utf8_text_returns_422_and_stores_no_document(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Encoding WS")
+    # cp1252 "é" (0xE9) past the first 8 bytes: the old header check accepted it.
+    content = "Meeting résumé".encode("cp1252")
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        data={"title": "Legacy"},
+        files={"file": ("notes.txt", io.BytesIO(content), "text/plain")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["message"] == NOT_UTF8_DETAIL
+
+    listing = await async_client.get(_docs_url(ws_id), headers=_auth(token))
+    assert listing.json()["items"] == []
+
+
+async def test_upload_with_dotdot_filename_is_stored(async_client: AsyncClient) -> None:
+    # ".." once resolved to the workspace directory itself: IsADirectoryError, a 500.
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Dotdot WS")
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        data={"title": "Dots"},
+        files={"file": ("..", io.BytesIO(b"plain text"), "text/plain")},
+    )
+    assert resp.status_code == 201
+
+
+async def test_upload_without_title_takes_it_from_the_filename(
+    async_client: AsyncClient,
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token, "Named WS")
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        files={"file": ("report-v3.pdf", io.BytesIO(b"%PDF-1.4 x"), "application/pdf")},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert (body["title"], body["original_filename"]) == ("report-v3", "report-v3.pdf")
+
+    # The original filename is provenance: renaming changes only the title.
+    patch_resp = await async_client.patch(
+        f"{_docs_url(ws_id)}/{body['id']}",
+        headers=_auth(token),
+        json={"title": "Renamed"},
+    )
+    assert patch_resp.json()["original_filename"] == "report-v3.pdf"
 
 
 async def test_upload_unsupported_mime_returns_422(async_client: AsyncClient) -> None:

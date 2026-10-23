@@ -1,5 +1,5 @@
 import uuid
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from src.domain.documents import (
     ChunkText,
@@ -87,6 +87,7 @@ class DocumentRepositoryProtocol(Protocol):
         file_path: str,
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
+        original_filename: str | None,
     ) -> Document: ...
 
     async def get_by_id(
@@ -149,3 +150,27 @@ class ApiKeyRepositoryProtocol(Protocol):
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None: ...
 
     async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None: ...
+
+
+class FileStoreProtocol(Protocol):
+    """Where uploaded files live. A key identifies one stored file."""
+
+    async def save(
+        self,
+        workspace_id: uuid.UUID,
+        document_id: uuid.UUID,
+        content_type: ContentType,
+        stream: BinaryIO,
+    ) -> str:
+        """Store durably and return the key. Never overwrites (``FileExistsError``);
+        a failed save leaves nothing behind."""
+        ...
+
+    async def remove(self, key: str) -> None:
+        """Remove one stored file; a missing file is not an error."""
+        ...
+
+    async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
+        """Remove every file stored for the workspace, best-effort: failures are
+        logged and the rest is still removed."""
+        ...

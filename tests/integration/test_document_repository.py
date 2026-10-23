@@ -63,6 +63,7 @@ async def _create_doc(
         file_path=f"/tmp/{uuid.uuid4()}.txt",
         file_size_bytes=100,
         uploaded_by=uploaded_by,
+        original_filename=None,
     )
     if status != DocumentStatus.PENDING:
         doc.status = status
@@ -314,6 +315,7 @@ async def test_create_and_get_by_id(
         file_path="/tmp/hello.pdf",
         file_size_bytes=2048,
         uploaded_by=test_user.id,
+        original_filename="hello.pdf",
     )
     doc_id = doc.id  # save before flush/commit expiry
     await db_session.flush()
@@ -321,6 +323,7 @@ async def test_create_and_get_by_id(
     fetched = await repo.get_by_id(test_workspace.id, doc_id)
     assert fetched is not None
     assert fetched.title == "Hello"
+    assert fetched.original_filename == "hello.pdf"
     assert fetched.status == DocumentStatus.PENDING
     assert fetched.version == 1
 

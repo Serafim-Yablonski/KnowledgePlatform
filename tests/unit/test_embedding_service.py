@@ -13,7 +13,7 @@ import pytest
 from src.ai.embeddings import EmbeddingService
 
 _DIMS = 768
-_MODEL = "text-embedding-005"
+_MODEL = "gemini-embedding-001"
 _API_KEY = "test-key"
 
 

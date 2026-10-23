@@ -10,6 +10,7 @@ from src.domain.workspace import WorkspaceInfo, WorkspaceMember, WorkspaceUpdate
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
 from src.repositories.protocols import (
+    FileStoreProtocol,
     UserRepositoryProtocol,
     WorkspaceRepositoryProtocol,
 )
@@ -22,9 +23,11 @@ class WorkspaceService:
         self,
         workspace_repo: WorkspaceRepositoryProtocol,
         user_repo: UserRepositoryProtocol,
+        files: FileStoreProtocol,
     ) -> None:
         self._repo = workspace_repo
         self._user_repo = user_repo
+        self._files = files
 
     async def get_workspace_for_user(
         self, workspace_id: uuid.UUID, user_id: uuid.UUID
@@ -210,7 +213,12 @@ class WorkspaceService:
         role: WorkspaceRole,
     ) -> None:
         require_permission(role, Permission.DELETE_WORKSPACE)
+        # Rows first (the repository commits), files after: if the delete fails the
+        # workspace is intact; if file removal fails, the leftovers are only garbage.
+        # An upload into this workspace holds a lock the delete waits for, so no
+        # upload is still writing here once the delete has committed.
         await self._repo.delete(workspace.id)
+        await self._files.remove_workspace(workspace.id)
         logger.info(
             "workspace deleted",
             workspace_id=str(workspace.id),

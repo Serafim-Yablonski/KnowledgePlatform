@@ -91,9 +91,6 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20"]
 ignore = ["B008"]
 
-[tool.ruff.lint.per-file-ignores]
-"src/ai/eval/*" = ["T20"]  # CLI tools: stdout is their interface
-
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
 

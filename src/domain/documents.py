@@ -1,12 +1,17 @@
 import base64
 import json
+import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import PurePath
 from typing import Annotated, BinaryIO
 
 from pydantic import BaseModel, ConfigDict, Field, NaiveDatetime
+
+from src.core.exceptions import InputValidationError
 
 
 class DocumentStatus(StrEnum):
@@ -69,6 +74,41 @@ def decode_cursor(value: str) -> Cursor:
     return Cursor(created_at=data.created_at, id=data.id)
 
 
+# Titles and original filenames are shown to people, sent in headers and put into
+# prompts. Bidi overrides/isolates reorder what is displayed ("invoice\u202efdp.exe"
+# reads as "invoiceexe.pdf"). Zero-width joiners and LRM/RLM stay: real names use them.
+_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+MAX_DISPLAY_TEXT_LENGTH = 255  # also the longest filename any common filesystem allows
+
+
+def clean_display_text(raw: str, what: str) -> str:
+    """NFC and trimmed; rejects control and bidi-override characters and overlong text.
+
+    ``what`` names the field in the error, which reaches clients.
+    """
+    text = unicodedata.normalize("NFC", raw).strip()
+    for char in text:
+        if unicodedata.category(char) == "Cc" or char in _BIDI_CONTROLS:
+            raise InputValidationError(
+                f"{what} contains the invisible character U+{ord(char):04X}"
+            )
+    if len(text) > MAX_DISPLAY_TEXT_LENGTH:
+        raise InputValidationError(
+            f"{what} is longer than {MAX_DISPLAY_TEXT_LENGTH} characters"
+        )
+    return text
+
+
+def clean_original_filename(raw: str) -> str | None:
+    """The last path segment as display text; None when there is no name."""
+    name = clean_display_text(re.split(r"[/\\]", raw)[-1], "Filename")
+    return None if name in ("", ".", "..") else name
+
+
+def title_from_filename(name: str) -> str:
+    return PurePath(name).stem or name
+
+
 @dataclass(frozen=True)
 class DocumentUpload:
     """An uploaded file as the service sees it, independent of the web framework.
@@ -76,9 +116,11 @@ class DocumentUpload:
     ``declared_size`` is whatever size the adapter already knows, if any. From REST it
     is Starlette's count of the already-buffered body, not a header, so rejecting on it
     saves the DB row and disk write, not the transfer. The limit that counts is the
-    one enforced while streaming ``stream`` to disk.
+    one enforced by reading ``stream`` once before anything is stored, so ``stream``
+    must be seekable.
     """
 
+    # The name on the client's machine: provenance only, never a storage path.
     filename: str
     content_type: str
     declared_size: int | None

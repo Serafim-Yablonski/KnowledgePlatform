@@ -33,11 +33,6 @@ htmlcov/
 coverage.xml
 *.cover
 
-# ─── Evaluation results ───────────────────────────────────────────────────────
-# Ignore run results; keep baseline tracked for regression comparisons.
-results/*.json
-!results/baseline.json
-
 # ─── IDE ──────────────────────────────────────────────────────────────────────
 .idea/
 .vscode/

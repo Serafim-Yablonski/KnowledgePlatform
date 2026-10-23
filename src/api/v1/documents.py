@@ -42,12 +42,14 @@ router = APIRouter(
     dependencies=[Depends(_upload_rate_limit)],
 )
 async def upload_document(
-    title: Annotated[str, Form(min_length=1, max_length=255)],
     file: UploadFile,
     request: Request,
     workspace: Workspace = Depends(get_current_workspace),
     actor: User = Depends(get_current_user),
     service: DocumentService = Depends(get_document_service),
+    # Optional: defaults to the file's name without its extension. The service
+    # checks the cleaned title again (NFC can change the length).
+    title: Annotated[str | None, Form(max_length=255)] = None,
 ) -> DocumentResponse:
     upload = DocumentUpload(
         filename=file.filename or "",

@@ -1,5 +1,5 @@
-.PHONY: run test test-unit test-int lint typecheck eval eval-compare eval-baseline \
-        migrate revision ci docker-build clean seed install mcp-config trace-demo
+.PHONY: run test test-unit test-int lint typecheck \
+        migrate revision ci docker-build clean install mcp-config
 
 # ─── Development ──────────────────────────────────────────────────────────────
 
@@ -32,17 +32,6 @@ lint:
 typecheck:
 	uv run mypy --strict src/
 
-# ─── AI Evaluation ────────────────────────────────────────────────────────────
-
-eval:
-	uv run python -m src.ai.eval.runner
-
-eval-compare:
-	uv run python -m src.ai.eval.compare results/baseline.json results/current.json
-
-eval-baseline:
-	cp results/current.json results/baseline.json
-
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 migrate:
@@ -72,13 +61,5 @@ clean:
 	find . -type d -name ".mypy_cache"   -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".ruff_cache"   -exec rm -rf {} + 2>/dev/null || true
 
-seed:
-	@echo "not implemented yet"
-
 mcp-config:
 	uv run python scripts/generate_mcp_config.py
-
-# ─── Observability demo ───────────────────────────────────────────────────────
-
-trace-demo:
-	uv run python scripts/trace_demo.py

@@ -24,6 +24,7 @@ class DocumentResponse(BaseModel):
     status: DocumentStatus
     version: int
     file_size_bytes: int
+    original_filename: str | None
     uploaded_by: uuid.UUID
     created_at: datetime
     updated_at: datetime

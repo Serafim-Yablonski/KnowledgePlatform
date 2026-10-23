@@ -8,13 +8,13 @@ import factory
 import pytest
 from httpx import AsyncClient
 
-import src.services.document as _doc_svc_module
+from src.core import config
 
 
 @pytest.fixture(autouse=True)
 def _patch_upload_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Redirect file uploads to a per-test temp directory."""
-    monkeypatch.setattr(_doc_svc_module.settings, "UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setattr(config.settings, "UPLOAD_DIR", str(tmp_path))
 
 
 @pytest.fixture(autouse=True)

@@ -32,6 +32,7 @@ class SQLAlchemyDocumentRepository:
         file_path: str,
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
+        original_filename: str | None,
     ) -> Document:
         doc = Document(
             workspace_id=workspace_id,
@@ -40,6 +41,7 @@ class SQLAlchemyDocumentRepository:
             file_path=file_path,
             file_size_bytes=file_size_bytes,
             uploaded_by=uploaded_by,
+            original_filename=original_filename,
             status=DocumentStatus.PENDING,
             version=1,
         )

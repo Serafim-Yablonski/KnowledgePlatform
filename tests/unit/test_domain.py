@@ -7,7 +7,15 @@ from datetime import datetime
 
 import pytest
 
-from src.domain.documents import Cursor, decode_cursor, encode_cursor
+from src.core.exceptions import InputValidationError
+from src.domain.documents import (
+    Cursor,
+    clean_display_text,
+    clean_original_filename,
+    decode_cursor,
+    encode_cursor,
+    title_from_filename,
+)
 from src.domain.roles import PERMISSIONS, WorkspaceRole
 
 
@@ -78,3 +86,73 @@ class TestPaginationCursor:
     def test_anything_but_our_own_shape_is_a_value_error(self, value: str) -> None:
         with pytest.raises(ValueError, match="Invalid pagination cursor"):
             decode_cursor(value)
+
+
+# ---------------------------------------------------------------------------
+# Display text: original filenames and titles
+# ---------------------------------------------------------------------------
+
+
+# Zero-width (non-)joiners are part of real names: an emoji family, a Persian word.
+_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467.pdf"
+_PERSIAN = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645.txt"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("report.pdf", "report.pdf", id="plain"),
+        pytest.param("C:\\Users\\me\\a.pdf", "a.pdf", id="windows-path"),
+        pytest.param("../../etc/a.pdf", "a.pdf", id="posix-path"),
+        pytest.param("re\u0301sume\u0301.pdf", "r\u00e9sum\u00e9.pdf", id="nfd-to-nfc"),
+        pytest.param("  report.pdf ", "report.pdf", id="trimmed"),
+        pytest.param(_FAMILY, _FAMILY, id="zwj-emoji"),
+        pytest.param(_PERSIAN, _PERSIAN, id="zwnj-persian"),
+        pytest.param("x" * 251 + ".pdf", "x" * 251 + ".pdf", id="255-chars"),
+    ],
+)
+def test_clean_original_filename_keeps_real_names(raw: str, expected: str) -> None:
+    assert clean_original_filename(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", ".", "..", "/", "  ", "dir/"])
+def test_clean_original_filename_treats_path_artifacts_as_no_name(raw: str) -> None:
+    assert clean_original_filename(raw) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        pytest.param("a\tb.pdf", "U\\+0009", id="tab"),
+        pytest.param("a\x00b.pdf", "U\\+0000", id="nul"),
+        pytest.param("a\r\nb.pdf", "U\\+000D", id="crlf"),
+        pytest.param("invoice\u202efdp.exe", "U\\+202E", id="rlo"),
+        pytest.param("a\u2066b.pdf", "U\\+2066", id="isolate"),
+        pytest.param("x" * 252 + ".pdf", "255", id="256-chars"),
+    ],
+)
+def test_clean_original_filename_rejects_unsafe_names(raw: str, match: str) -> None:
+    with pytest.raises(InputValidationError, match=match):
+        clean_original_filename(raw)
+
+
+def test_clean_display_text_keeps_slashes_in_titles() -> None:
+    assert clean_display_text(" Q3/Q4 report ", "Title") == "Q3/Q4 report"
+
+
+def test_clean_display_text_names_the_field() -> None:
+    with pytest.raises(InputValidationError, match="^Title contains"):
+        clean_display_text("a\u202eb", "Title")
+
+
+@pytest.mark.parametrize(
+    ("name", "title"),
+    [
+        ("report-v3.pdf", "report-v3"),
+        ("archive.tar.gz", "archive.tar"),
+        (".env", ".env"),
+        ("README", "README"),
+    ],
+)
+def test_title_from_filename_is_the_stem(name: str, title: str) -> None:
+    assert title_from_filename(name) == title
