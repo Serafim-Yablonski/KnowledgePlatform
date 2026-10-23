@@ -1,5 +1,5 @@
 # 008. Embedding Provider: Google Gemini text-embedding-005
-Status: Accepted | Date: 2026-05-14
+Status: Accepted; the model is now `gemini-embedding-001` (`text-embedding-005` is a Vertex AI model, not served by the Gemini API), and the Redis embedding cache described here is not implemented (2026-10-23) | Date: 2026-05-14
 
 ## Context
 The RAG pipeline needs a text embedding model. Key constraints: must produce fixed-dimensional vectors compatible with pgvector, must be cost-effective at portfolio scale, and must be swappable if requirements change.

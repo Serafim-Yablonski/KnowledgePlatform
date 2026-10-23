@@ -1,11 +1,11 @@
 # 012. MCP Server as a Protocol Adapter over the Shared Service Layer
-Status: Accepted, amended by ADR-018 | Date: 2026-05-24
+Status: Accepted, amended by ADR-018, ADR-021 (`MCPServer` on SDK 2.x at an exact `/mcp` route; the user travels in the request's ASGI `state`, not a ContextVar — a session task copied the initializing request's ContextVars) and ADR-023 (retrieval tools only: no `ask_question` or resources over MCP) | Date: 2026-05-24
 
 ## Context
 We need an MCP (Model Context Protocol) server so AI clients can search documents, ask questions, and run research workflows. The same business logic already exists behind the REST API. The key question is where to draw the boundary: should the MCP server duplicate service logic, access repositories directly, or share the existing service layer?
 
 ## Decision
-The MCP server is a pure protocol adapter that imports exclusively from `services/`. It never imports from `repositories/`, `models/`, or the database layer directly. It shares the same authorization checks, caching, and business logic as the REST API:
+The MCP server is a pure protocol adapter that imports exclusively from `services/`. It never imports from `repositories/` or the database layer directly (import-linter enforces it, ADR-018); ORM models reach it only as data carriers, such as the authenticated `User` (ADR-017). It shares the same authorization checks, caching, and business logic as the REST API:
 
 ```
 REST API  ─┐

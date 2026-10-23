@@ -1,5 +1,5 @@
 # 013. MCP API Key Authentication and Session-Scoped Workspace State
-Status: Accepted | Date: 2026-05-25
+Status: Superseded by ADR-021 (session-scoped workspace state removed; the API-key decision stands) | Date: 2026-05-25
 
 > 2026-10-16: the legacy env-var key (`MCP_API_KEY`, `MCP_API_KEY_USER_EMAIL`, `X-API-Key`) was removed; database API keys are the only key path.
 

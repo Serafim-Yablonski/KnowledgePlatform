@@ -2,7 +2,7 @@
 Status: Accepted | Date: 2026-05-25
 
 ## Context
-The `document_chunks` table stores 768-dimensional embeddings (Gemini `text-embedding-005`) and is queried via cosine similarity for every RAG retrieval. pgvector offers two approximate nearest-neighbour index types: HNSW (Hierarchical Navigable Small World) and IVFFlat (Inverted File with Flat quantisation). The index type determines recall accuracy, query latency, and the operational complexity of index maintenance.
+The `document_chunks` table stores 768-dimensional embeddings (Gemini `gemini-embedding-001`) and is queried via cosine similarity for every RAG retrieval. pgvector offers two approximate nearest-neighbour index types: HNSW (Hierarchical Navigable Small World) and IVFFlat (Inverted File with Flat quantisation). The index type determines recall accuracy, query latency, and the operational complexity of index maintenance.
 
 ## Decision
 Use HNSW (`USING hnsw (embedding vector_cosine_ops)`) with default `m=16` and `ef_construction=64`. The migration creates the index at table creation time: `CREATE INDEX ix_chunks_embedding_hnsw ON document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64)`. The query uses cosine distance (`<=>`) which matches the index operator class.

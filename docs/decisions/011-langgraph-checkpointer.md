@@ -1,5 +1,5 @@
 # 011. LangGraph Checkpointer: AsyncPostgresSaver over SQLite, psycopg3 over asyncpg
-Status: Accepted | Date: 2026-05-21
+Status: Accepted; crash recovery is not yet true: runs execute in-process and are never resumed (2026-10-23). To be superseded by durable execution in Celery | Date: 2026-05-21
 
 ## Context
 The research workflow uses LangGraph for multi-step graph orchestration with human-in-the-loop interrupts. Graph state must survive process restarts (crash recovery) and be readable from any worker process (multi-worker deployments). The checkpointer is the persistence layer for this state.
