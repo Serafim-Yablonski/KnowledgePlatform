@@ -31,6 +31,7 @@ from src.workers.queue import (
     claim_statement,
     fail,
     hand_off,
+    lag_statement,
     release,
     retry_later,
 )
@@ -308,17 +309,23 @@ async def test_retry_later_hides_the_document_until_its_delay_passes(
     assert claimed is not None and claimed.attempt == 2
 
 
+@pytest.mark.parametrize(
+    ("phase", "owed"),
+    [(EXTRACTION, DocumentStatus.PENDING), (EMBEDDING, DocumentStatus.READY)],
+)
 async def test_release_makes_the_document_claimable_at_once_and_refunds_the_attempt(
     sessions: async_sessionmaker[AsyncSession],
+    phase: Phase,
+    owed: DocumentStatus,
 ) -> None:
-    (doc,) = await _documents(sessions, DocumentStatus.PENDING)
-    await _claim(sessions)
+    (doc,) = await _documents(sessions, owed)
+    await _claim(sessions, phase)
 
     async with sessions.begin() as s:
-        assert await release(s, EXTRACTION, doc)
+        assert await release(s, phase, doc)
 
     # The stop was ours, not the document's.
-    claimed = await _claim(sessions)
+    claimed = await _claim(sessions, phase)
     assert claimed is not None and (claimed.document_id, claimed.attempt) == (doc, 1)
 
 
@@ -337,18 +344,29 @@ async def test_fail_records_the_reason(
     )
 
 
-@pytest.mark.parametrize("moved_to", [DocumentStatus.INDEXED, DocumentStatus.FAILED])
+@pytest.mark.parametrize(
+    ("phase", "moved_to"),
+    [
+        (EXTRACTION, DocumentStatus.READY),
+        (EXTRACTION, DocumentStatus.INDEXED),
+        (EXTRACTION, DocumentStatus.FAILED),
+        (EMBEDDING, DocumentStatus.INDEXED),
+        (EMBEDDING, DocumentStatus.FAILED),
+    ],
+)
 async def test_outcome_writes_leave_a_document_that_moved_on_alone(
-    sessions: async_sessionmaker[AsyncSession], moved_to: DocumentStatus
+    sessions: async_sessionmaker[AsyncSession],
+    phase: Phase,
+    moved_to: DocumentStatus,
 ) -> None:
     """A worker that outlived its lease writes after a rival finished: no effect."""
     (doc,) = await _documents(sessions, moved_to)
     before = tuple(await _row(sessions, doc))
 
     async with sessions.begin() as s:
-        assert not await retry_later(s, EMBEDDING, doc, timedelta(minutes=10))
-        assert not await release(s, EMBEDDING, doc)
-        assert not await fail(s, EMBEDDING, doc, FailureReason.EMBEDDING_FAILED)
+        assert not await retry_later(s, phase, doc, timedelta(minutes=10))
+        assert not await release(s, phase, doc)
+        assert not await fail(s, phase, doc, FailureReason.INTERNAL_ERROR)
 
     assert tuple(await _row(sessions, doc)) == before
 
@@ -389,6 +407,85 @@ async def test_the_claim_reads_only_owed_rows_through_their_index(
     async with sessions.begin() as s:
         # On a near-empty table the planner would scan it whole; forbid that to see
         # whether the partial index fits the claim's WHERE at all.
+        await s.execute(sa.text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join((await s.execute(sa.text(f"EXPLAIN {sql}"))).scalars())
+
+    assert "ix_documents_owed_available_at" in plan
+
+
+# ---------------------------------------------------------------------------
+# Lag: how long due work has waited for a claim (/health reports it, ADR-028)
+# ---------------------------------------------------------------------------
+
+
+async def _lag(sessions: async_sessionmaker[AsyncSession], phase: Phase) -> float:
+    async with sessions() as s:
+        lag = await s.scalar(lag_statement(phase))
+    assert lag is not None
+    return lag
+
+
+@pytest.mark.parametrize(
+    ("phase", "owed"),
+    [
+        (EXTRACTION, {DocumentStatus.PENDING, DocumentStatus.PROCESSING}),
+        (EMBEDDING, {DocumentStatus.READY}),
+    ],
+)
+async def test_lag_counts_exactly_the_rows_a_claim_would_take(
+    sessions: async_sessionmaker[AsyncSession],
+    phase: Phase,
+    owed: set[DocumentStatus],
+) -> None:
+    """One status at a time, claimable for an hour."""
+    lagging = set()
+    for status in DocumentStatus:
+        async with sessions.begin() as s:
+            await s.execute(sa.text("TRUNCATE documents CASCADE"))
+        await _documents(sessions, status, waited=[timedelta(hours=1)])
+        if await _lag(sessions, phase) > 0:
+            lagging.add(status)
+
+    assert lagging == owed
+
+
+async def test_lag_is_how_long_the_longest_waiting_due_row_has_waited(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    await _documents(
+        sessions,
+        DocumentStatus.PENDING,
+        DocumentStatus.PENDING,
+        waited=[timedelta(minutes=1), timedelta(minutes=90)],
+    )
+
+    assert 90 * 60 <= await _lag(sessions, EXTRACTION) < 90 * 60 + NO_WAIT
+
+
+async def test_nothing_due_is_no_lag(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Empty, then only rows a claim holds or a backoff hides."""
+    assert await _lag(sessions, EXTRACTION) == 0
+    await _documents(
+        sessions,
+        DocumentStatus.PROCESSING,
+        DocumentStatus.PENDING,
+        waited=[-LEASE, -timedelta(minutes=2)],
+    )
+
+    assert await _lag(sessions, EXTRACTION) == 0
+
+
+@pytest.mark.parametrize("phase", [EXTRACTION, EMBEDDING])
+async def test_lag_reads_only_owed_rows_through_their_index(
+    sessions: async_sessionmaker[AsyncSession], phase: Phase
+) -> None:
+    """/health runs it on every call: it must not scan the whole table."""
+    sql = lag_statement(phase).compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+    )
+    async with sessions.begin() as s:
         await s.execute(sa.text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join((await s.execute(sa.text(f"EXPLAIN {sql}"))).scalars())
 

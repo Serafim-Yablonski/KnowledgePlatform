@@ -19,7 +19,7 @@ class DatabaseSettings(BaseSettings):
     )
     # Derived from DATABASE_URL if not set — replaces postgresql:// with postgresql+asyncpg://
     ASYNC_DATABASE_URL: str = ""
-    # Derived from DATABASE_URL if not set — psycopg3 sync driver for Celery workers
+    # Derived from DATABASE_URL if not set — psycopg3, for LangGraph's checkpointer
     SYNC_DATABASE_URL: str = ""
     POSTGRES_DB: str = "knowledge_platform"
     POSTGRES_USER: str = "user"
@@ -61,7 +61,6 @@ class RedisSettings(BaseSettings):
     model_config = _ENV_CONFIG
 
     REDIS_URL: str = "redis://localhost:6379/0"
-    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
 
 
 class AuthSettings(BaseSettings):
@@ -119,48 +118,6 @@ class CacheSettings(BaseSettings):
     API_KEY_LAST_USED_RESOLUTION: int = 300
 
 
-class CelerySettings(BaseSettings):
-    model_config = _ENV_CONFIG
-
-    # Restart workers after N tasks — prevents memory creep from asyncio.run() loops.
-    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = 200
-
-    # On SIGTERM (remapped to SIGQUIT in compose) a worker lets running tasks finish
-    # for this long, then cancels them and puts their messages back in the queue.
-    # Must end inside compose's stop_grace_period (tests/unit/test_compose.py).
-    CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT: float = 20
-
-    # extract_text: CPU-bound PDF parsing. A text-heavy PDF at the 25 MB upload cap
-    # parsed in 28–38 s in the built image (pipeline step 8c-0).
-    # The parse runs in a child process, killed at its own timeout; it comes before
-    # the soft limit (which pypdf can swallow) and leaves the rest of the task time.
-    CELERY_EXTRACT_PARSE_TIMEOUT: int = 90
-    CELERY_EXTRACT_SOFT_TIME_LIMIT: int = 120  # SoftTimeLimitExceeded at this point
-    CELERY_EXTRACT_TIME_LIMIT: int = 180  # SIGKILL if soft limit is ignored
-
-    # embed_chunks: I/O-bound embedding API; ~500 chunks × ~100 ms/call ≈ 50 s typical.
-    CELERY_EMBED_SOFT_TIME_LIMIT: int = 300
-    CELERY_EMBED_TIME_LIMIT: int = 360
-
-    # Worker concurrency per queue type. Default 2 is intentionally low for local dev
-    # (git clone on a laptop). Set higher in production: extract→4, embed→10.
-    CELERY_EXTRACT_CONCURRENCY: int = 2
-    CELERY_EMBED_CONCURRENCY: int = 2
-
-    @model_validator(mode="after")
-    def _order_extract_limits(self) -> Self:
-        if not (
-            self.CELERY_EXTRACT_PARSE_TIMEOUT
-            < self.CELERY_EXTRACT_SOFT_TIME_LIMIT
-            < self.CELERY_EXTRACT_TIME_LIMIT
-        ):
-            raise ValueError(
-                "CELERY_EXTRACT_PARSE_TIMEOUT < CELERY_EXTRACT_SOFT_TIME_LIMIT < "
-                "CELERY_EXTRACT_TIME_LIMIT must hold"
-            )
-        return self
-
-
 class PipelineSettings(BaseSettings):
     """The document pipeline's workers, which claim work from the documents table
     (ADR-027). Times in seconds."""
@@ -181,7 +138,8 @@ class PipelineSettings(BaseSettings):
 
     # Extraction: a text-heavy PDF at the 25 MB upload cap parsed in 28–38 s
     # (pipeline step 8c-0). The parse child is killed at its own timeout, inside the
-    # attempt's; the lease outlasts the attempt and its outcome write.
+    # attempt's; the lease outlasts the attempt (validated), and the defaults leave
+    # 60 s for its outcome write.
     PIPELINE_EXTRACT_PARSE_TIMEOUT: float = 90
     PIPELINE_EXTRACT_TIMEOUT: float = 120
     PIPELINE_EXTRACT_LEASE: float = 180
@@ -258,7 +216,6 @@ class Settings(
     ObservabilitySettings,
     AppSettings,
     CacheSettings,
-    CelerySettings,
     PipelineSettings,
     RateLimitSettings,
 ):

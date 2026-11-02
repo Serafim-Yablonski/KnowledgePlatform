@@ -27,6 +27,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 
 RUN addgroup --system app && adduser --system --ingroup app app
+# UPLOAD_DIR's default. A new named volume mounted here starts as a copy of this
+# directory, ownership included; without it the volume is root's and uploads fail.
+RUN mkdir -p /data/uploads && chown app:app /data/uploads
 USER app
 
 EXPOSE 8000

@@ -1,5 +1,5 @@
 # 007. Celery Workers Use a Separate Synchronous Database Engine
-Status: Accepted, amends ADR-002 (a third psycopg3 use: the workers' sync engine) | Date: 2026-05-14
+Status: Superseded by ADR-027 (2026-11-02: the workers run async on asyncpg; the sync engine is gone) | Was: Accepted, amends ADR-002 (a third psycopg3 use: the workers' sync engine) | Date: 2026-05-14
 
 ## Context
 The FastAPI application uses `asyncpg` via SQLAlchemy's `create_async_engine`. Celery workers are launched as separate OS processes and execute task functions synchronously. We need database access inside Celery tasks.

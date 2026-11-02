@@ -8,16 +8,16 @@ garbage; a committed row without its file is corruption).
 import io
 import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+import sqlalchemy as sa
 import structlog
-from kombu.exceptions import OperationalError as BrokerError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.documents import DocumentUpload
+from src.domain.documents import DocumentStatus, DocumentUpload
 from src.domain.roles import WorkspaceRole
+from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
 from src.repositories.chunk import SQLAlchemyChunkRepository
@@ -25,7 +25,6 @@ from src.repositories.document import SQLAlchemyDocumentRepository
 from src.repositories.file_store import LocalFileStore
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.services.document import DocumentService
-from src.workers.tasks.extract_text import extract_text
 
 
 @pytest.fixture
@@ -81,7 +80,6 @@ async def test_failed_commit_keeps_the_file_and_logs_it(
     with (
         structlog.testing.capture_logs() as logs,
         pytest.raises(OperationalError),
-        patch.object(extract_text, "delay"),
     ):
         await _service(db_session, upload_dir).create(
             test_user, test_workspace.id, WorkspaceRole.MEMBER, None, _upload()
@@ -91,21 +89,25 @@ async def test_failed_commit_keeps_the_file_and_logs_it(
     assert any(e["event"].startswith("upload commit failed") for e in logs)
 
 
-async def test_broker_failure_after_commit_keeps_the_file(
+async def test_an_upload_only_commits_its_row_which_is_claimable_at_once(
     db_session: AsyncSession,
     test_workspace: Workspace,
     test_user: User,
     upload_dir: Path,
 ) -> None:
-    service = _service(db_session, upload_dir)
-    with (
-        pytest.raises(BrokerError),
-        patch.object(extract_text, "delay", side_effect=BrokerError("broker down")),
-    ):
-        await service.create(
-            test_user, test_workspace.id, WorkspaceRole.MEMBER, None, _upload()
-        )
+    """The row is the work owed (ADR-027): nothing is published after the commit,
+    so no broker can fail the upload, and a worker may claim the row at once."""
+    doc = await _service(db_session, upload_dir).create(
+        test_user, test_workspace.id, WorkspaceRole.MEMBER, None, _upload()
+    )
 
-    [file] = _files(upload_dir)
-    doc_id = uuid.UUID(file.stem)
-    assert await service.get(test_workspace.id, doc_id) is not None
+    row = (
+        await db_session.execute(
+            sa.select(
+                Document.status,
+                Document.attempts,
+                Document.available_at <= sa.func.now(),
+            ).where(Document.id == doc.id)
+        )
+    ).one()
+    assert tuple(row) == (DocumentStatus.PENDING, 0, True)

@@ -50,9 +50,8 @@ def instrument_app(app: FastAPI) -> None:
 
 
 def instrument_libraries() -> None:
-    """Trace database queries, Celery tasks and outbound HTTP; both processes."""
+    """Trace database queries and outbound HTTP; the API and every worker."""
     logfire.instrument_asyncpg()
-    logfire.instrument_celery()
     logfire.instrument_httpx()
 
 

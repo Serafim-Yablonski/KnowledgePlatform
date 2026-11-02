@@ -8,7 +8,6 @@ import io
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from pathlib import Path
-from unittest.mock import patch
 
 import anyio
 import pytest
@@ -28,7 +27,6 @@ from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.services.document import DocumentService
 from src.services.workspace import WorkspaceService
-from src.workers.tasks.extract_text import extract_text
 
 
 def _upload() -> DocumentUpload:
@@ -166,7 +164,7 @@ async def test_upload_first_the_delete_waits_then_removes_its_file(
             await _workspaces(deleting, tmp_path).delete(user, ws, WorkspaceRole.OWNER)
             deleted.set()
 
-        with anyio.fail_after(10), patch.object(extract_text, "delay"):
+        with anyio.fail_after(10):
             async with anyio.create_task_group() as tg:
                 tg.start_soon(upload)
                 await reached.wait()  # row flushed, file written, not committed
@@ -206,7 +204,7 @@ async def test_delete_first_the_upload_fails_before_writing(
     ):
         # The delete holds its row lock, uncommitted, while the upload starts.
         await deleting.execute(sa.delete(Workspace).where(Workspace.id == ws.id))
-        with anyio.fail_after(10), patch.object(extract_text, "delay"):
+        with anyio.fail_after(10):
             async with anyio.create_task_group() as tg:
                 tg.start_soon(upload, uploading)
                 await anyio.sleep(0.5)

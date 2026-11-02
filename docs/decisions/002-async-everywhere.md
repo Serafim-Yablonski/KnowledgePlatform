@@ -1,6 +1,6 @@
 # 002. Async Driver Strategy: asyncpg + psycopg3, Never psycopg2
 
-Status: Accepted, amended by ADR-007 (psycopg3 also backs the Celery workers' sync engine) | Date: 2026-05-04
+Status: Accepted, amended by ADR-007 (psycopg3 also backed the Celery workers' sync engine, until ADR-027 moved the workers to asyncpg) | Date: 2026-05-04
 
 ## Context
 

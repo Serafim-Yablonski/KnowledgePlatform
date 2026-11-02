@@ -33,7 +33,7 @@ print("child returncode", done.returncode, done.stdout.decode().strip())
 
 def _limits(limit_mib: int) -> dict[str, Any]:
     """The compose cap's mem / swap pairing, at `limit_mib`."""
-    spec = service("celery-worker-extract")
+    spec = service("worker-extract")
     limits: dict[str, Any] = {"mem_limit": f"{limit_mib}m"}
     if "memswap_limit" in spec:
         mem = megabytes(default(spec["mem_limit"]))

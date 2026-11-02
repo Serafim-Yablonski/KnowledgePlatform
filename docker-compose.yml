@@ -17,15 +17,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
 
-  # One instance for the Celery broker and the cache / rate limiter (ADR-026). The
-  # broker's messages must survive a kill and a `down` + `up`: AOF, a named volume,
-  # and no eviction (cache keys carry their own TTLs, queued tasks carry none).
+  # The cache, rate limiter and research token stream. The work owed lives in
+  # Postgres, not here (ADR-027), so nothing is persisted.
   redis:
     image: redis:8-alpine
     restart: unless-stopped
-    command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
-    volumes:
-      - redis_data:/data
+    command: redis-server --save "" --appendonly no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -52,67 +49,64 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
       REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000
 
-  # CPU-bound extraction (PDF parsing). Scale independently from embed workers.
-  # Set CELERY_EXTRACT_CONCURRENCY in .env for production (default: 2 for local dev).
-  celery-worker-extract:
+  # The pipeline's workers claim owed documents from Postgres (ADR-027); one
+  # service per phase, so a stuck or memory-hungry extraction can't starve embedding.
+  # SIGTERM: running attempts get PIPELINE_SHUTDOWN_GRACE (20 s), then are cancelled
+  # and their rows released, before this period's SIGKILL.
+  worker-extract:
     build: .
     restart: unless-stopped
-    # SIGTERM → soft shutdown: running tasks get CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT
-    # (20 s) to finish, then go back to the queue — before this period's SIGKILL.
+    command: python -m src.workers extract
     stop_grace_period: 30s
     # The PDF parse is the one memory use driven by untrusted input. Past this cap the
     # kernel kills the biggest process, normally a parse child: retried, and killed on
     # every attempt → extraction_too_large. Equal swap limit: killed, never swapped.
-    # Measured (step 8c-0, 25 MB uploads): ~330 MiB idle + ~545 MiB per concurrent
-    # extraction at worst. Raise it with CELERY_EXTRACT_CONCURRENCY.
-    mem_limit: ${CELERY_EXTRACT_MEM_LIMIT:-1536m}
-    memswap_limit: ${CELERY_EXTRACT_MEM_LIMIT:-1536m}
-    command: >
-      celery -A src.workers.celery_app worker
-      --loglevel=info --queues extract
-      --concurrency ${CELERY_EXTRACT_CONCURRENCY:-2}
+    # Measured (25 MB uploads): 183 MiB idle + 543 MiB per concurrent extraction at
+    # worst, for PIPELINE_EXTRACT_CONCURRENCY slots (tests/unit/test_compose.py
+    # checks the default and what .env sets). Raise it with the concurrency.
+    mem_limit: ${PIPELINE_EXTRACT_MEM_LIMIT:-1536m}
+    memswap_limit: ${PIPELINE_EXTRACT_MEM_LIMIT:-1536m}
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     volumes:
       - uploads_data:/data/uploads
-    env_file: .env
+    # An allow-list, no env_file: it parses untrusted files and gets no provider key,
+    # nor any key added to .env later (S8-19). A bare name passes the value from .env
+    # or the shell, and stays unset (the setting's default) when neither has it.
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      REMAP_SIGTERM: SIGQUIT  # read by billiard at import
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
+      # Read by Settings' validators in every process, not by the worker itself.
+      - SECRET_KEY
+      - POSTGRES_PASSWORD
+      - ENVIRONMENT
+      - LOG_LEVEL
+      - SERVICE_NAME
+      - LOGFIRE_TOKEN
+      - PIPELINE_MAX_ATTEMPTS
+      - PIPELINE_POLL_INTERVAL
+      - PIPELINE_SHUTDOWN_GRACE
+      - PIPELINE_EXTRACT_CONCURRENCY
+      - PIPELINE_EXTRACT_PARSE_TIMEOUT
+      - PIPELINE_EXTRACT_TIMEOUT
+      - PIPELINE_EXTRACT_LEASE
 
-  # I/O-bound embedding (HTTP calls to embedding API). Higher concurrency than extract.
-  # Set CELERY_EMBED_CONCURRENCY in .env for production (default: 2 for local dev).
-  celery-worker-embed:
+  # I/O-bound embedding (the embedding provider's API): the only worker with its key.
+  worker-embed:
     build: .
     restart: unless-stopped
-    # SIGTERM → soft shutdown: running tasks get CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT
-    # (20 s) to finish, then go back to the queue — before this period's SIGKILL.
+    command: python -m src.workers embed
     stop_grace_period: 30s
-    command: >
-      celery -A src.workers.celery_app worker
-      --loglevel=info --queues embed
-      --concurrency ${CELERY_EMBED_CONCURRENCY:-2}
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     volumes:
       - uploads_data:/data/uploads
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      REMAP_SIGTERM: SIGQUIT  # read by billiard at import
 
   # MCP server is mounted at /mcp inside the main `app` container (port 8000).
   # No separate service needed — it shares the same DB engine and Redis pool.
@@ -120,5 +114,4 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   uploads_data:

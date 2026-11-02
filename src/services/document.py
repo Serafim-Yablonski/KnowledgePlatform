@@ -245,10 +245,8 @@ class DocumentService:
                 path=key,
             )
             raise
-        # Dispatch AFTER commit so the worker can find the document record.
-        from src.workers.tasks.extract_text import extract_text
-
-        extract_text.delay(str(doc.id))
+        # Nothing to publish: the committed PENDING row is the work owed, and a
+        # worker claims it from the table (ADR-027).
         await self._session.refresh(doc)
 
         return doc

@@ -13,12 +13,11 @@ dependencies = [
     "pydantic-ai-slim[anthropic,google,logfire]==1.89.1",
     "langgraph==1.1.10",
     "psycopg[binary]==3.3.4",
-    "celery[redis]==5.6.3",
     "redis==6.4.0",
     "pypdf==6.21.2",
     "structlog==25.5.0",
     "opentelemetry-api==1.45.1",
-    "logfire[asyncpg,celery,fastapi,httpx]==5.2.0",
+    "logfire[asyncpg,fastapi,httpx]==5.2.0",
     "httpx==0.28.1",
     # The MCP SDK client's HTTP library; tests build its clients directly.
     "httpx2==2.14.0",
@@ -78,9 +77,7 @@ strict = true
 
 [[tool.mypy.overrides]]
 module = [
-    "celery.*",
-    "kombu.*",
-    "billiard.*",
+    "asyncpg.*",
     "pgvector.*",
 ]
 ignore_missing_imports = true
@@ -125,6 +122,19 @@ ignore_imports = [
 ]
 # Adapters reach repositories only through src.composition, which is the point.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+# CLAUDE.md: each worker process opens its own engine and clients (ADR-027), and
+# loads none of the API's, even through another module.
+name = "Workers never use the API process's pools"
+type = "forbidden"
+source_modules = ["src.workers"]
+forbidden_modules = [
+    "src.composition",
+    "src.core.database",
+    "src.core.http",
+    "src.core.redis",
+]
 
 [[tool.importlinter.contracts]]
 name = "Business logic is framework-free"

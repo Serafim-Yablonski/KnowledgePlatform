@@ -2,10 +2,11 @@
 stdout, and the exit code saying whose fault a failure is.
 
 extract_text runs this file by path, as ``python -I pdf_text.py``. pypdf parses
-untrusted input: it can catch the soft time limit and return partial text (S6-10),
-loop, or crash. In a child, a timeout is a kill nothing can swallow, and a crash takes
-only the child. Imports only pypdf and the standard library: under -I neither
-PYTHONPATH, the working directory nor this file's directory is on sys.path.
+untrusted input: it can swallow an exception meant to stop it and return partial
+text (under Celery, the soft time limit: S6-10), loop, or crash. In a child, a
+timeout is a kill nothing can swallow, and a crash takes only the child. Imports
+only pypdf and the standard library: under -I neither PYTHONPATH, the working
+directory nor this file's directory is on sys.path.
 """
 
 from __future__ import annotations

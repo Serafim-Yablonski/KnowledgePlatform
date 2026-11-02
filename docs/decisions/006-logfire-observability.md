@@ -1,5 +1,5 @@
 # 006. Pydantic Logfire over Self-Hosted Jaeger
-Status: Accepted, amended by ADR-020 (whose trace context we trust; no Logfire setup at import) | Date: 2026-05-04
+Status: Accepted, amended by ADR-020 (whose trace context we trust; no Logfire setup at import) and ADR-027 (no Celery: `instrument_celery` is gone; the API and the workers instrument asyncpg and httpx) | Date: 2026-05-04
 
 ## Context
 The platform needs distributed tracing to correlate a single `/ask` request across FastAPI middleware, the PydanticAI agent, RAG retrieval, embedding, and asyncpg query execution. The choices were a self-hosted OTel collector + Jaeger/Tempo backend or a managed SaaS with native PydanticAI integration.

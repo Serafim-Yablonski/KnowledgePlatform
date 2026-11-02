@@ -5,6 +5,7 @@ FAILED) is the runner's, tested with it."""
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import uuid
 from collections.abc import Awaitable, Callable
@@ -12,7 +13,14 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from pypdf import PdfWriter
+from sqlalchemy import NullPool
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from src.ai.chunking.factory import get_chunker
 from src.core.config import settings
@@ -24,6 +32,7 @@ from src.models.workspace import Workspace
 from src.workers import jobs
 from src.workers.jobs import embed_chunks, extract_text, replace_chunks
 from src.workers.pipeline import EmbeddingError, ParseKilled, PermanentFailure
+from src.workers.queue import EMBEDDING, fail
 from tests.pdfs import AWKWARD_TO_UNICODE, pdf_showing, pdf_with_text
 
 PARSE_TIMEOUT = 30.0
@@ -237,12 +246,17 @@ async def test_a_cancelled_extraction_takes_its_child_with_it(
         ("import os, signal; os.kill(os.getpid(), signal.SIGKILL)", ParseKilled, None),
         # A crash the same bytes repeat: the file's.
         ("import os; os.abort()", PermanentFailure, FailureReason.UNREADABLE_FILE),
+        (
+            "import os, signal; os.kill(os.getpid(), signal.SIGSEGV)",
+            PermanentFailure,
+            FailureReason.UNREADABLE_FILE,
+        ),
         # pypdf raised.
         ("import sys; sys.exit(3)", PermanentFailure, FailureReason.UNREADABLE_FILE),
         # Ours (a failed import, say): transient.
         ("import sys; sys.exit(1)", RuntimeError, None),
     ],
-    ids=["oom-kill", "crash", "parse-failed", "our-bug"],
+    ids=["oom-kill", "abort", "segfault", "parse-failed", "our-bug"],
 )
 async def test_how_the_child_ends_says_whose_fault_it_is(
     sessions: Sessions,
@@ -456,6 +470,70 @@ async def test_simultaneous_swaps_take_turns(sessions: Sessions) -> None:
     assert await _chunk_texts(sessions, doc) == ["second 0", "second 1", "second 2"]
 
 
+async def test_a_failure_write_waiting_on_a_swap_rechecks_and_changes_nothing(
+    sessions: Sessions,
+) -> None:
+    """The guard holds under real concurrency, not only in sequence: the failure
+    write waits on the swap's row lock, then re-checks the committed row's status."""
+    doc = await _document(sessions, status=DocumentStatus.READY, raw_text=TEXT)
+
+    async def _losers_failure_write() -> bool:
+        async with sessions.begin() as s:
+            return await fail(s, EMBEDDING, doc, FailureReason.EMBEDDING_FAILED)
+
+    async with sessions.begin() as winner:
+        assert await replace_chunks(winner, doc, _chunks(doc, "winner"))
+        loser = asyncio.create_task(_losers_failure_write())
+        await _wait_for_a_lock_wait(sessions)
+    assert await asyncio.wait_for(loser, 10) is False
+
+    assert (await _row(sessions, doc))[:2] == (DocumentStatus.INDEXED, None)
+    assert await _chunk_texts(sessions, doc) == ["winner 0", "winner 1", "winner 2"]
+
+
+async def test_a_second_chunk_at_one_position_is_rejected(sessions: Sessions) -> None:
+    """The database itself refuses a second chunk set (schema from the migrations)."""
+    doc = await _document(sessions, status=DocumentStatus.READY, raw_text=TEXT)
+    async with sessions.begin() as s:
+        s.add_all(_chunks(doc, "one"))
+
+    with pytest.raises(sa.exc.IntegrityError, match="uq_chunks_document_chunk_index"):
+        async with sessions.begin() as s:
+            s.add(_chunks(doc, "two")[0])
+
+
+async def test_a_swap_that_hits_a_database_error_is_transient(
+    sessions: Sessions, test_engine: AsyncEngine
+) -> None:
+    """The swap touches the database: its failure is retried, never permanent, and
+    never mistaken for a deleted document. A real error from PostgreSQL: the swap's
+    row lock times out while another session holds it."""
+    doc = await _document(sessions, status=DocumentStatus.READY, raw_text=TEXT)
+    impatient = create_async_engine(
+        test_engine.url,
+        poolclass=NullPool,
+        connect_args={"server_settings": {"lock_timeout": "200ms"}},
+    )
+    try:
+        async with test_engine.connect() as holder:
+            await holder.begin()
+            await holder.execute(
+                sa.select(Document.id).where(Document.id == doc).with_for_update()
+            )
+            with pytest.raises(sa.exc.DBAPIError, match="lock timeout"):
+                await embed_chunks(
+                    async_sessionmaker(impatient, expire_on_commit=False),
+                    FakeEmbedder(),
+                    doc,
+                )
+            await holder.rollback()
+    finally:
+        await impatient.dispose()
+
+    assert (await _row(sessions, doc)).status == DocumentStatus.READY
+    assert await _chunk_texts(sessions, doc) == []
+
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -501,6 +579,45 @@ async def test_text_that_chunks_to_nothing_fails_permanently_as_no_text(
     doc = await _document(sessions, status=DocumentStatus.READY, raw_text=" \n\n \t ")
     embedder = FakeEmbedder()
 
+    with pytest.raises(PermanentFailure) as exc_info:
+        await embed_chunks(sessions, embedder, doc)
+
+    assert exc_info.value.reason == FailureReason.NO_TEXT
+    assert embedder.calls == 0
+
+
+def _scanned_pdf(pages: int) -> bytes:
+    # What a scanner produces: pages without a text layer.
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=612, height=792)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type"),
+    [
+        # Extracts to "\n\n\n", not "": an empty-string check would miss it (S6-1).
+        (_scanned_pdf(4), ContentType.PDF),
+        (" \n\t\u00a0\u2003\n".encode(), ContentType.PLAINTEXT),
+        (b"\n\n   \n", ContentType.MARKDOWN),
+    ],
+    ids=["scanned-pdf", "whitespace-text", "whitespace-markdown"],
+)
+async def test_a_document_without_text_ends_as_no_text_end_to_end(
+    sessions: Sessions, tmp_path: Path, content: bytes, content_type: ContentType
+) -> None:
+    """D2/D3 through both jobs: extraction succeeds (READY), there is nothing to
+    index, and embedding fails it as no_text without calling the provider."""
+    path = tmp_path / "blank"
+    path.write_bytes(content)
+    doc = await _document(sessions, file_path=str(path), content_type=content_type)
+    embedder = FakeEmbedder()
+
+    await _extract(sessions, doc)
+    assert (await _row(sessions, doc)).status == DocumentStatus.READY
     with pytest.raises(PermanentFailure) as exc_info:
         await embed_chunks(sessions, embedder, doc)
 

@@ -39,11 +39,9 @@ async def _embed(
 PHASES = {"extract": _extract, "embed": _embed}
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="python -m src.workers")
-    parser.add_argument("phase", choices=sorted(PHASES))
-    phase = parser.parse_args(argv).phase
-
+def configure_process(phase: str) -> None:
+    """This worker process's logging and tracing; the entry point's alone, never an
+    import's (the API imports the queue module)."""
     setup_logging(environment=settings.ENVIRONMENT, log_level=settings.LOG_LEVEL)
     # Nothing reaches a worker with a trace context of its own: the attempt
     # continues the one our API stored in the row (ADR-027).
@@ -54,6 +52,14 @@ def main(argv: list[str] | None = None) -> None:
         trust_incoming_trace_context=False,
     )
     instrument_libraries()
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="python -m src.workers")
+    parser.add_argument("phase", choices=sorted(PHASES))
+    phase = parser.parse_args(argv).phase
+
+    configure_process(phase)
     asyncio.run(serve(PHASES[phase], settings.ASYNC_DATABASE_URL))
 
 

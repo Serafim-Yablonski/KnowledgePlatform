@@ -66,15 +66,30 @@ class Claim:
     trace_context: dict[str, str] | None = None
 
 
+def due(phase: Phase) -> sa.ColumnElement[bool]:
+    """A row this phase is owed and may claim now: not leased, not backing off."""
+    return sa.and_(
+        Document.status.in_(phase.start.allowed_from),
+        Document.available_at <= sa.func.now(),
+    )
+
+
+def lag_statement(phase: Phase) -> sa.Select[tuple[float]]:
+    """Seconds the longest-waiting due row has waited for a claim; 0 when none is
+    due. Rows a claim holds or a backoff hides don't count: nobody owes them a
+    claim yet."""
+    waited = sa.func.extract(
+        "epoch", sa.func.now() - sa.func.min(Document.available_at)
+    )
+    return sa.select(sa.cast(sa.func.coalesce(waited, 0), sa.Float)).where(due(phase))
+
+
 def claim_statement(phase: Phase, *, lease: timedelta, max_attempts: int) -> sa.Update:
     """Lease the longest-waiting row this phase is owed, skipping rows other claims
     hold; one whose budget is used up is failed as interrupted instead."""
     candidate = (
         sa.select(Document.id)
-        .where(
-            Document.status.in_(phase.start.allowed_from),
-            Document.available_at <= sa.func.now(),
-        )
+        .where(due(phase))
         .order_by(Document.available_at)
         .limit(1)
         .with_for_update(skip_locked=True)

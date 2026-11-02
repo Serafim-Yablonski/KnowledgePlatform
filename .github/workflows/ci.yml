@@ -253,18 +253,31 @@ jobs:
       - name: Build Docker image
         run: docker build -t knowledge-platform:ci .
 
-      # Startup connects to Postgres (checkpointer) and Redis, so a broken image or
-      # config exits before /health answers. No Celery worker runs here, so /health
-      # is 503 with workers "unavailable"; the database, cache and broker must be "ok".
-      - name: Verify image starts and reaches Postgres and Redis
+      # Compose mounts a named volume at UPLOAD_DIR; a fresh one must be writable by
+      # the image's non-root user, or every upload on a new install is a 500.
+      - name: Verify a fresh uploads volume is writable
         run: |
-          docker run -d --name kp-ci-test --network host \
-            -e DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/knowledge_platform \
-            -e REDIS_URL=redis://localhost:6379/0 \
-            -e CELERY_BROKER_URL=redis://localhost:6379/0 \
-            -e SECRET_KEY=ci-test-secret-key \
-            -e GOOGLE_API_KEY=dummy \
-            -e ANTHROPIC_API_KEY=dummy \
+          docker run --rm -v kp-ci-uploads:/data/uploads knowledge-platform:ci \
+            python -c "open('/data/uploads/probe', 'w').write('x')"
+          docker volume rm kp-ci-uploads
+
+      # Startup connects to Postgres (the checkpointer), so a broken image or database
+      # config exits before /health answers; Redis is checked by /health itself (its
+      # pool connects lazily). Migrated first, with the image's own
+      # alembic, so the pipeline's lag query has its columns. No worker runs here:
+      # /health is still 200 (lag never fails it, ADR-028) and nothing is owed.
+      - name: Verify image migrates, starts and reaches Postgres and Redis
+        run: |
+          env_args=(
+            -e DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/knowledge_platform
+            -e REDIS_URL=redis://localhost:6379/0
+            -e SECRET_KEY=ci-test-secret-key
+            -e GOOGLE_API_KEY=dummy
+            -e ANTHROPIC_API_KEY=dummy
+          )
+          docker run --rm --network host "${env_args[@]}" knowledge-platform:ci \
+            alembic upgrade head
+          docker run -d --name kp-ci-test --network host "${env_args[@]}" \
             knowledge-platform:ci
           body=""
           for _ in $(seq 1 30); do
@@ -273,4 +286,6 @@ jobs:
           done
           docker logs kp-ci-test 2>&1 | tail -20
           echo "health: $body"
-          echo "$body" | jq -e '.checks.database == "ok" and .checks.cache == "ok" and .checks.broker == "ok"'
+          echo "$body" | jq -e '.status == "healthy"
+            and .checks == {"database": "ok", "cache": "ok"}
+            and .pipeline == {"extract_lag_s": 0, "embed_lag_s": 0}'

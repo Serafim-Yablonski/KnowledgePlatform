@@ -13,6 +13,10 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
+from src.workers.__main__ import PHASES
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # An empty token beats .env's (pydantic-settings reads the environment first), so
@@ -59,12 +63,10 @@ def probe_rest(app, label, flags="00"):
 
 def probe_libraries(label):
     from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
-    from opentelemetry.instrumentation.celery import CeleryInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
     instrumentors = {
         "asyncpg": AsyncPGInstrumentor(),
-        "celery": CeleryInstrumentor(),
         "httpx": HTTPXClientInstrumentor(),
     }
     traced = [n for n, i in instrumentors.items() if i.is_instrumented_by_opentelemetry]
@@ -137,13 +139,12 @@ def test_api_ignores_client_trace_context() -> None:
 
 
 def test_api_and_worker_trace_the_same_libraries() -> None:
-    # Database queries, task enqueueing/execution and outbound HTTP, in both
-    # processes; nothing before setup (importing configures nothing).
+    # Database queries and outbound HTTP, in both processes; nothing before setup
+    # (importing configures nothing).
     lines = _run(
         """
-        from celery.signals import worker_process_init
         import src.main
-        import src.workers.celery_app
+        import src.workers.__main__
         from src.core.observability import setup_observability
 
         probe_libraries("probe at import")
@@ -153,95 +154,92 @@ def test_api_and_worker_trace_the_same_libraries() -> None:
     )
     worker = _run(
         """
-        from celery.signals import worker_process_init
-        import src.workers.celery_app
+        from src.workers.__main__ import configure_process
 
-        worker_process_init.send(sender=None)
+        configure_process("extract")
         probe_libraries("probe worker")
         """
     )
 
     assert lines + worker == [
         "probe at import: -",
-        "probe api: asyncpg celery httpx",
-        "probe worker: asyncpg celery httpx",
+        "probe api: asyncpg httpx",
+        "probe worker: asyncpg httpx",
     ]
 
 
-def test_importing_the_celery_app_leaves_the_api_config_alone() -> None:
-    # The API imports it lazily (health check, document upload); an import-time
-    # logfire.configure() there used to reset the API's settings.
+def test_importing_the_worker_leaves_the_api_config_alone() -> None:
+    # Process-global setup belongs to the entry point, never to an import: the API
+    # imports the queue module (/health), tests import the runner.
     lines = _run(
         """
         from src.core.observability import setup_observability
 
         setup_observability(token=None, environment="test", service_name="kp")
-        import src.workers.celery_app
+        import src.workers.__main__
+        import src.workers.runner
 
         probe("probe after import")
+        import logfire
+        print(f"probe service={logfire.DEFAULT_LOGFIRE_INSTANCE.config.service_name}")
         """
     )
 
-    assert lines == ["probe after import: recording=True adopted=False"]
+    # The trust check alone can't see a reconfiguration: worker and API both distrust.
+    assert lines == [
+        "probe after import: recording=True adopted=False",
+        "probe service=kp",
+    ]
 
 
-def test_worker_process_trusts_trace_context_from_our_api() -> None:
-    # Task context arrives only via our broker, injected by our API, so a worker
-    # joins the API's trace. Configured per process, after the prefork pool forks:
-    # nothing records before the signal.
+def test_a_worker_adopts_no_incoming_trace_context() -> None:
+    # Nothing reaches a worker with a trace context of its own: an attempt continues
+    # the one our API stored in the row (ADR-027), never one from outside.
     lines = _run(
         """
-        from celery.signals import worker_process_init
-        import src.workers.celery_app
+        from src.workers.__main__ import configure_process
 
-        probe("probe before", flags="01")
-        worker_process_init.send(sender=None)
+        configure_process("embed")
         probe("probe worker", flags="01")
         """
     )
 
-    assert lines == [
-        "probe before: recording=False adopted=True",
-        "probe worker: recording=True adopted=True",
-    ]
+    assert lines == ["probe worker: recording=True adopted=False"]
 
 
-def test_worker_logging_is_ours_not_celerys() -> None:
-    # Without a setup_logging receiver Celery clears the root logger's handlers,
-    # discarding our structlog bridge; with one, it leaves logging to us.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            textwrap.dedent(
-                """
-                import logging
-                from celery.signals import setup_logging
-                import src.workers.celery_app
+@pytest.mark.parametrize("phase", sorted(PHASES))
+def test_each_worker_reports_its_own_service_name(phase: str) -> None:
+    # One OTel service per deployable: the API and each phase's compose service.
+    lines = _run(
+        f"""
+        import logfire
+        from src.core.config import settings
+        from src.workers.__main__ import configure_process
 
-                assert logging.getLogger().handlers == [], "configured at import"
-                responses = setup_logging.send(
-                    sender=None,
-                    loglevel="INFO",
-                    logfile=None,
-                    format="",
-                    colorize=False,
-                )
-                [handler] = logging.getLogger().handlers
-                print(len(responses), type(handler.formatter).__name__)
-                """
-            ),
-        ],
-        cwd=ROOT,
-        env=_OFFLINE_ENV,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+        configure_process("{phase}")
+        name = logfire.DEFAULT_LOGFIRE_INSTANCE.config.service_name
+        print(f"probe {{name == settings.SERVICE_NAME + '-worker-{phase}'}}")
+        """
     )
 
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["1", "ProcessorFormatter"]
+    assert lines == ["probe True"]
+
+
+def test_worker_logs_go_through_our_structlog_bridge() -> None:
+    # Stdlib loggers (SQLAlchemy, asyncpg, httpx) reach structlog's formatter.
+    lines = _run(
+        """
+        import logging
+        from src.workers.__main__ import configure_process
+
+        assert logging.getLogger().handlers == [], "configured at import"
+        configure_process("extract")
+        [handler] = logging.getLogger().handlers
+        print(f"probe {type(handler.formatter).__name__}")
+        """
+    )
+
+    assert lines == ["probe ProcessorFormatter"]
 
 
 def test_traced_embedding_calls_carry_no_api_key() -> None:
