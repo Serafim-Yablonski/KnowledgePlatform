@@ -201,3 +201,46 @@ async def test_the_configured_client_sends_the_embedding_key_first(
         await service.embed_texts(["t"])
 
     assert seen == [sent]
+
+
+async def _posted_url(service_for: Any) -> str:
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"embeddings": [{"values": _fake_embedding()}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await service_for(client).embed_texts(["t"])
+    [url] = urls
+    return url
+
+
+@pytest.mark.parametrize(
+    "base_url", ["", "https://generativelanguage.googleapis.com/v1beta"]
+)
+async def test_requests_go_to_gemini_unless_configured(base_url: str) -> None:
+    from src.core.config import AISettings
+
+    cfg = AISettings(EMBEDDING_BASE_URL=base_url, EMBEDDING_MODEL=_MODEL)
+    url = await _posted_url(lambda client: EmbeddingService.from_settings(cfg, client))
+
+    assert url == (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-embedding-001:batchEmbedContents"
+    )
+
+
+@pytest.mark.parametrize(
+    "base_url", ["http://127.0.0.1:8089/v1beta", "http://127.0.0.1:8089/v1beta/"]
+)
+async def test_requests_go_to_the_configured_base_url(base_url: str) -> None:
+    """A fake provider in the acceptance suite, a proxy or a regional endpoint."""
+    from src.core.config import AISettings
+
+    cfg = AISettings(EMBEDDING_BASE_URL=base_url, EMBEDDING_MODEL=_MODEL)
+    url = await _posted_url(lambda client: EmbeddingService.from_settings(cfg, client))
+
+    assert url == (
+        "http://127.0.0.1:8089/v1beta/models/gemini-embedding-001:batchEmbedContents"
+    )

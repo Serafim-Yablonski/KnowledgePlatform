@@ -83,6 +83,9 @@ class AISettings(BaseSettings):
     EMBEDDING_MODEL: str = "gemini-embedding-001"
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_DIMENSIONS: int = 768
+    # The provider's API root, version included; empty: Gemini's. A test seam: the
+    # acceptance suite points the workers at a fake provider.
+    EMBEDDING_BASE_URL: str = ""
 
 
 class ObservabilitySettings(BaseSettings):
@@ -147,6 +150,11 @@ class PipelineSettings(BaseSettings):
     # Embedding: ~500 chunks × ~100 ms/call ≈ 50 s typical.
     PIPELINE_EMBED_TIMEOUT: float = 300
     PIPELINE_EMBED_LEASE: float = 360
+
+    # A transient failure's retry waits up to base · 2^(attempt-1), capped (full
+    # jitter, queue.backoff). Settings so the acceptance suite needn't wait them out.
+    PIPELINE_EXTRACT_BACKOFF_BASE: float = 30
+    PIPELINE_EMBED_BACKOFF_BASE: float = 60
 
     @model_validator(mode="after")
     def _order_extract_limits(self) -> Self:

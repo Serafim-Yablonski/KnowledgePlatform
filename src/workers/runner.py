@@ -81,7 +81,7 @@ def extract_work(sessions: async_sessionmaker[AsyncSession], cfg: Settings) -> W
         # The parse child's own timeout comes first; this is the backstop, and the
         # same file would run out of time again.
         timed_out=FailureReason.EXTRACTION_TIMEOUT,
-        backoff_base=timedelta(seconds=30),
+        backoff_base=timedelta(seconds=cfg.PIPELINE_EXTRACT_BACKOFF_BASE),
         max_attempts=cfg.PIPELINE_MAX_ATTEMPTS,
         poll_interval=cfg.PIPELINE_POLL_INTERVAL,
         shutdown_grace=cfg.PIPELINE_SHUTDOWN_GRACE,
@@ -99,7 +99,7 @@ def embed_work(
         lease=timedelta(seconds=cfg.PIPELINE_EMBED_LEASE),
         # Nearly all of it is the provider's time: a slow spell, worth another try.
         timed_out=None,
-        backoff_base=timedelta(seconds=60),
+        backoff_base=timedelta(seconds=cfg.PIPELINE_EMBED_BACKOFF_BASE),
         max_attempts=cfg.PIPELINE_MAX_ATTEMPTS,
         poll_interval=cfg.PIPELINE_POLL_INTERVAL,
         shutdown_grace=cfg.PIPELINE_SHUTDOWN_GRACE,

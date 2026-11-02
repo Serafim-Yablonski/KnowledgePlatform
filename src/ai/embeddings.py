@@ -19,7 +19,7 @@ from src.core.config import AISettings
 
 logger = structlog.get_logger(__name__)
 
-_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _BATCH_LIMIT = 100  # Gemini batchEmbedContents limit (NOT 2048 like OpenAI)
 
 
@@ -30,10 +30,11 @@ class EmbeddingService:
         model: str,
         dimensions: int,
         http_client: httpx.AsyncClient | None = None,
+        base_url: str = GEMINI_BASE_URL,
     ) -> None:
         self._model = model
         self._dimensions = dimensions
-        self._url = f"{_GEMINI_BASE}/{model}:batchEmbedContents"
+        self._url = f"{base_url.rstrip('/')}/models/{model}:batchEmbedContents"
         # In a header, not the URL's ?key=: traces and httpx's request log record
         # the full URL, never request headers.
         self._headers = {"x-goog-api-key": api_key}
@@ -51,6 +52,7 @@ class EmbeddingService:
             model=cfg.EMBEDDING_MODEL,
             dimensions=cfg.EMBEDDING_DIMENSIONS,
             http_client=http_client,
+            base_url=cfg.EMBEDDING_BASE_URL or GEMINI_BASE_URL,
         )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:

@@ -57,7 +57,10 @@ packages = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = ["-v", "--tb=short"]
+# The compose stack (tests/compose) builds the image and runs a whole stack: only
+# `make test-compose` (part of `make ci`) selects it.
+addopts = ["-v", "--tb=short", "-m", "not compose"]
+markers = ["compose: runs against a docker compose stack (make test-compose)"]
 # Logfire warns when a span adopts a caller's trace context; the API must never do
 # that (tests/unit/test_observability.py), so the warning fails the run.
 filterwarnings = ["error:Found propagated trace context:RuntimeWarning"]
@@ -87,8 +90,14 @@ target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20"]
+# ASYNC2: blocking calls in async functions. A worker's attempt timeouts are asyncio
+# timers, which a blocked event loop never fires (ADR-027).
+select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20", "ASYNC2"]
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests read small temp files in their assertions.
+"tests/**" = ["ASYNC240"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

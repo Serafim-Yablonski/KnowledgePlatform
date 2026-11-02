@@ -1,4 +1,4 @@
-.PHONY: run test test-unit test-int lint typecheck \
+.PHONY: run test test-unit test-int test-compose lint typecheck \
         migrate revision ci docker-build clean install mcp-config
 
 # ─── Development ──────────────────────────────────────────────────────────────
@@ -21,6 +21,10 @@ test-unit:
 test-int:
 	uv run pytest tests/integration -x; \
 	ret=$$?; if [ $$ret -eq 5 ]; then exit 0; fi; exit $$ret
+
+# The shipped stack: the image and its wiring (tests/compose). Needs Docker.
+test-compose:
+	uv run pytest tests/compose -m compose
 
 # ─── Code Quality ─────────────────────────────────────────────────────────────
 
@@ -47,6 +51,7 @@ ci:
 	$(MAKE) lint
 	$(MAKE) typecheck
 	$(MAKE) test
+	$(MAKE) test-compose
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 

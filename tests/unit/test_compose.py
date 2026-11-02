@@ -2,7 +2,7 @@
 
 import re
 
-from src.core.config import Settings
+from src.core.config import PipelineSettings, Settings
 from src.workers.__main__ import PHASES
 from tests.support.compose import (
     compose,
@@ -92,6 +92,17 @@ def test_the_extract_worker_gets_what_it_cannot_start_without() -> None:
         for entry in service(_workers()["extract"]).get("environment", [])
     }
     assert {"DATABASE_URL", "SECRET_KEY"} <= names
+
+
+def test_the_extract_worker_gets_every_pipeline_setting_it_reads() -> None:
+    """A name missing from the allow-list keeps its default in that worker alone,
+    silently: .env and the shell can't reach it."""
+    names = {
+        str(entry).split("=")[0]
+        for entry in service(_workers()["extract"]).get("environment", [])
+    }
+    reads = {name for name in PipelineSettings.model_fields if "EMBED" not in name}
+    assert reads and reads <= names, reads - names
 
 
 def test_the_extract_worker_reads_the_uploads_the_api_writes() -> None:

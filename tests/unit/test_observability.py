@@ -255,12 +255,15 @@ def test_traced_embedding_calls_carry_no_api_key() -> None:
         setup_observability(token=None, environment="test", service_name="kp")
         exporter = InMemorySpanExporter()
         trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
-        embeddings._GEMINI_BASE = "http://127.0.0.1:9/v1beta/models"
 
         async def call():
             async with httpx.AsyncClient() as client:
                 service = embeddings.EmbeddingService(
-                    "SECRET-KEY", "gemini-embedding-001", 8, http_client=client
+                    "SECRET-KEY",
+                    "gemini-embedding-001",
+                    8,
+                    http_client=client,
+                    base_url="http://127.0.0.1:9/v1beta",
                 )
                 try:
                     await service.embed_query("q")

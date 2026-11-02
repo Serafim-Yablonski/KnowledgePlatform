@@ -125,6 +125,37 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  # R-a as a black box (tests/acceptance, P7): real worker processes, failures
+  # injected from outside, time passing for real. Worker code runs in subprocesses,
+  # so the job measures no coverage and isn't part of the gate.
+  test-acceptance:
+    name: Acceptance tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Pull test database image
+        run: docker pull pgvector/pgvector:pg18
+
+      - name: Run acceptance tests
+        run: uv run pytest tests/acceptance -x
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+
   test-api:
     name: API tests
     runs-on: ubuntu-latest
@@ -289,3 +320,23 @@ jobs:
           echo "$body" | jq -e '.status == "healthy"
             and .checks == {"database": "ok", "cache": "ok"}
             and .pipeline == {"extract_lag_s": 0, "embed_lag_s": 0}'
+
+      # The shipped stack (tests/compose, P7d): the image indexes uploads end to end.
+      # Its own project, ports and env file: the service containers above don't
+      # take part.
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-caching: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run the compose stack tests
+        run: uv run pytest tests/compose -m compose
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy

@@ -481,12 +481,17 @@ async def test_nothing_due_is_no_lag(
 async def test_lag_reads_only_owed_rows_through_their_index(
     sessions: async_sessionmaker[AsyncSession], phase: Phase
 ) -> None:
-    """/health runs it on every call: it must not scan the whole table."""
+    """/health runs it on every call: it must not scan the whole table. Any index
+    that narrows to owed rows will do: PostgreSQL 18's skip scan lets the
+    (workspace_id, status) index serve it too, and statistics pick between them
+    (flaky when this pinned one index, P7). The claim's own test pins the partial
+    index, which its ORDER BY needs."""
     sql = lag_statement(phase).compile(
         dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
     )
     async with sessions.begin() as s:
+        # Disabled, a sequential scan still runs when no index fits: it shows then.
         await s.execute(sa.text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join((await s.execute(sa.text(f"EXPLAIN {sql}"))).scalars())
 
-    assert "ix_documents_owed_available_at" in plan
+    assert "Seq Scan" not in plan, plan

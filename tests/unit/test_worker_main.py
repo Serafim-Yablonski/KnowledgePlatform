@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -42,3 +43,16 @@ async def test_the_embed_worker_shares_one_client_across_attempts() -> None:
     assert work.phase is EMBEDDING
     # Closed with the process's stack, after the worker has wound down.
     assert client.is_closed
+
+
+async def test_each_phase_backs_off_from_its_own_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.settings, "PIPELINE_EXTRACT_BACKOFF_BASE", 0.25)
+    monkeypatch.setattr(cli.settings, "PIPELINE_EMBED_BACKOFF_BASE", 0.75)
+    async with AsyncExitStack() as stack:
+        extract = await cli.PHASES["extract"](None, stack)  # type: ignore[arg-type]
+        embed = await cli.PHASES["embed"](None, stack)  # type: ignore[arg-type]
+
+    assert extract.backoff_base == timedelta(seconds=0.25)
+    assert embed.backoff_base == timedelta(seconds=0.75)

@@ -92,6 +92,7 @@ services:
       - PIPELINE_EXTRACT_PARSE_TIMEOUT
       - PIPELINE_EXTRACT_TIMEOUT
       - PIPELINE_EXTRACT_LEASE
+      - PIPELINE_EXTRACT_BACKOFF_BASE
 
   # I/O-bound embedding (the embedding provider's API): the only worker with its key.
   worker-embed:
