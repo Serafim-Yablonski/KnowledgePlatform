@@ -5,7 +5,6 @@ from celery import Celery, signals
 from src.core.config import settings
 from src.core.logging import setup_logging
 from src.core.observability import configure_logfire, instrument_libraries
-from src.core.redis import close_sync_redis
 
 # Structural constants — queue names do not vary by environment.
 QUEUE_EXTRACT = "extract"
@@ -14,7 +13,7 @@ QUEUE_EMBED = "embed"
 celery_app = Celery(
     "knowledge_platform",
     broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    # No result backend: no caller reads a task's result.
     include=["src.workers.tasks"],
 )
 
@@ -24,13 +23,16 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
-    # extract_text returns None and no caller reads the result; skip storing it.
+    # No caller reads a result; without a backend there is nowhere to store one.
     task_ignore_result=True,
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
     # Restart workers after N tasks to prevent memory creep from asyncio.run() loops.
     worker_max_tasks_per_child=settings.CELERY_WORKER_MAX_TASKS_PER_CHILD,
+    # A stop requeues what is still running instead of waiting for it past compose's
+    # SIGKILL; needs REMAP_SIGTERM=SIGQUIT in the worker's environment (compose).
+    worker_soft_shutdown_timeout=settings.CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT,
     # Retry connecting to Redis at startup rather than hard-failing (Celery 5.3+).
     broker_connection_retry_on_startup=True,
     # Emit STARTED/SUCCESS/FAILURE/RETRY events so celery inspect can show which
@@ -71,10 +73,3 @@ def _configure_worker_tracing(**kwargs: Any) -> None:
         trust_incoming_trace_context=True,
     )
     instrument_libraries()
-
-
-# Problem 7 fix: release the lazily-created sync Redis client when the worker
-# exits so connections are closed cleanly rather than abandoned.
-@signals.worker_shutdown.connect  # type: ignore[untyped-decorator]
-def _on_worker_shutdown(**kwargs: Any) -> None:
-    close_sync_redis()

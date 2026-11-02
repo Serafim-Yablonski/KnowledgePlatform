@@ -1,6 +1,8 @@
+# Every service restarts after a crash or an OOM kill; `docker compose stop` still stops it.
 services:
   postgres:
     image: pgvector/pgvector:pg18
+    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql
     ports:
@@ -15,8 +17,15 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
 
+  # One instance for the Celery broker and the cache / rate limiter (ADR-026). The
+  # broker's messages must survive a kill and a `down` + `up`: AOF, a named volume,
+  # and no eviction (cache keys carry their own TTLs, queued tasks carry none).
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -25,6 +34,7 @@ services:
 
   app:
     build: .
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -43,13 +53,23 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000
 
   # CPU-bound extraction (PDF parsing). Scale independently from embed workers.
   # Set CELERY_EXTRACT_CONCURRENCY in .env for production (default: 2 for local dev).
   celery-worker-extract:
     build: .
+    restart: unless-stopped
+    # SIGTERM → soft shutdown: running tasks get CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT
+    # (20 s) to finish, then go back to the queue — before this period's SIGKILL.
+    stop_grace_period: 30s
+    # The PDF parse is the one memory use driven by untrusted input. Past this cap the
+    # kernel kills the biggest process, normally a parse child: retried, and killed on
+    # every attempt → extraction_too_large. Equal swap limit: killed, never swapped.
+    # Measured (step 8c-0, 25 MB uploads): ~330 MiB idle + ~545 MiB per concurrent
+    # extraction at worst. Raise it with CELERY_EXTRACT_CONCURRENCY.
+    mem_limit: ${CELERY_EXTRACT_MEM_LIMIT:-1536m}
+    memswap_limit: ${CELERY_EXTRACT_MEM_LIMIT:-1536m}
     command: >
       celery -A src.workers.celery_app worker
       --loglevel=info --queues extract
@@ -66,12 +86,16 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      REMAP_SIGTERM: SIGQUIT  # read by billiard at import
 
   # I/O-bound embedding (HTTP calls to embedding API). Higher concurrency than extract.
   # Set CELERY_EMBED_CONCURRENCY in .env for production (default: 2 for local dev).
   celery-worker-embed:
     build: .
+    restart: unless-stopped
+    # SIGTERM → soft shutdown: running tasks get CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT
+    # (20 s) to finish, then go back to the queue — before this period's SIGKILL.
+    stop_grace_period: 30s
     command: >
       celery -A src.workers.celery_app worker
       --loglevel=info --queues embed
@@ -88,7 +112,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      REMAP_SIGTERM: SIGQUIT  # read by billiard at import
 
   # MCP server is mounted at /mcp inside the main `app` container (port 8000).
   # No separate service needed — it shares the same DB engine and Redis pool.
@@ -96,4 +120,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   uploads_data:

@@ -44,6 +44,7 @@ from src.domain.documents import (
     DocumentChunks,
     DocumentPage,
     DocumentStatus,
+    FailureReason,
 )
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult, SearchResults
@@ -220,17 +221,21 @@ class TestListWorkspacesTool:
         assert set(WorkspaceSummary.model_fields) == {"id", "name", "description"}
 
 
-def _document(title: str, status: DocumentStatus) -> Document:
+def _document(
+    title: str,
+    status: DocumentStatus,
+    failure_reason: FailureReason | None = None,
+) -> Document:
     return Document(
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         title=title,
         content_type=ContentType.MARKDOWN,
         status=status,
+        failure_reason=failure_reason,
         file_path="/tmp/x.md",
         file_size_bytes=100,
         uploaded_by=uuid.uuid4(),
-        version=1,
         created_at=datetime(2026, 10, 22, 12, 0, 0),
         updated_at=datetime(2026, 10, 22, 12, 0, 0),
     )
@@ -240,13 +245,14 @@ class TestListDocumentsTool:
     async def test_returns_a_page_of_summaries_and_the_next_cursor(
         self, fake_services: MagicMock
     ) -> None:
-        # What lets the model pick a document and see whether it is searchable yet;
-        # size, uploader and version change nothing a tool does.
+        # What lets the model pick a document, see whether it is searchable yet and,
+        # if it failed, why; size and uploader change nothing a tool does.
         user = _make_user()
         ws_id = uuid.uuid4()
         docs = [
             _document("Runbook", DocumentStatus.INDEXED),
             _document("Draft", DocumentStatus.PROCESSING),
+            _document("Scan", DocumentStatus.FAILED, FailureReason.NO_TEXT),
         ]
         fake_services.workspace.get_user_role = AsyncMock(
             return_value=WorkspaceRole.VIEWER
@@ -268,6 +274,7 @@ class TestListDocumentsTool:
                     title=d.title,
                     content_type=d.content_type,
                     status=d.status,
+                    failure_reason=d.failure_reason,
                     created_at=d.created_at,
                 )
                 for d in docs
@@ -279,6 +286,7 @@ class TestListDocumentsTool:
             "title",
             "content_type",
             "status",
+            "failure_reason",
             "created_at",
         }
 
@@ -1314,3 +1322,13 @@ async def test_instructions_cover_the_retrieval_loop() -> None:
     named = set(_IDENTIFIER.findall(mcp.instructions or ""))
 
     assert named & registered == RETRIEVAL_TOOLS
+
+
+def test_the_failure_reason_description_names_every_reason() -> None:
+    """The field description is what a client's model reads (ADR-023): a reason it
+    never names is one the model can't act on."""
+    from src.mcp_server.schemas import DocumentSummary
+
+    description = DocumentSummary.model_fields["failure_reason"].description or ""
+    missing = [r.value for r in FailureReason if r.value not in description]
+    assert missing == []

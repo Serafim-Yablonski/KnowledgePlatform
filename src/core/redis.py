@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import redis
 import redis.asyncio as aioredis
 
 from src.core.config import settings
@@ -12,7 +11,6 @@ PREFIX_RATELIMIT = "nexus:ratelimit"
 
 _async_pool: aioredis.ConnectionPool | None = None
 _async_client: aioredis.Redis | None = None
-_sync_client: redis.Redis | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -62,24 +60,3 @@ def get_async_redis_client() -> aioredis.Redis:
     if _async_client is None:
         raise RuntimeError("Redis not initialized — call init_redis() first")
     return _async_client
-
-
-# ---------------------------------------------------------------------------
-# Sync client — Celery workers only
-# ---------------------------------------------------------------------------
-
-
-def _get_sync_client() -> redis.Redis:
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
-    return _sync_client
-
-
-def close_sync_redis() -> None:
-    # Problem 7 fix: release sync connections on Celery worker shutdown.
-    # Called from the worker_shutdown signal in src/workers/celery_app.py.
-    global _sync_client
-    if _sync_client is not None:
-        _sync_client.close()
-        _sync_client = None

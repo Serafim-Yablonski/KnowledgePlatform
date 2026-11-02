@@ -62,7 +62,6 @@ class RedisSettings(BaseSettings):
 
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
 
 
 class AuthSettings(BaseSettings):
@@ -100,7 +99,7 @@ class AppSettings(BaseSettings):
     model_config = _ENV_CONFIG
 
     UPLOAD_DIR: str = "/data/uploads"
-    MAX_UPLOAD_SIZE_MB: int = 50
+    MAX_UPLOAD_SIZE_MB: int = 25
     # Set True when running behind a reverse proxy. Controls ProxyHeadersMiddleware.
     TRUSTED_PROXY_HEADERS: bool = False
     # Comma-separated trusted proxy IPs or CIDR ranges; "*" trusts all proxies.
@@ -126,7 +125,16 @@ class CelerySettings(BaseSettings):
     # Restart workers after N tasks — prevents memory creep from asyncio.run() loops.
     CELERY_WORKER_MAX_TASKS_PER_CHILD: int = 200
 
-    # extract_text: CPU-bound PDF parsing; 50 MB upload ceiling → ~2 min worst case.
+    # On SIGTERM (remapped to SIGQUIT in compose) a worker lets running tasks finish
+    # for this long, then cancels them and puts their messages back in the queue.
+    # Must end inside compose's stop_grace_period (tests/unit/test_compose.py).
+    CELERY_WORKER_SOFT_SHUTDOWN_TIMEOUT: float = 20
+
+    # extract_text: CPU-bound PDF parsing. A text-heavy PDF at the 25 MB upload cap
+    # parsed in 28–38 s in the built image (pipeline step 8c-0).
+    # The parse runs in a child process, killed at its own timeout; it comes before
+    # the soft limit (which pypdf can swallow) and leaves the rest of the task time.
+    CELERY_EXTRACT_PARSE_TIMEOUT: int = 90
     CELERY_EXTRACT_SOFT_TIME_LIMIT: int = 120  # SoftTimeLimitExceeded at this point
     CELERY_EXTRACT_TIME_LIMIT: int = 180  # SIGKILL if soft limit is ignored
 
@@ -138,6 +146,68 @@ class CelerySettings(BaseSettings):
     # (git clone on a laptop). Set higher in production: extract→4, embed→10.
     CELERY_EXTRACT_CONCURRENCY: int = 2
     CELERY_EMBED_CONCURRENCY: int = 2
+
+    @model_validator(mode="after")
+    def _order_extract_limits(self) -> Self:
+        if not (
+            self.CELERY_EXTRACT_PARSE_TIMEOUT
+            < self.CELERY_EXTRACT_SOFT_TIME_LIMIT
+            < self.CELERY_EXTRACT_TIME_LIMIT
+        ):
+            raise ValueError(
+                "CELERY_EXTRACT_PARSE_TIMEOUT < CELERY_EXTRACT_SOFT_TIME_LIMIT < "
+                "CELERY_EXTRACT_TIME_LIMIT must hold"
+            )
+        return self
+
+
+class PipelineSettings(BaseSettings):
+    """The document pipeline's workers, which claim work from the documents table
+    (ADR-027). Times in seconds."""
+
+    model_config = _ENV_CONFIG
+
+    # Attempts per phase; the claim that finds them used up fails it as interrupted.
+    PIPELINE_MAX_ATTEMPTS: int = 5
+    # An idle worker's claim query, about this often (jittered).
+    PIPELINE_POLL_INTERVAL: float = 1.0
+    # On SIGTERM, running attempts get this long to finish; the rest are cancelled
+    # and released. Must end inside compose's stop_grace_period.
+    PIPELINE_SHUTDOWN_GRACE: float = 20
+
+    # Attempts at once, per worker process. Low for local dev; production: 4 and 10.
+    PIPELINE_EXTRACT_CONCURRENCY: int = 2
+    PIPELINE_EMBED_CONCURRENCY: int = 2
+
+    # Extraction: a text-heavy PDF at the 25 MB upload cap parsed in 28–38 s
+    # (pipeline step 8c-0). The parse child is killed at its own timeout, inside the
+    # attempt's; the lease outlasts the attempt and its outcome write.
+    PIPELINE_EXTRACT_PARSE_TIMEOUT: float = 90
+    PIPELINE_EXTRACT_TIMEOUT: float = 120
+    PIPELINE_EXTRACT_LEASE: float = 180
+
+    # Embedding: ~500 chunks × ~100 ms/call ≈ 50 s typical.
+    PIPELINE_EMBED_TIMEOUT: float = 300
+    PIPELINE_EMBED_LEASE: float = 360
+
+    @model_validator(mode="after")
+    def _order_extract_limits(self) -> Self:
+        if not (
+            self.PIPELINE_EXTRACT_PARSE_TIMEOUT
+            < self.PIPELINE_EXTRACT_TIMEOUT
+            < self.PIPELINE_EXTRACT_LEASE
+        ):
+            raise ValueError(
+                "PIPELINE_EXTRACT_PARSE_TIMEOUT < PIPELINE_EXTRACT_TIMEOUT < "
+                "PIPELINE_EXTRACT_LEASE must hold"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _order_embed_limits(self) -> Self:
+        if not self.PIPELINE_EMBED_TIMEOUT < self.PIPELINE_EMBED_LEASE:
+            raise ValueError("PIPELINE_EMBED_TIMEOUT < PIPELINE_EMBED_LEASE must hold")
+        return self
 
 
 class RateLimitSettings(BaseSettings):
@@ -189,6 +259,7 @@ class Settings(
     AppSettings,
     CacheSettings,
     CelerySettings,
+    PipelineSettings,
     RateLimitSettings,
 ):
     model_config = _ENV_CONFIG

@@ -3,10 +3,14 @@
 import base64
 import io
 import json
+import uuid
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.documents import ContentType, DocumentStatus, FailureReason
+from src.models.document import Document
 from src.services.document import INVALID_CURSOR_DETAIL, NOT_UTF8_DETAIL
 from tests.api.conftest import UserFactory
 
@@ -71,8 +75,8 @@ async def test_upload_pdf_returns_201_with_pending_status(
     body = resp.json()
     assert body["title"] == "My PDF"
     assert body["status"] == "pending"
+    assert body["failure_reason"] is None
     assert body["content_type"] == "pdf"
-    assert body["version"] == 1
     assert "id" in body
 
 
@@ -264,7 +268,6 @@ async def test_full_crud_cycle(async_client: AsyncClient) -> None:
     )
     assert patch_resp.status_code == 200
     assert patch_resp.json()["title"] == "Updated Title"
-    assert patch_resp.json()["version"] == 2
 
     # Delete
     del_resp = await async_client.delete(f"{url}/{doc_id}", headers=_auth(token))
@@ -273,6 +276,32 @@ async def test_full_crud_cycle(async_client: AsyncClient) -> None:
     # Get after delete returns 404
     gone_resp = await async_client.get(f"{url}/{doc_id}", headers=_auth(token))
     assert gone_resp.status_code == 404
+
+
+async def test_a_failed_document_says_why(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token)
+    me = (await async_client.get("/api/v1/auth/me", headers=_auth(token))).json()
+    doc = Document(
+        workspace_id=uuid.UUID(ws_id),
+        title="Scan",
+        content_type=ContentType.PDF,
+        file_path=f"/tmp/{uuid.uuid4()}.pdf",
+        file_size_bytes=100,
+        uploaded_by=uuid.UUID(me["id"]),
+        status=DocumentStatus.FAILED,
+        failure_reason=FailureReason.NO_TEXT,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    got = await async_client.get(f"{_docs_url(ws_id)}/{doc.id}", headers=_auth(token))
+    listed = await async_client.get(_docs_url(ws_id), headers=_auth(token))
+
+    assert (got.json()["status"], got.json()["failure_reason"]) == ("failed", "no_text")
+    assert [d["failure_reason"] for d in listed.json()["items"]] == ["no_text"]
 
 
 # ---------------------------------------------------------------------------

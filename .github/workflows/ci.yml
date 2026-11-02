@@ -241,7 +241,7 @@ jobs:
           --health-cmd "pg_isready -U user -d knowledge_platform"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: redis:8-alpine
         ports:
           - 6379:6379
         options: >-
@@ -255,14 +255,13 @@ jobs:
 
       # Startup connects to Postgres (checkpointer) and Redis, so a broken image or
       # config exits before /health answers. No Celery worker runs here, so /health
-      # is 503 with workers "unavailable"; the database and Redis must be "ok".
+      # is 503 with workers "unavailable"; the database, cache and broker must be "ok".
       - name: Verify image starts and reaches Postgres and Redis
         run: |
           docker run -d --name kp-ci-test --network host \
             -e DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/knowledge_platform \
             -e REDIS_URL=redis://localhost:6379/0 \
             -e CELERY_BROKER_URL=redis://localhost:6379/0 \
-            -e CELERY_RESULT_BACKEND=redis://localhost:6379/1 \
             -e SECRET_KEY=ci-test-secret-key \
             -e GOOGLE_API_KEY=dummy \
             -e ANTHROPIC_API_KEY=dummy \
@@ -274,4 +273,4 @@ jobs:
           done
           docker logs kp-ci-test 2>&1 | tail -20
           echo "health: $body"
-          echo "$body" | jq -e '.checks.database == "ok" and .checks.redis == "ok"'
+          echo "$body" | jq -e '.checks.database == "ok" and .checks.cache == "ok" and .checks.broker == "ok"'

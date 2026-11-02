@@ -64,13 +64,7 @@ class Services:
 
     @cached_property
     def embeddings(self) -> EmbeddingService:
-        cfg = get_settings()
-        return EmbeddingService(
-            api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-            model=cfg.EMBEDDING_MODEL,
-            dimensions=cfg.EMBEDDING_DIMENSIONS,
-            http_client=self._http,
-        )
+        return EmbeddingService.from_settings(get_settings(), self._http)
 
     @cached_property
     def auth(self) -> AuthService:

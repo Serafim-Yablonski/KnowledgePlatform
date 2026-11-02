@@ -176,3 +176,28 @@ async def test_api_key_is_sent_as_a_header_not_in_the_url(
     assert request.headers["x-goog-api-key"] == _API_KEY
     assert "HTTP Request: POST" in caplog.text
     assert _API_KEY not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("embedding_key", "google_key", "sent"),
+    [("embed-key", "google-key", "embed-key"), ("", "google-key", "google-key")],
+    ids=["own-key", "falls-back-to-google"],
+)
+async def test_the_configured_client_sends_the_embedding_key_first(
+    embedding_key: str, google_key: str, sent: str
+) -> None:
+    """The API and the workers build their client from the same settings."""
+    from src.core.config import AISettings
+
+    cfg = AISettings(EMBEDDING_API_KEY=embedding_key, GOOGLE_API_KEY=google_key)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["x-goog-api-key"])
+        return httpx.Response(200, json={"embeddings": [{"values": _fake_embedding()}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = EmbeddingService.from_settings(cfg, client)
+        await service.embed_texts(["t"])
+
+    assert seen == [sent]

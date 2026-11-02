@@ -33,6 +33,7 @@ class SQLAlchemyDocumentRepository:
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
         original_filename: str | None,
+        trace_context: dict[str, str] | None,
     ) -> Document:
         doc = Document(
             workspace_id=workspace_id,
@@ -42,8 +43,8 @@ class SQLAlchemyDocumentRepository:
             file_size_bytes=file_size_bytes,
             uploaded_by=uploaded_by,
             original_filename=original_filename,
+            trace_context=trace_context,
             status=DocumentStatus.PENDING,
-            version=1,
         )
         self._session.add(doc)
         # Flush to get the server-generated uuidv7 ID without committing.
@@ -66,7 +67,6 @@ class SQLAlchemyDocumentRepository:
     async def update(self, document: Document, data: DocumentUpdateInput) -> Document:
         if data.title is not None:
             document.title = data.title
-        document.version += 1
         await self._session.flush()
         await self._session.refresh(document)
         return document

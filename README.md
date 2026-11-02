@@ -4,14 +4,14 @@
 
 Knowledge Platform lets teams upload documents into isolated workspaces, search them semantically and ask questions about them (RAG), from REST clients or directly from AI code agents over the Model Context Protocol (MCP). Uploads are validated, then chunked and embedded by Celery workers; search runs on PostgreSQL with pgvector. REST and MCP are thin adapters over the same services. A multi-step research agent plans queries, gathers evidence until it is sufficient, and streams a synthesised report.
 
-The emphasis is on correctness you can check: layer rules enforced by import-linter, `mypy --strict`, ~700 tests against real PostgreSQL 18 (testcontainers, failure paths with injected faults), and 24 architecture decision records that name the alternatives they rejected. Each highlight below links to the test or ADR that proves it.
+The emphasis is on correctness you can check: layer rules enforced by import-linter, `mypy --strict`, ~780 tests against real PostgreSQL 18 (testcontainers, failure paths with injected faults), and 26 architecture decision records that name the alternatives they rejected. Each highlight below links to the test or ADR that proves it.
 
 ## Highlights
 
 - **MCP server for code agents.** MCP SDK 2.x, serving only the stateless 2026-07-28 protocol, so identity travels with every request. Retrieval-first tools (`list_workspaces`, `search_documents`, `list_documents`, `read_document`) with typed outputs and effect annotations; Origin is checked before authentication. Tested through the real SDK client, including two users and concurrent callers who each see only their own data. [ADR-021](docs/decisions/021-mcp-sdk2-handshake-free.md), [ADR-023](docs/decisions/023-mcp-retrieval-first-tools.md), [tests](tests/integration/test_mcp_protocol.py)
 - **One service layer, enforced.** Routes → services → repositories, assembled in a single composition root. Import-linter contracts forbid building repositories anywhere else and keep services, repositories and domain free of FastAPI/Starlette. [ADR-018](docs/decisions/018-composition-root.md), [contracts](pyproject.toml)
 - **Workspace isolation.** Role-based permissions (owner, admin, member, viewer); every workspace-scoped query filters by workspace, and non-members are refused at the service, REST and MCP layers. [ADR-004](docs/decisions/004-multi-tenancy-workspace.md), [REST tests](tests/api/test_documents.py), [MCP tests](tests/integration/test_mcp_server.py)
-- **Background document processing.** Separate Celery queues for CPU-bound extraction and I/O-bound embedding, scaled independently. Late acknowledgement, retries with backoff and jitter, time limits; a redelivered message doesn't redo finished work, and version-checked writes discard stale chunks. [task tests](tests/integration/test_embed_chunks_task.py), [extraction tests](tests/integration/test_extract_text.py), [config tests](tests/unit/test_celery_config.py)
+- **Background document processing.** Separate Celery queues for CPU-bound extraction and I/O-bound embedding, scaled independently. Late acknowledgement, retries with backoff and jitter, time limits; a redelivered message doesn't redo finished work, and racing runs can't leave a document with two chunk sets (each run replaces the whole set under the document's row lock; a unique constraint backs it). Every failure a worker sees ends `FAILED` with a reason (`no_text`, `unreadable_file`, `extraction_timeout`, `extraction_too_large`, `embedding_failed`, `internal_error`): status writes are guarded transitions, only phases that touch the outside world are retried, and PDFs are parsed in a child process killed at its own timeout or under the extract worker's memory cap (an out-of-memory kill counts as an attempt, not a verdict). The broker's Redis keeps queued work across kills and restarts, and a stopped worker puts its running tasks back in the queue. [ADR-025](docs/decisions/025-document-pipeline-state-machine.md), [ADR-026](docs/decisions/026-durable-redis-and-worker-lifecycle.md), [task tests](tests/integration/test_embed_chunks_task.py), [extraction tests](tests/integration/test_extract_text.py), [config tests](tests/unit/test_celery_config.py)
 - **Cursor pagination.** Composite `(created_at, id)` cursor, no OFFSET; pages stay stable while rows are inserted. [ADR-005](docs/decisions/005-cursor-pagination.md), [tests](tests/integration/test_document_repository.py)
 - **Sliding-window rate limiting.** Redis sorted sets, `Retry-After` and RateLimit headers, fail-open or fail-closed chosen per route. [ADR-009](docs/decisions/009-sliding-window-rate-limit.md), [tests](tests/unit/test_rate_limiter.py)
 - **Authentication.** JWT for users; API keys for agents, stored as SHA-256 hashes, with `last_used_at` writes throttled through Redis. Membership and API-key lookups are cached in Redis and invalidated on write. [ADR-019](docs/decisions/019-api-key-last-used-throttle.md)
@@ -33,7 +33,7 @@ graph LR
     AI -->|checkpoints · psycopg3| PG
     AI --> LLM["LLM<br/>Gemini or Claude"]
     SVC --> EMB["Gemini embeddings"]
-    SVC -->|enqueue · rate limits · auth cache| REDIS[("Redis 7")]
+    SVC -->|enqueue · rate limits · auth cache| REDIS[("Redis 8<br/>durable (AOF)")]
     REDIS --> W["Celery workers<br/>extract and embed queues"]
     W -->|psycopg3| PG
     W --> EMB
@@ -48,7 +48,7 @@ Services, repositories and agents are built only in `src/composition.py`. The AP
 | Language | Python 3.14 |
 | Web | FastAPI 0.136, Pydantic v2 |
 | Database | PostgreSQL 18 + pgvector (HNSW index), SQLAlchemy 2.0 async (asyncpg), Alembic |
-| Background jobs | Celery 5.6, Redis 7 |
+| Background jobs | Celery 5.6, Redis 8 (AOF, one instance for broker and cache) |
 | AI | PydanticAI 1.89, LangGraph 1.1 (`AsyncPostgresSaver`), Gemini `gemini-embedding-001` (768 dims) |
 | MCP | MCP Python SDK 2.3 (Streamable HTTP, protocol 2026-07-28) |
 | Observability | OpenTelemetry + Logfire, structlog (JSON logs with trace and span ids) |
@@ -68,7 +68,7 @@ make run               # API + MCP, two Celery workers, Postgres, Redis
 ```
 
 - API docs: http://localhost:8000/docs
-- Health (Postgres, Redis, Celery workers): http://localhost:8000/health
+- Health (database, cache, broker, Celery workers): http://localhost:8000/health
 
 Models are set in `.env`:
 
@@ -132,7 +132,7 @@ Set `LOGFIRE_TOKEN` in `.env` to export to Logfire; without it nothing is export
 Working and tested: everything under Highlights. In progress:
 
 - **Durable research.** Run the research graph in Celery, resumable from its Postgres checkpoints, with human approval of the research plan before retrieval and a structured report with validated citations; then expose it as MCP tools. Today it runs in-process: a crashed run is not resumed. [ADR-011](docs/decisions/011-langgraph-checkpointer.md)
-- **Self-healing document pipeline.** A reconciler, so every upload reaches `INDEXED` or `FAILED` despite worker crashes or lost broker messages; failure reasons; a re-index command.
+- **Self-healing document pipeline.** A reconciler, so every upload reaches `INDEXED` or `FAILED` despite worker crashes or lost broker messages; a re-index command.
 - **Retrieval evaluation.** Chunk-level ground truth stored as answer spans, on a corpus with overlapping topics, used to choose the chunk size and score threshold. [ADR-024](docs/decisions/024-remove-eval-harness.md)
 - **Abuse and cost controls.** A request body limit before uploads are buffered, per-user cost limits.
 
@@ -183,3 +183,5 @@ docs/decisions/   architecture decision records
 | [022](docs/decisions/022-search-query-length-cap.md) | Search query length cap | 2,000 characters, derived from the embedding model's 2,048-token input limit |
 | [023](docs/decisions/023-mcp-retrieval-first-tools.md) | MCP retrieval-first tools | Read-only retrieval tools with typed outputs; no `ask` over MCP |
 | [024](docs/decisions/024-remove-eval-harness.md) | Eval harness removed | It couldn't fail on its corpus; a chunk-level retrieval eval comes back first |
+| [025](docs/decisions/025-document-pipeline-state-machine.md) | Document pipeline state machine | Guarded status transitions; the phase decides retries; a reason for every `FAILED`; PDFs parsed in a child process; an OOM kill is an attempt |
+| [026](docs/decisions/026-durable-redis-and-worker-lifecycle.md) | Durable Redis, worker lifecycle | One Redis 8 with AOF, a named volume and no eviction; services restart themselves; a stopped worker requeues its running tasks |

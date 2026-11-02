@@ -28,7 +28,12 @@ from starlette.requests import Request
 
 from src.composition import Services
 from src.core.exceptions import ForbiddenError, InvalidTokenError, NotFoundError
-from src.domain.documents import ContentType, DocumentStatus
+from src.domain.documents import (
+    ContentType,
+    DocumentStatus,
+    DocumentUpdateInput,
+    FailureReason,
+)
 from src.domain.roles import WorkspaceRole
 from src.mcp_server.auth import McpContext, _authenticate_request
 from src.mcp_server.schemas import (
@@ -216,17 +221,16 @@ async def _workspace_of(session: AsyncSession, user: User, name: str) -> uuid.UU
 
 
 async def _indexed_doc(
-    session: AsyncSession, workspace_id: uuid.UUID, user: User, *, version: int
+    session: AsyncSession, workspace_id: uuid.UUID, user: User, *, title: str = "Doc"
 ) -> Document:
     doc = Document(
         workspace_id=workspace_id,
-        title=f"Doc v{version}",
+        title=title,
         content_type=ContentType.MARKDOWN,
         file_path=f"/tmp/{uuid.uuid4()}.md",
         file_size_bytes=100,
         uploaded_by=user.id,
         status=DocumentStatus.INDEXED,
-        version=version,
     )
     session.add(doc)
     await session.flush()
@@ -237,7 +241,6 @@ async def _chunk(
     session: AsyncSession,
     doc: Document,
     *,
-    version: int,
     index: int,
     section: str | None,
 ) -> None:
@@ -245,11 +248,10 @@ async def _chunk(
         DocumentChunk(
             document_id=doc.id,
             chunk_index=index,
-            text=f"chunk {index} of v{version}",
+            text=f"chunk {index} of {doc.title}",
             embedding=_VECTOR,
             token_count=5,
             metadata_={} if section is None else {"section": section},
-            version=version,
         )
     )
     await session.flush()
@@ -262,6 +264,7 @@ async def _listed_doc(
     *,
     created_at: datetime,
     status: DocumentStatus,
+    failure_reason: FailureReason | None = None,
 ) -> Document:
     doc = Document(
         workspace_id=workspace_id,
@@ -271,7 +274,7 @@ async def _listed_doc(
         file_size_bytes=100,
         uploaded_by=user.id,
         status=status,
-        version=1,
+        failure_reason=failure_reason,
         created_at=created_at,
     )
     session.add(doc)
@@ -289,15 +292,14 @@ class TestSearchDocumentsIntegration:
         real_services: Services,
         embedded: list[str],
     ) -> None:
-        # Every chunk below has the query's own vector, so only the SQL's filters
-        # can tell them apart: a stale version, and another workspace the user is
-        # also a member of (filtered by the query, not by membership).
+        # Both chunks have the query's own vector, so only the SQL's workspace filter
+        # can tell them apart: the user is also a member of the other workspace
+        # (filtered by the query, not by membership).
         other = await _workspace_of(db_session, mcp_user, "Other")
-        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user, version=2)
-        foreign = await _indexed_doc(db_session, other, mcp_user, version=1)
-        await _chunk(db_session, doc, version=1, index=0, section="Old")
-        await _chunk(db_session, doc, version=2, index=4, section="Setup > Install")
-        await _chunk(db_session, foreign, version=1, index=0, section=None)
+        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user, title="Guide")
+        foreign = await _indexed_doc(db_session, other, mcp_user)
+        await _chunk(db_session, doc, index=4, section="Setup > Install")
+        await _chunk(db_session, foreign, index=0, section=None)
 
         result = await search_documents(
             as_user, workspace_id=mcp_workspace, query="how to install", top_k=5
@@ -308,10 +310,10 @@ class TestSearchDocumentsIntegration:
             results=[
                 SearchHit(
                     document_id=doc.id,
-                    document_title="Doc v2",
+                    document_title="Guide",
                     chunk_index=4,
                     section="Setup > Install",
-                    chunk_text="chunk 4 of v2",
+                    chunk_text="chunk 4 of Guide",
                     score=1.0,
                 )
             ]
@@ -390,14 +392,19 @@ class TestListDocumentsIntegration:
         )
         seeded = [
             await _listed_doc(
-                db_session, mcp_workspace, mcp_user, created_at=at, status=status
+                db_session,
+                mcp_workspace,
+                mcp_user,
+                created_at=at,
+                status=status,
+                failure_reason=reason,
             )
-            for at, status in [
-                (t1, DocumentStatus.INDEXED),
-                (t1, DocumentStatus.FAILED),
-                (t2, DocumentStatus.PENDING),
-                (t2, DocumentStatus.INDEXED),
-                (t3, DocumentStatus.PROCESSING),
+            for at, status, reason in [
+                (t1, DocumentStatus.INDEXED, None),
+                (t1, DocumentStatus.FAILED, FailureReason.UNREADABLE_FILE),
+                (t2, DocumentStatus.PENDING, None),
+                (t2, DocumentStatus.INDEXED, None),
+                (t3, DocumentStatus.PROCESSING, None),
             ]
         ]
 
@@ -422,6 +429,7 @@ class TestListDocumentsIntegration:
                 title=d.title,
                 content_type=d.content_type,
                 status=d.status,
+                failure_reason=d.failure_reason,
                 created_at=d.created_at,
             )
             for d in newest_first
@@ -429,7 +437,7 @@ class TestListDocumentsIntegration:
 
 
 class TestReadDocumentIntegration:
-    async def test_reads_the_current_version_to_the_end(
+    async def test_reads_the_document_to_the_end(
         self,
         db_session: AsyncSession,
         mcp_user: User,
@@ -437,12 +445,10 @@ class TestReadDocumentIntegration:
         mcp_workspace: uuid.UUID,
         real_services: Services,
     ) -> None:
-        # Version 1's chunks are stale; pages of 2 over 5 chunks end with a short one.
-        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user, version=2)
-        for i in range(7):
-            await _chunk(db_session, doc, version=1, index=i, section=None)
+        # Pages of 2 over 5 chunks, inserted out of order, end with a short one.
+        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user)
         for i in (4, 0, 3, 1, 2):
-            await _chunk(db_session, doc, version=2, index=i, section="## Ops")
+            await _chunk(db_session, doc, index=i, section="## Ops")
 
         read: list[ChunkContent] = []
         page_sizes: list[int] = []
@@ -467,9 +473,37 @@ class TestReadDocumentIntegration:
         assert page_sizes == [2, 2, 1]
         assert totals == {5}
         assert read == [
-            ChunkContent(chunk_index=i, section="## Ops", chunk_text=f"chunk {i} of v2")
+            ChunkContent(
+                chunk_index=i, section="## Ops", chunk_text=f"chunk {i} of Doc"
+            )
             for i in range(5)
         ]
+
+    async def test_renamed_document_keeps_its_chunks(
+        self,
+        db_session: AsyncSession,
+        mcp_user: User,
+        as_user: McpContext,
+        mcp_workspace: uuid.UUID,
+        real_services: Services,
+    ) -> None:
+        # A rename re-chunks nothing, so it must not move the document off its chunks.
+        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user)
+        await _chunk(db_session, doc, index=0, section=None)
+        await real_services.document.update(
+            mcp_user,
+            mcp_workspace,
+            WorkspaceRole.OWNER,
+            doc.id,
+            DocumentUpdateInput(title="Renamed"),
+        )
+
+        page = await read_document(
+            as_user, workspace_id=mcp_workspace, document_id=doc.id
+        )
+
+        assert page.title == "Renamed"
+        assert page.total_chunks == 1
 
     async def test_document_of_another_workspace_is_not_found(
         self,
@@ -482,8 +516,8 @@ class TestReadDocumentIntegration:
         # The user belongs to both workspaces, so only the document lookup's
         # workspace filter refuses the pairing.
         other = await _workspace_of(db_session, mcp_user, "Other")
-        foreign = await _indexed_doc(db_session, other, mcp_user, version=1)
-        await _chunk(db_session, foreign, version=1, index=0, section=None)
+        foreign = await _indexed_doc(db_session, other, mcp_user)
+        await _chunk(db_session, foreign, index=0, section=None)
 
         with pytest.raises(NotFoundError):
             await read_document(

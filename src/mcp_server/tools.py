@@ -120,6 +120,7 @@ async def list_documents(
                 title=doc.title,
                 content_type=doc.content_type,
                 status=doc.status,
+                failure_reason=doc.failure_reason,
                 created_at=doc.created_at,
             )
             for doc in page.items
@@ -346,10 +347,11 @@ def register_tools(mcp: MCPServer) -> None:
         read_only=True,
         description=(
             "List a workspace's documents, newest first: id, title, content_type, "
-            "status and created_at. Pass next_cursor back as cursor for the next "
-            "page; null means the last page. Only indexed documents can be searched "
-            "or read. Use this to browse or find a document by title; use "
-            "search_documents to find content."
+            "status, failure_reason (why a failed one failed) and created_at. Pass "
+            "next_cursor back as cursor for the next page; null means the last "
+            "page. Only indexed documents can be searched or read. Use this to "
+            "browse or find a document by title; use search_documents to find "
+            "content."
         ),
     )
     _add_tool(

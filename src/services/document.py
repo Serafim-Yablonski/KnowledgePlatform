@@ -4,6 +4,7 @@ from typing import BinaryIO
 
 import anyio
 import anyio.lowlevel
+import logfire
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from src.domain.documents import (
     DocumentStatus,
     DocumentUpdateInput,
     DocumentUpload,
+    FailureReason,
     clean_display_text,
     clean_original_filename,
     decode_cursor,
@@ -44,9 +46,42 @@ INVALID_CURSOR_DETAIL = (
     "or omit it for the first page"
 )
 # read() refuses documents without searchable text; each message says whether waiting
-# helps.
+# helps. The model can't upload (MCP has none): a failed one says the user's next step.
 NOT_INDEXED_DETAIL = "Document is still being processed; try again shortly"
+# Also for documents that failed before failure_reason existed.
 FAILED_DETAIL = "Document processing failed; it has no readable content"
+FAILED_DETAILS: dict[FailureReason, str] = {
+    FailureReason.NO_TEXT: (
+        f"{FAILED_DETAIL}: the file has no extractable text (a scanned PDF has no "
+        "text layer). Retrying won't help; the user can upload a version with text"
+    ),
+    FailureReason.UNREADABLE_FILE: (
+        f"{FAILED_DETAIL}: the file is damaged or not a readable PDF or UTF-8 text. "
+        "Retrying won't help; the user can upload a valid copy"
+    ),
+    FailureReason.EXTRACTION_TIMEOUT: (
+        f"{FAILED_DETAIL}: extracting its text took too long (the file is probably "
+        "very large). Retrying won't help; the user can upload it in smaller parts"
+    ),
+    FailureReason.EXTRACTION_TOO_LARGE: (
+        f"{FAILED_DETAIL}: extracting its text needed more memory than the server "
+        "allows (the file is probably very large or complex). Retrying won't help; "
+        "the user can upload it in smaller parts"
+    ),
+    FailureReason.EMBEDDING_FAILED: (
+        f"{FAILED_DETAIL}: the embedding service kept failing. Retrying won't help; "
+        "the user can upload it again later"
+    ),
+    FailureReason.INTERNAL_ERROR: (
+        f"{FAILED_DETAIL}: an internal error stopped its processing. Retrying won't "
+        "help; the user can upload it again later"
+    ),
+    FailureReason.INTERRUPTED: (
+        f"{FAILED_DETAIL}: its processing was cut off before finishing, every time "
+        "it was tried. Retrying won't help; the user can upload it again later, and "
+        "if that fails the same way, upload it in smaller parts"
+    ),
+}
 
 _MAGIC_BYTES: dict[str, bytes] = {
     "application/pdf": b"%PDF",
@@ -172,6 +207,9 @@ class DocumentService:
             file_size_bytes=size,
             uploaded_by=user.id,
             original_filename=original_filename,
+            # The workers continue this trace: each attempt is a child of the
+            # upload's span (ADR-027).
+            trace_context=dict(logfire.get_context()) or None,
         )
 
         try:
@@ -247,17 +285,20 @@ class DocumentService:
         start_chunk: int = 0,
         max_chunks: int = 8,
     ) -> DocumentChunks:
-        """Up to ``max_chunks`` of the current version's chunks from ``start_chunk``."""
+        """Up to ``max_chunks`` of the document's chunks from ``start_chunk``."""
         doc = await self.get(workspace_id, document_id)
         if doc.status == DocumentStatus.FAILED:
-            raise ConflictError(FAILED_DETAIL)
+            reason = doc.failure_reason
+            raise ConflictError(
+                FAILED_DETAILS[reason] if reason is not None else FAILED_DETAIL
+            )
         if doc.status != DocumentStatus.INDEXED:
             raise ConflictError(NOT_INDEXED_DETAIL)
         # One extra row tells whether more follow, and where they start.
         chunks = await self._chunks.read_page(
-            doc.id, version=doc.version, start=start_chunk, limit=max_chunks + 1
+            doc.id, start=start_chunk, limit=max_chunks + 1
         )
-        total = await self._chunks.count(doc.id, version=doc.version)
+        total = await self._chunks.count(doc.id)
         if not chunks:
             raise InputValidationError(
                 f"start_chunk {start_chunk} is past the end: the document has "

@@ -62,7 +62,6 @@ async def _create_indexed_doc(
     workspace_id: uuid.UUID,
     uploaded_by: uuid.UUID,
     title: str = "Test Doc",
-    version: int = 1,
 ) -> Document:
     doc = Document(
         workspace_id=workspace_id,
@@ -72,7 +71,6 @@ async def _create_indexed_doc(
         file_size_bytes=100,
         uploaded_by=uploaded_by,
         status=DocumentStatus.INDEXED,
-        version=version,
     )
     session.add(doc)
     await session.flush()
@@ -85,7 +83,6 @@ async def _create_chunk(
     document_id: uuid.UUID,
     embedding: list[float],
     text: str = "chunk text",
-    version: int = 1,
     chunk_index: int = 0,
     metadata: dict[str, str] | None = None,
 ) -> DocumentChunk:
@@ -96,7 +93,6 @@ async def _create_chunk(
         embedding=embedding,
         token_count=len(text.split()),
         metadata_=metadata or {},
-        version=version,
     )
     session.add(chunk)
     await session.flush()
@@ -224,35 +220,6 @@ async def test_workspace_isolation(
 
 
 @pytest.mark.asyncio
-async def test_version_filtering_excludes_stale_chunks(
-    db_session: AsyncSession, test_workspace: Workspace, test_user: User
-) -> None:
-    """Chunks with version < document.version must not be returned."""
-    doc = await _create_indexed_doc(
-        db_session, test_workspace.id, test_user.id, version=2
-    )
-
-    stale_chunk = await _create_chunk(
-        db_session, doc.id, _V1, text="stale chunk", version=1
-    )
-    current_chunk = await _create_chunk(
-        db_session, doc.id, _V1, text="current chunk", version=2, chunk_index=1
-    )
-
-    repo = SQLAlchemySearchRepository(db_session)
-    results = await repo.search_similar(
-        workspace_id=test_workspace.id,
-        embedding=_QUERY_NEAR_V1,
-        top_k=10,
-        min_score=0.0,
-    )
-
-    result_ids = {r.chunk_id for r in results}
-    assert current_chunk.id in result_ids
-    assert stale_chunk.id not in result_ids
-
-
-@pytest.mark.asyncio
 async def test_min_score_filters_low_similarity(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
@@ -290,7 +257,6 @@ async def test_non_indexed_documents_excluded(
         file_size_bytes=10,
         uploaded_by=test_user.id,
         status=DocumentStatus.PENDING,
-        version=1,
     )
     db_session.add(pending_doc)
     await db_session.flush()

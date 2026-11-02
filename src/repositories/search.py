@@ -48,7 +48,6 @@ class SQLAlchemySearchRepository:
                 JOIN  documents d ON c.document_id = d.id
                 WHERE d.workspace_id = :workspace_id
                   AND d.status       = :status
-                  AND c.version      = d.version
             )
             SELECT * FROM ranked
             WHERE  similarity_score >= :min_score

@@ -97,5 +97,4 @@ async def get_document_details(
         "title": doc.title,
         "content_type": doc.content_type.value,
         "created_at": str(doc.created_at),
-        "version": doc.version,
     }

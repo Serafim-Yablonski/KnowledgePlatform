@@ -15,7 +15,7 @@ dependencies = [
     "psycopg[binary]==3.3.4",
     "celery[redis]==5.6.3",
     "redis==6.4.0",
-    "pypdf==6.10.2",
+    "pypdf==6.21.2",
     "structlog==25.5.0",
     "opentelemetry-api==1.45.1",
     "logfire[asyncpg,celery,fastapi,httpx]==5.2.0",
@@ -43,6 +43,8 @@ dev = [
     "ruff==0.15.12",
     "fakeredis>=2.35.1",
     "import-linter==2.15",
+    # Tests read docker-compose.yml to run what compose runs.
+    "pyyaml==6.0.3",
 ]
 
 [build-system]

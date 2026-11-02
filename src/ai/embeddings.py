@@ -1,8 +1,8 @@
 """Google Gemini embedding service.
 
 Switching to OpenAI or Voyage requires changing the URL, request body format, and
-batch limit. All documents must be re-embedded after switching — trigger via the
-re-indexing pipeline (bump Document.version and re-dispatch embed_chunks tasks).
+batch limit. All documents must be re-embedded after switching: re-run embed_chunks
+for each, which replaces the document's chunk set.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from typing import Any
 import httpx
 import logfire
 import structlog
+
+from src.core.config import AISettings
 
 logger = structlog.get_logger(__name__)
 
@@ -35,9 +37,21 @@ class EmbeddingService:
         # In a header, not the URL's ?key=: traces and httpx's request log record
         # the full URL, never request headers.
         self._headers = {"x-goog-api-key": api_key}
-        # Shared client injected from app lifespan (FastAPI path). Celery tasks
-        # pass None and get a per-call client instead.
+        # Shared client injected by its owner (the app's lifespan, a worker's
+        # process); None: a client per call.
         self._http_client = http_client
+
+    @classmethod
+    def from_settings(
+        cls, cfg: AISettings, http_client: httpx.AsyncClient | None = None
+    ) -> EmbeddingService:
+        """The one configured embedding client, for the API and the workers."""
+        return cls(
+            api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY,
+            model=cfg.EMBEDDING_MODEL,
+            dimensions=cfg.EMBEDDING_DIMENSIONS,
+            http_client=http_client,
+        )
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:

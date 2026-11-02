@@ -1,4 +1,4 @@
-# 009. PydanticAI over LangChain for Agent Logic
+# 010. PydanticAI over LangChain for Agent Logic
 Status: Accepted | Date: 2026-05-19
 
 ## Context

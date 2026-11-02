@@ -88,6 +88,7 @@ class DocumentRepositoryProtocol(Protocol):
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
         original_filename: str | None,
+        trace_context: dict[str, str] | None,
     ) -> Document: ...
 
     async def get_by_id(
@@ -114,10 +115,10 @@ class DocumentRepositoryProtocol(Protocol):
 
 class ChunkRepositoryProtocol(Protocol):
     async def read_page(
-        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+        self, document_id: uuid.UUID, *, start: int, limit: int
     ) -> list[ChunkText]: ...
 
-    async def count(self, document_id: uuid.UUID, *, version: int) -> int: ...
+    async def count(self, document_id: uuid.UUID) -> int: ...
 
 
 class SearchRepositoryProtocol(Protocol):

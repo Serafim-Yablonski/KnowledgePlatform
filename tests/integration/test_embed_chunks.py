@@ -12,11 +12,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.config import settings
-from src.domain.documents import ContentType, DocumentStatus
+from src.domain.documents import ContentType, DocumentStatus, FailureReason
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
+from src.workers.pipeline import EmbeddingError
 
 _DIMS = settings.EMBEDDING_DIMENSIONS
 
@@ -119,7 +120,6 @@ def _make_ready_document(
     user: User,
     raw_text: str,
     content_type: ContentType = ContentType.PLAINTEXT,
-    version: int = 1,
 ) -> Document:
     doc = Document(
         workspace_id=workspace.id,
@@ -130,7 +130,6 @@ def _make_ready_document(
         file_size_bytes=len(raw_text),
         uploaded_by=user.id,
         raw_text=raw_text,
-        version=version,
     )
     session.add(doc)
     session.commit()
@@ -168,7 +167,6 @@ def test_embed_chunks_creates_chunks(
         ).scalars()
     )
     assert len(chunks) >= 1
-    assert all(c.version == 1 for c in chunks)
     assert all(c.token_count > 0 for c in chunks)
 
 
@@ -176,13 +174,13 @@ def test_embed_chunks_reindexing_replaces_old_chunks(
     setup_session: Session,
     patched_db: None,
 ) -> None:
-    """Running task again after bumping document version deletes old chunks."""
+    """A re-run on a document set back to READY replaces its whole chunk set."""
     from src.workers.tasks.embed_chunks import embed_chunks
 
     user = _make_user(setup_session)
     ws = _make_workspace(setup_session, user)
     doc = _make_ready_document(
-        setup_session, ws, user, raw_text="Initial text for version one.", version=1
+        setup_session, ws, user, raw_text="Initial text for the first run."
     )
 
     with patch(
@@ -201,8 +199,7 @@ def test_embed_chunks_reindexing_replaces_old_chunks(
     # Refresh so setup_session sees the INDEXED status the task wrote; then reset
     # to READY to simulate what DocumentService does before re-triggering embed_chunks.
     setup_session.refresh(doc)
-    doc.raw_text = "Updated text for version two with more content."
-    doc.version = 2
+    doc.raw_text = "Updated text for the second run with more content."
     doc.status = DocumentStatus.READY
     setup_session.commit()
 
@@ -217,8 +214,9 @@ def test_embed_chunks_reindexing_replaces_old_chunks(
             select(DocumentChunk).where(DocumentChunk.document_id == doc.id)
         ).scalars()
     )
-    # All surviving chunks must be version 2 — version 1 chunks deleted.
-    assert all(c.version == 2 for c in all_chunks)
+    # Only the second run's set survives, one chunk per position.
+    assert all(c.text.startswith("Updated") for c in all_chunks)
+    assert sorted(c.chunk_index for c in all_chunks) == list(range(len(all_chunks)))
 
 
 def test_embed_chunks_skips_non_ready_document(
@@ -239,7 +237,6 @@ def test_embed_chunks_skips_non_ready_document(
         file_size_bytes=10,
         uploaded_by=user.id,
         raw_text=None,
-        version=1,
     )
     setup_session.add(doc)
     setup_session.commit()
@@ -274,40 +271,6 @@ def test_hnsw_index_exists(
     assert len(rows) == 1, "HNSW index ix_chunks_embedding_hnsw not found"
 
 
-def test_embed_chunks_raw_text_none_skips(
-    setup_session: Session,
-    patched_db: None,
-) -> None:
-    """Task returns early when document is READY but raw_text is None."""
-    from src.workers.tasks.embed_chunks import embed_chunks
-
-    user = _make_user(setup_session)
-    ws = _make_workspace(setup_session, user)
-    doc = Document(
-        workspace_id=ws.id,
-        title="No Text",
-        content_type=ContentType.PLAINTEXT,
-        status=DocumentStatus.READY,
-        file_path="/dev/null",
-        file_size_bytes=0,
-        uploaded_by=user.id,
-        raw_text=None,
-        version=1,
-    )
-    setup_session.add(doc)
-    setup_session.commit()
-    setup_session.refresh(doc)
-
-    embed_chunks.run(str(doc.id))
-
-    chunks = list(
-        setup_session.execute(
-            select(DocumentChunk).where(DocumentChunk.document_id == doc.id)
-        ).scalars()
-    )
-    assert len(chunks) == 0
-
-
 def test_embed_chunks_document_not_found(
     patched_db: None,
 ) -> None:
@@ -321,7 +284,8 @@ def test_embed_chunks_no_chunks_produced(
     setup_session: Session,
     patched_db: None,
 ) -> None:
-    """Task returns early and creates no chunks when the chunker produces nothing."""
+    """The chunker is the one definition of "searchable": no chunks means no_text,
+    whatever the text looked like, and it fails at once (a pure phase)."""
     from src.workers.tasks.embed_chunks import embed_chunks
 
     user = _make_user(setup_session)
@@ -332,22 +296,29 @@ def test_embed_chunks_no_chunks_produced(
     mock_chunker.chunk = MagicMock(return_value=[])
 
     with patch("src.workers.tasks.embed_chunks.get_chunker", return_value=mock_chunker):
-        embed_chunks.run(str(doc.id))
+        result = embed_chunks.apply(args=[str(doc.id)])
 
+    assert result.state == "FAILURE"
+    assert mock_chunker.chunk.call_count == 1
     chunks = list(
         setup_session.execute(
             select(DocumentChunk).where(DocumentChunk.document_id == doc.id)
         ).scalars()
     )
     assert len(chunks) == 0
+    setup_session.refresh(doc)
+    assert (doc.status, doc.failure_reason) == (
+        DocumentStatus.FAILED,
+        FailureReason.NO_TEXT,
+    )
 
 
-def test_embed_chunks_version_changed_during_reindex(
+def test_embed_chunks_document_deleted_during_embedding(
     setup_session: Session,
     patched_db: None,
     sync_test_session_factory: sessionmaker[Session],
 ) -> None:
-    """Stale chunks are discarded when doc version is bumped mid-embedding."""
+    """A document deleted while its chunks are embedded gets none, and no error."""
     from src.workers.tasks.embed_chunks import embed_chunks
 
     user = _make_user(setup_session)
@@ -355,15 +326,15 @@ def test_embed_chunks_version_changed_during_reindex(
     doc = _make_ready_document(setup_session, ws, user, raw_text="Content to embed.")
     doc_id = doc.id
 
-    async def _bump_and_embed(texts: list[str], **_kw: object) -> list[list[float]]:
+    async def _delete_and_embed(texts: list[str], **_kw: object) -> list[list[float]]:
         with sync_test_session_factory() as sess:
             d = sess.get(Document, doc_id)
-            if d is not None:
-                d.version = 999
-                sess.commit()
+            assert d is not None
+            sess.delete(d)
+            sess.commit()
         return [[0.0] * _DIMS for _ in texts]
 
-    with patch("src.workers.tasks.embed_chunks._run_embedding", new=_bump_and_embed):
+    with patch("src.workers.tasks.embed_chunks._run_embedding", new=_delete_and_embed):
         embed_chunks.run(str(doc.id))
 
     chunks = list(
@@ -378,7 +349,7 @@ def test_embed_chunks_retry_on_embedding_failure(
     setup_session: Session,
     patched_db: None,
 ) -> None:
-    """Embedding failure re-raises the original exception (called_directly path)."""
+    """Embedding failure re-raises as EmbeddingError (called_directly path)."""
     from src.workers.tasks.embed_chunks import embed_chunks
 
     user = _make_user(setup_session)
@@ -390,7 +361,7 @@ def test_embed_chunks_retry_on_embedding_failure(
 
     with (
         patch("src.workers.tasks.embed_chunks._run_embedding", new=_failing),
-        pytest.raises(RuntimeError, match="API unavailable"),
+        pytest.raises(EmbeddingError),
     ):
         embed_chunks.run(str(doc.id))
 

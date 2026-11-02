@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 import uuid
 
@@ -9,17 +8,43 @@ import logfire
 import sqlalchemy as sa
 import structlog
 from celery import Task
+from sqlalchemy.orm import Session
 
 from src.ai.chunking.factory import get_chunker
 from src.ai.embeddings import EmbeddingService
 from src.core.config import settings
-from src.domain.documents import DocumentStatus
+from src.domain.documents import FAIL_EMBEDDING, DocumentStatus, FailureReason
 from src.models.chunk import DocumentChunk
 from src.models.document import Document
 from src.workers.celery_app import celery_app
 from src.workers.database import get_sync_session
+from src.workers.pipeline import EmbeddingError, PermanentFailure, PipelineTask
 
 logger = structlog.get_logger(__name__)
+
+
+def _replace_chunks(
+    session: Session, document_id: uuid.UUID, chunks: list[DocumentChunk]
+) -> bool:
+    """Swap in ``chunks`` as the document's whole chunk set and mark it INDEXED.
+
+    Under the document's row lock, so a concurrent swap waits and then replaces this
+    one's set instead of adding a second. The caller commits. False: the document is
+    gone, nothing written.
+    """
+    doc = session.execute(
+        sa.select(Document).where(Document.id == document_id).with_for_update()
+    ).scalar_one_or_none()
+    if doc is None:
+        return False
+    session.execute(
+        sa.delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+    )
+    session.add_all(chunks)
+    doc.status = DocumentStatus.INDEXED
+    # A success beats a rival's failure; its reason goes with it.
+    doc.failure_reason = None
+    return True
 
 
 async def _run_embedding(
@@ -37,9 +62,10 @@ async def _run_embedding(
 
 
 @celery_app.task(  # type: ignore[untyped-decorator]
+    base=PipelineTask,
     bind=True,
-    max_retries=3,
-    default_retry_delay=60,
+    fails=FAIL_EMBEDDING,
+    retry_backoff=60,
     acks_late=True,
     soft_time_limit=settings.CELERY_EMBED_SOFT_TIME_LIMIT,
     time_limit=settings.CELERY_EMBED_TIME_LIMIT,
@@ -64,29 +90,32 @@ def embed_chunks(self: Task, document_id: str) -> None:
                 )
                 return
             if doc.raw_text is None:
-                logger.warning(
-                    "document has no raw_text, skipping", document_id=document_id
-                )
-                return
+                # Extraction writes READY and raw_text in one UPDATE: a bug.
+                raise PermanentFailure(FailureReason.INTERNAL_ERROR)
 
             raw_text = doc.raw_text
             content_type = doc.content_type
-            doc_version = doc.version
 
-        chunker = get_chunker(content_type)
         chunk_start = time.monotonic()
         with logfire.span(
             "chunk_text", document_id=document_id, content_type=content_type.value
         ) as chunk_span:
-            chunk_data_list = chunker.chunk(raw_text, {"document_id": document_id})
+            # A pure function of the stored text (the soft limit included): retrying
+            # can only fail again.
+            try:
+                chunker = get_chunker(content_type)
+                chunk_data_list = chunker.chunk(raw_text, {"document_id": document_id})
+            except Exception as exc:
+                raise PermanentFailure(FailureReason.INTERNAL_ERROR) from exc
             chunk_span.set_attribute("chunk_count", len(chunk_data_list))
             chunk_span.set_attribute(
                 "chunking_duration_ms", round((time.monotonic() - chunk_start) * 1000)
             )
 
+        # The chunker is the one definition of searchable: a scanned PDF extracts to
+        # page separators only, and whitespace yields no chunk.
         if not chunk_data_list:
-            logger.info("no chunks produced", document_id=document_id)
-            return
+            raise PermanentFailure(FailureReason.NO_TEXT)
 
         texts = [cd.text for cd in chunk_data_list]
         logger.info(
@@ -106,29 +135,14 @@ def embed_chunks(self: Task, document_id: str) -> None:
                         dimensions=settings.EMBEDDING_DIMENSIONS,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001 — task retry boundary; re-raised via self.retry
+            except Exception as exc:
+                # Retried by autoretry; after the last attempt, embedding_failed.
                 logger.error(
                     "embedding generation failed",
                     document_id=document_id,
                     error_type=type(exc).__name__,
                 )
-                if self.request.retries >= self.max_retries:
-                    with get_sync_session() as fail_session:
-                        fail_doc = fail_session.get(Document, doc_uuid)
-                        if fail_doc is not None:
-                            fail_doc.status = DocumentStatus.FAILED
-                            fail_session.commit()
-                    logger.error(
-                        "embed_chunks exhausted all retries, marking FAILED",
-                        document_id=document_id,
-                    )
-                raise self.retry(
-                    exc=exc,
-                    countdown=int(
-                        2**self.request.retries * self.default_retry_delay
-                        + random.uniform(0, self.default_retry_delay / 3)
-                    ),
-                ) from exc
+                raise EmbeddingError(type(exc).__name__) from exc
             embed_ms = round((time.monotonic() - embed_start) * 1000)
             embed_span.set_attribute("embedding_duration_ms", embed_ms)
 
@@ -140,37 +154,22 @@ def embed_chunks(self: Task, document_id: str) -> None:
                 embedding=embedding,
                 token_count=cd.token_count,
                 metadata_=cd.metadata,
-                version=doc_version,
             )
             for i, (cd, embedding) in enumerate(
                 zip(chunk_data_list, embeddings, strict=True)
             )
         ]
 
-        # Re-indexing transaction with optimistic version check:
-        # Lock the document row, verify its version hasn't been bumped by a concurrent
-        # re-index while we were embedding (TOCTOU guard), then atomically delete stale
-        # chunks (version < doc_version) and insert the new ones.
+        # Another run of this document (a redelivered or requeued message) may have
+        # swapped in meanwhile; it chunked the same raw_text, so replacing its set
+        # changes nothing a reader sees.
         with get_sync_session() as session:
-            current_doc = session.execute(
-                sa.select(Document).where(Document.id == doc_uuid).with_for_update()
-            ).scalar_one_or_none()
-            if current_doc is None or current_doc.version != doc_version:
+            if not _replace_chunks(session, doc_uuid, new_chunks):
                 logger.info(
-                    "doc version changed during embedding, discarding stale chunks",
+                    "document deleted during embedding, discarding chunks",
                     document_id=document_id,
-                    expected_version=doc_version,
-                    actual_version=current_doc.version if current_doc else None,
                 )
                 return
-            session.execute(
-                sa.delete(DocumentChunk).where(
-                    DocumentChunk.document_id == doc_uuid,
-                    DocumentChunk.version < doc_version,
-                )
-            )
-            session.add_all(new_chunks)
-            current_doc.status = DocumentStatus.INDEXED
             session.commit()
 
         total_tokens = sum(cd.token_count for cd in chunk_data_list)

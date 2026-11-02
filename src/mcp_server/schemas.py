@@ -14,7 +14,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from src.domain.documents import ContentType, DocumentStatus
+from src.domain.documents import ContentType, DocumentStatus, FailureReason
 
 
 class WorkspaceSummary(BaseModel):
@@ -50,6 +50,15 @@ class DocumentSummary(BaseModel):
     content_type: ContentType
     status: DocumentStatus = Field(
         description="Only indexed documents are searchable; failed ones never will be"
+    )
+    failure_reason: FailureReason | None = Field(
+        description=(
+            "Why a failed document failed: no_text, unreadable_file, "
+            "extraction_timeout or extraction_too_large need another upload of the "
+            "file; embedding_failed, internal_error and interrupted, the same "
+            "upload later (interrupted again: upload it in smaller parts). Null if "
+            "not failed or unknown"
+        )
     )
     created_at: datetime = Field(description="Upload time")
 
