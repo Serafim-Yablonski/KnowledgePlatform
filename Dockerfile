@@ -9,6 +9,10 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.11.16 /uv /bin/uv
 
 COPY pyproject.toml uv.lock ./
+# Ship the dependencies' bytecode: the runtime user can't write __pycache__ into the
+# root-owned venv, so without it every process — each PDF parse child included —
+# compiles the dependencies it imports again (measured: ~1.5 s of a worker's start).
+ENV UV_COMPILE_BYTECODE=1
 RUN uv sync --frozen --no-dev
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────

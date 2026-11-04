@@ -5,7 +5,8 @@ One isolated stack per module: a unique project name, an environment built from
 nothing plus a generated env file (no developer key, token or override reaches it),
 random loopback ports, an always-200 fake provider in the stack's own network
 (tests/support/fake_gemini.py, mounted read-only), and the image's own code (the
-dev bind mounts are dropped). Torn down with its volumes.
+dev bind mounts are dropped). Torn down with its volumes and the images it built
+(each run's project name tags new ones; pulled images stay).
 """
 
 from __future__ import annotations
@@ -127,7 +128,9 @@ def stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         print(stack.logs())  # noqa: T201 — the failing run's evidence
         raise
     finally:
-        stack.compose("down", "--volumes", "--remove-orphans", timeout=120)
+        stack.compose(
+            "down", "--volumes", "--rmi", "local", "--remove-orphans", timeout=120
+        )
 
 
 def _wait_healthy(stack: Stack, timeout: float = 120) -> None:

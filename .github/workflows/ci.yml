@@ -284,6 +284,15 @@ jobs:
       - name: Build Docker image
         run: docker build -t knowledge-platform:ci .
 
+      # The runtime user can't write __pycache__, so bytecode the image doesn't ship
+      # is compiled again by every process (Dockerfile, UV_COMPILE_BYTECODE).
+      - name: Verify the image ships its dependencies' bytecode
+        run: |
+          docker run --rm knowledge-platform:ci python -c "
+          import importlib.util, pathlib, pypdf
+          pyc = pathlib.Path(importlib.util.cache_from_source(pypdf.__file__))
+          assert pyc.exists(), f'no bytecode: {pyc}'"
+
       # Compose mounts a named volume at UPLOAD_DIR; a fresh one must be writable by
       # the image's non-root user, or every upload on a new install is a 500.
       - name: Verify a fresh uploads volume is writable
@@ -310,6 +319,8 @@ jobs:
             alembic upgrade head
           docker run -d --name kp-ci-test --network host "${env_args[@]}" \
             knowledge-platform:ci
+          # Gone before the compose stack tests start, whatever this step's outcome.
+          trap 'docker rm -f kp-ci-test >/dev/null' EXIT
           body=""
           for _ in $(seq 1 30); do
             body=$(curl -s --max-time 10 http://localhost:8000/health) && break
