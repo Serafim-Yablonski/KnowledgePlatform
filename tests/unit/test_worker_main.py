@@ -18,6 +18,24 @@ def test_an_unknown_phase_is_refused() -> None:
     assert exc_info.value.code == 2
 
 
+def test_reindex_runs_the_reindex_against_the_configured_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    async def reindex_all(url: str) -> int:
+        called.append(url)
+        return 0
+
+    monkeypatch.setattr(cli, "configure_process", lambda command: None)
+    monkeypatch.setattr(cli, "reindex_all", reindex_all)
+    monkeypatch.setattr(cli, "serve", None)  # a worker loop would never return
+
+    cli.main(["reindex"])
+
+    assert called == [cli.settings.ASYNC_DATABASE_URL.get_secret_value()]
+
+
 async def test_the_extract_worker_builds_no_embedding_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

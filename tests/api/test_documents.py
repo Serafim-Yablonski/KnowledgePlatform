@@ -80,6 +80,33 @@ async def test_upload_pdf_returns_201_with_pending_status(
     assert "id" in body
 
 
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("text/plain; charset=utf-8", "plaintext"),
+        ("Text/Markdown;charset=UTF-8", "markdown"),
+        ("APPLICATION/PDF", "pdf"),
+    ],
+)
+async def test_a_media_type_is_matched_without_its_parameters_or_case(
+    async_client: AsyncClient, header: str, expected: str
+) -> None:
+    """RFC 9110 §8.3.1: type and subtype are case-insensitive, and parameters such as
+    charset may follow. The bytes are still checked (strict UTF-8 for text)."""
+    token, _ = await _register_and_token(async_client)
+    ws_id = await _create_workspace(async_client, token)
+    content = b"%PDF-1.4 fake" if expected == "pdf" else b"# Notes"
+
+    resp = await async_client.post(
+        _docs_url(ws_id),
+        headers=_auth(token),
+        files={"file": ("upload", io.BytesIO(content), header)},
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["content_type"] == expected
+
+
 # ---------------------------------------------------------------------------
 # Upload — validation failures
 # ---------------------------------------------------------------------------

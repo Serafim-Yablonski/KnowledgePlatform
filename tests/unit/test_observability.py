@@ -61,6 +61,23 @@ def probe_rest(app, label, flags="00"):
     print(f"{label}: recording={len(spans) == 1} adopted={adopted}")
 
 
+def probe_baggage(app, label):
+    import logfire
+    from opentelemetry import context, propagate
+
+    exporter = InMemorySpanExporter()
+    trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+    TestClient(app).get("/no-such-route", headers={"baggage": "workspace_id=forged"})
+    spans = [s for s in exporter.get_finished_spans() if s.kind is SpanKind.SERVER]
+    attribute = any("workspace_id" in (s.attributes or {}) for s in spans)
+    # What a handler would store for the workers (DocumentService.create); httpx's
+    # instrumentation injects the same carrier into our outbound calls.
+    token = context.attach(propagate.extract({"baggage": "workspace_id=forged"}))
+    stored = "baggage" in logfire.get_context()
+    context.detach(token)
+    print(f"{label}: span_attribute={attribute} stored={stored}")
+
+
 def probe_libraries(label):
     from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
@@ -136,6 +153,24 @@ def test_api_ignores_client_trace_context() -> None:
         "probe api mcp: recording=True adopted=False",
         "probe api rest: recording=True adopted=False",
     ]
+
+
+def test_api_ignores_client_baggage() -> None:
+    # Ignoring a caller's trace context means its W3C baggage too: Logfire's
+    # no-extract propagator resets only the parent span, and copies baggage onto
+    # every span as attributes — and the upload's stored context would carry it
+    # onto every worker attempt.
+    lines = _run(
+        """
+        from src.main import app
+        from src.core.observability import setup_observability
+
+        setup_observability(token=None, environment="test", service_name="kp")
+        probe_baggage(app, "probe api")
+        """
+    )
+
+    assert lines == ["probe api: span_attribute=False stored=False"]
 
 
 def test_api_and_worker_trace_the_same_libraries() -> None:
@@ -267,7 +302,7 @@ def test_traced_embedding_calls_carry_no_api_key() -> None:
                 )
                 try:
                     await service.embed_query("q")
-                except RuntimeError:
+                except embeddings.EmbeddingProviderError:
                     pass
 
         asyncio.run(call())

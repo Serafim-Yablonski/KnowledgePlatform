@@ -254,7 +254,7 @@ def test_an_idle_worker_traces_nothing(worker_db: str, tmp_path: Path) -> None:
         trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
 
         async def main():
-            engine = create_async_engine(settings.ASYNC_DATABASE_URL)
+            engine = create_async_engine(settings.ASYNC_DATABASE_URL.get_secret_value())
             sessions = async_sessionmaker(engine)
             # The control: queries outside the claim are traced.
             async with sessions() as s:

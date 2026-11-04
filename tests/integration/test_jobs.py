@@ -9,6 +9,7 @@ import io
 import os
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from src.ai.chunking.factory import get_chunker
+from src.ai.embeddings import (
+    EmbeddingRateLimited,
+    EmbeddingRejected,
+    EmbeddingUnavailable,
+)
 from src.core.config import settings
 from src.domain.documents import ContentType, DocumentStatus, FailureReason
 from src.models.chunk import DocumentChunk
@@ -32,7 +38,7 @@ from src.models.workspace import Workspace
 from src.workers import jobs
 from src.workers.jobs import embed_chunks, extract_text, replace_chunks
 from src.workers.pipeline import EmbeddingError, ParseKilled, PermanentFailure
-from src.workers.queue import EMBEDDING, fail
+from src.workers.queue import EMBEDDING, Claim, fail
 from tests.pdfs import AWKWARD_TO_UNICODE, pdf_showing, pdf_with_text
 
 PARSE_TIMEOUT = 30.0
@@ -116,9 +122,14 @@ async def _chunk_texts(sessions: Sessions, doc: uuid.UUID) -> list[str]:
 
 
 async def _extract(
-    sessions: Sessions, doc: uuid.UUID, timeout: float = PARSE_TIMEOUT
+    sessions: Sessions,
+    doc: uuid.UUID,
+    timeout: float = PARSE_TIMEOUT,
+    max_text_bytes: int = 1 << 20,
 ) -> None:
-    await extract_text(sessions, doc, parse_timeout=timeout)
+    await extract_text(
+        sessions, doc, parse_timeout=timeout, max_text_bytes=max_text_bytes
+    )
 
 
 def _stand_in_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
@@ -165,6 +176,23 @@ async def test_text_is_saved_ready_and_handed_to_embedding_at_once(
     )
 
 
+async def test_a_byte_order_mark_is_not_part_of_the_text(
+    sessions: Sessions, tmp_path: Path
+) -> None:
+    """Editors on Windows save UTF-8 with a BOM. Kept, it would be text: a Markdown
+    file's first heading would no longer start its line, and its section would be
+    lost. Only the leading one is a mark; U+FEFF further in is the file's text."""
+    path = tmp_path / "notes.md"
+    path.write_bytes(b"\xef\xbb\xbf" + "## Install\n\nRun it.\ufeff".encode())
+    doc = await _document(
+        sessions, file_path=str(path), content_type=ContentType.MARKDOWN
+    )
+
+    await _extract(sessions, doc)
+
+    assert (await _row(sessions, doc)).raw_text == "## Install\n\nRun it.\ufeff"
+
+
 async def test_a_pdf_is_parsed_in_the_child_process(
     sessions: Sessions, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -180,6 +208,20 @@ async def test_a_pdf_is_parsed_in_the_child_process(
     doc = await _document(sessions, file_path=str(path), content_type=ContentType.PDF)
     await _extract(sessions, doc)
     assert (await _row(sessions, doc)).raw_text == "from the child"
+
+
+async def test_a_pdf_whose_text_passes_the_cap_fails_permanently_as_too_large(
+    sessions: Sessions, tmp_path: Path
+) -> None:
+    path = tmp_path / "big.pdf"
+    path.write_bytes(pdf_with_text("x" * 100))
+    doc = await _document(sessions, file_path=str(path), content_type=ContentType.PDF)
+
+    with pytest.raises(PermanentFailure) as exc_info:
+        await _extract(sessions, doc, max_text_bytes=99)
+
+    assert exc_info.value.reason == FailureReason.EXTRACTION_TOO_LARGE
+    assert (await _row(sessions, doc))[:3] == (DocumentStatus.PROCESSING, None, None)
 
 
 @pytest.mark.parametrize(
@@ -253,10 +295,16 @@ async def test_a_cancelled_extraction_takes_its_child_with_it(
         ),
         # pypdf raised.
         ("import sys; sys.exit(3)", PermanentFailure, FailureReason.UNREADABLE_FILE),
+        # More text than the cap: the same file always extracts to the same text.
+        (
+            "import sys; sys.exit(4)",
+            PermanentFailure,
+            FailureReason.EXTRACTION_TOO_LARGE,
+        ),
         # Ours (a failed import, say): transient.
         ("import sys; sys.exit(1)", RuntimeError, None),
     ],
-    ids=["oom-kill", "abort", "segfault", "parse-failed", "our-bug"],
+    ids=["oom-kill", "abort", "segfault", "parse-failed", "too-large", "our-bug"],
 )
 async def test_how_the_child_ends_says_whose_fault_it_is(
     sessions: Sessions,
@@ -479,7 +527,9 @@ async def test_a_failure_write_waiting_on_a_swap_rechecks_and_changes_nothing(
 
     async def _losers_failure_write() -> bool:
         async with sessions.begin() as s:
-            return await fail(s, EMBEDDING, doc, FailureReason.EMBEDDING_FAILED)
+            # fail is not fenced by the lease: any claim of the document will do.
+            stale = Claim(doc, 1, lease_ends=datetime.now(UTC))
+            return await fail(s, EMBEDDING, stale, FailureReason.EMBEDDING_FAILED)
 
     async with sessions.begin() as winner:
         assert await replace_chunks(winner, doc, _chunks(doc, "winner"))
@@ -653,6 +703,30 @@ async def test_an_embedding_failure_is_transient_and_writes_nothing(
 
     assert (await _row(sessions, doc)).status == DocumentStatus.READY
     assert await _chunk_texts(sessions, doc) == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Config an operator fixes, the same for every document: Gemini answers
+        # an invalid key with 400 API_KEY_INVALID, no key with 403, a wrong model
+        # with 404. Chunks are bounded (ADR-031), so no 400 is about one document.
+        EmbeddingRejected("400", 400),
+        EmbeddingRejected("401", 401),
+        EmbeddingRejected("403", 403),
+        EmbeddingRejected("404", 404),
+        EmbeddingRateLimited("429", retry_after=3600.0),
+        EmbeddingUnavailable("503"),
+    ],
+    ids=["400", "401", "403", "404", "429", "503"],
+)
+async def test_provider_errors_are_transient(
+    sessions: Sessions, error: Exception
+) -> None:
+    doc = await _document(sessions, status=DocumentStatus.READY, raw_text=TEXT)
+
+    with pytest.raises(EmbeddingError):
+        await embed_chunks(sessions, FakeEmbedder(error=error), doc)
 
 
 async def test_a_document_deleted_during_embedding_gets_no_chunks(

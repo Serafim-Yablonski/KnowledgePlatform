@@ -158,3 +158,38 @@ class TestSearchEndpoint:
 
         assert statuses == [200, 422, 422]
         assert embedded == ["x" * 2000]
+
+    async def test_a_rate_limited_provider_answers_503_with_its_delay(
+        self, async_client: AsyncClient
+    ) -> None:
+        # A daily quota's delay is too long to wait in a request: the caller gets
+        # it as Retry-After instead of a 500.
+        headers, ws_id = await _member_with_workspace(async_client)
+
+        def gemini(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "code": 429,
+                        "status": "RESOURCE_EXHAUSTED",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                "retryDelay": "3600s",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(gemini))
+        app.dependency_overrides[get_http_client] = lambda: client
+        resp = await async_client.post(
+            f"{_WORKSPACES}/{ws_id}/search", json={"query": "q"}, headers=headers
+        )
+        await client.aclose()
+
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "3600"
+        assert "embedding provider" in resp.json()["error"]["message"]

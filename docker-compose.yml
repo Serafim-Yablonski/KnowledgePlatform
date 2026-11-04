@@ -93,6 +93,8 @@ services:
       - PIPELINE_EXTRACT_TIMEOUT
       - PIPELINE_EXTRACT_LEASE
       - PIPELINE_EXTRACT_BACKOFF_BASE
+      # Also the cap on a PDF's extracted text.
+      - MAX_UPLOAD_SIZE_MB
 
   # I/O-bound embedding (the embedding provider's API): the only worker with its key.
   worker-embed:

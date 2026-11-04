@@ -66,6 +66,10 @@ FAIL_EXTRACTION = Transition(
 FAIL_EMBEDDING = Transition(DocumentStatus.FAILED, frozenset({DocumentStatus.READY}))
 # Embedding's claim: READY stays READY while a worker holds the lease (ADR-027).
 START_EMBEDDING = Transition(DocumentStatus.READY, frozenset({DocumentStatus.READY}))
+# A re-index (ADR-030): a document with extracted text is owed embedding again.
+REINDEX = Transition(
+    DocumentStatus.READY, frozenset({DocumentStatus.INDEXED, DocumentStatus.FAILED})
+)
 
 
 class ContentType(StrEnum):
@@ -79,6 +83,13 @@ ALLOWED_CONTENT_TYPES: dict[str, ContentType] = {
     "text/markdown": ContentType.MARKDOWN,
     "text/plain": ContentType.PLAINTEXT,
 }
+
+
+def media_type(content_type: str) -> str:
+    """The media type of a Content-Type value, to look up in ALLOWED_CONTENT_TYPES:
+    its parameters dropped (``; charset=utf-8``), lowercased (RFC 9110 §8.3.1). A
+    declared charset is ignored: the bytes themselves are checked."""
+    return content_type.split(";", 1)[0].strip().lower()
 
 
 # One page of a document listing, the same for REST and MCP. The service trusts it:

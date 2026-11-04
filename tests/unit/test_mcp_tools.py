@@ -995,6 +995,19 @@ async def test_rate_limit_error_tells_the_model_when_to_retry(
     )
 
 
+async def test_unavailable_error_with_a_delay_tells_the_model_when_to_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A rate-limited embedding provider: REST sends Retry-After, the model reads it.
+    exc = ServiceUnavailableError("Search is unavailable", retry_after=30)
+    result = await _call_failing_tool(monkeypatch, exc)
+
+    assert _error_text(result) == (
+        "Error executing tool list_workspaces: "
+        "Search is unavailable — retry in 30 seconds"
+    )
+
+
 async def test_unexpected_error_text_stays_on_the_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

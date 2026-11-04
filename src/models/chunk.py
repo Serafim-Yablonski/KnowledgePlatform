@@ -34,8 +34,6 @@ class DocumentChunk(TimestampMixin, Base):
     )
     chunk_index: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     text: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    # HNSW index defined in Alembic migration (not here) because pgvector HNSW
-    # requires CREATE INDEX ... USING hnsw syntax not expressible via table args.
     embedding: Mapped[list[float]] = mapped_column(
         Vector(EMBEDDING_DIMS), nullable=False
     )

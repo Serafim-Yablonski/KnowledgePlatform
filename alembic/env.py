@@ -22,7 +22,7 @@ target_metadata = Base.metadata
 def _get_url() -> str:
     # Prefer URL set programmatically (e.g. from test fixtures) over settings.
     url = alembic_config.get_main_option("sqlalchemy.url")
-    return url if url else settings.ASYNC_DATABASE_URL
+    return url if url else settings.ASYNC_DATABASE_URL.get_secret_value()
 
 
 def run_migrations_offline() -> None:
@@ -37,7 +37,13 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # Server defaults too, as the drift test compares them: a changed default in a
+    # model then shows up in `make revision`, not only as a failing test.
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_server_default=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

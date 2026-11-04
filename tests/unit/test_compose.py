@@ -2,6 +2,8 @@
 
 import re
 
+from pydantic import SecretStr
+
 from src.core.config import PipelineSettings, Settings
 from src.workers.__main__ import PHASES
 from tests.support.compose import (
@@ -79,7 +81,7 @@ def test_the_extract_worker_gets_no_provider_key() -> None:
     keys = {
         name
         for name, field in Settings.model_fields.items()
-        if name.endswith("_API_KEY") and field.annotation is str
+        if name.endswith("_API_KEY") and field.annotation is SecretStr
     }
     assert keys and not names & keys
 
@@ -102,7 +104,9 @@ def test_the_extract_worker_gets_every_pipeline_setting_it_reads() -> None:
         for entry in service(_workers()["extract"]).get("environment", [])
     }
     reads = {name for name in PipelineSettings.model_fields if "EMBED" not in name}
-    assert reads and reads <= names, reads - names
+    # The upload cap is also the cap on a PDF's extracted text.
+    reads |= {"MAX_UPLOAD_SIZE_MB"}
+    assert reads <= names, reads - names
 
 
 def test_the_extract_worker_reads_the_uploads_the_api_writes() -> None:

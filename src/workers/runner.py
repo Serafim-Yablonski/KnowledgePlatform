@@ -9,7 +9,9 @@ How an attempt ends decides its outcome. The job returns: it wrote its own resul
 It raises PermanentFailure: FAILED with that reason. Anything else is transient: the
 document waits out a backoff, or fails with the phase's reason once the budget is
 used up. An attempt that ends unrecorded (the worker killed, the database gone) is
-the lease's: it runs out and the next claim counts the attempt.
+the lease's: it runs out and the next claim counts the attempt. A claim that finds
+the budget used up this way fails the document as interrupted and records it under
+the upload's trace, which those attempts' spans never reached.
 
 A stop ends claiming, gives running attempts a grace period, then cancels their jobs
 and releases their documents. Outcome and release writes are never cancelled.
@@ -74,6 +76,8 @@ def extract_work(sessions: async_sessionmaker[AsyncSession], cfg: Settings) -> W
             jobs.extract_text,
             sessions,
             parse_timeout=cfg.PIPELINE_EXTRACT_PARSE_TIMEOUT,
+            # No PDF yields more text than the largest text file we accept.
+            max_text_bytes=cfg.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
         ),
         concurrency=cfg.PIPELINE_EXTRACT_CONCURRENCY,
         timeout=cfg.PIPELINE_EXTRACT_TIMEOUT,
@@ -144,7 +148,7 @@ class Worker:
             # An idle worker claims every interval: no trace per empty poll.
             with logfire.suppress_instrumentation():
                 async with self._sessions.begin() as session:
-                    return await queue.claim(
+                    claimed = await queue.claim(
                         session,
                         self._work.phase,
                         lease=self._work.lease,
@@ -155,8 +159,35 @@ class Worker:
                 "claim failed; retrying",
                 phase=self._work.phase.name,
                 error_type=type(exc).__name__,
+                error=_cause(exc),
             )
             return None
+        for row in claimed.interrupted:
+            self._report_interrupted(row)
+        return claimed.claim
+
+    def _report_interrupted(self, row: queue.Interrupted) -> None:
+        """Under the upload's trace: its attempts died unrecorded, their spans with
+        them, so this is the trace's only word on how the upload ended."""
+        phase = self._work.phase.name
+        with (
+            logfire.attach_context(row.trace_context or {}),
+            logfire.span(
+                "{phase} interrupted",
+                _span_name=f"{phase} interrupted",
+                phase=phase,
+                document_id=str(row.document_id),
+                failure_reason=FailureReason.INTERRUPTED.value,
+                attempts=row.attempts,
+            ),
+        ):
+            logger.error(
+                "document status FAILED",
+                document_id=str(row.document_id),
+                phase=phase,
+                failure_reason=FailureReason.INTERRUPTED,
+                attempts=row.attempts,
+            )
 
     async def _wind_down(self) -> None:
         """Running attempts get the grace period; then their jobs are cancelled, and
@@ -191,7 +222,7 @@ class Worker:
                 if not job.cancelled():
                     raise
                 span.set_attribute("outcome", "released")
-                await self._record(document_id, queue.release, self._work.phase)
+                await self._record(claim, queue.release)
                 logger.info("released on stop", document_id=str(document_id))
             except PermanentFailure as exc:
                 span.set_attribute("outcome", "failed")
@@ -232,14 +263,10 @@ class Worker:
             error_type=type(exc).__name__,
             retry_in_s=round(delay.total_seconds(), 1),
         )
-        await self._record(
-            claim.document_id, queue.retry_later, self._work.phase, delay=delay
-        )
+        await self._record(claim, queue.retry_later, delay=delay)
 
     async def _fail(self, claim: Claim, reason: FailureReason, exc: Exception) -> None:
-        moved = await self._record(
-            claim.document_id, queue.fail, self._work.phase, reason=reason
-        )
+        moved = await self._record(claim, queue.fail, reason=reason)
         if moved is None:
             return
         if not moved:
@@ -259,25 +286,29 @@ class Worker:
         )
 
     async def _record(
-        self,
-        document_id: uuid.UUID,
-        write: Callable[..., Awaitable[bool]],
-        phase: Phase,
-        **values: Any,
+        self, claim: Claim, write: Callable[..., Awaitable[bool]], **values: Any
     ) -> bool | None:
         """One outcome write in its own transaction. None: it could not be made, and
         the document waits for its lease."""
         try:
             async with self._sessions.begin() as session:
-                moved: bool = await write(session, phase, document_id, **values)
+                moved: bool = await write(session, self._work.phase, claim, **values)
                 return moved
         except Exception as exc:  # noqa: BLE001 — never lose the worker over one write
             logger.error(
                 "could not record the outcome; the lease will return the document",
-                document_id=str(document_id),
+                document_id=str(claim.document_id),
                 error_type=type(exc).__name__,
+                error=_cause(exc),
             )
             return None
+
+
+def _cause(exc: Exception) -> str:
+    """Why a database call failed, in the driver's words. SQLAlchemy wraps them in
+    generic types (a missing table is a ProgrammingError) and appends the statement
+    and its parameters to its own message; ``orig`` is the driver's exception."""
+    return str(getattr(exc, "orig", None) or exc)
 
 
 async def serve(

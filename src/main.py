@@ -13,7 +13,12 @@ from src.api.health import router as health_router
 from src.api.v1 import router as v1_router
 from src.core.config import get_settings
 from src.core.database import engine
-from src.core.exceptions import AppError, RateLimitError, UnauthorizedError
+from src.core.exceptions import (
+    AppError,
+    RateLimitError,
+    ServiceUnavailableError,
+    UnauthorizedError,
+)
 from src.core.http import close_http_client, init_http_client
 from src.core.logging import setup_logging
 from src.core.observability import instrument_app, setup_observability
@@ -28,7 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     setup_logging(environment=cfg.ENVIRONMENT, log_level=cfg.LOG_LEVEL)
     setup_observability(
-        token=cfg.LOGFIRE_TOKEN or None,
+        token=cfg.LOGFIRE_TOKEN.get_secret_value() or None,
         environment=cfg.ENVIRONMENT,
         service_name=cfg.SERVICE_NAME,
     )
@@ -67,6 +72,8 @@ async def _app_error_handler(request: Request, exc: Exception) -> JSONResponse:
         headers["RateLimit-Limit"] = str(err.limit)
         headers["RateLimit-Remaining"] = "0"
         headers["RateLimit-Reset"] = str(err.retry_after)
+    if isinstance(err, ServiceUnavailableError) and err.retry_after is not None:
+        headers["Retry-After"] = str(err.retry_after)
     if isinstance(err, UnauthorizedError):
         headers["WWW-Authenticate"] = err.www_authenticate
     # Only surface structured field errors on validation responses; strip the

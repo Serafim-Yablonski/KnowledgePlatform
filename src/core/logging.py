@@ -31,7 +31,12 @@ def setup_logging(*, environment: str = "development", log_level: str = "INFO") 
     if environment == "production":
         renderer = structlog.processors.JSONRenderer()
     else:
-        renderer = structlog.dev.ConsoleRenderer(colors=True)
+        # Tracebacks without each frame's local variables: a password, key or token
+        # held in one would be printed with it (rich shows them by default).
+        renderer = structlog.dev.ConsoleRenderer(
+            colors=True,
+            exception_formatter=structlog.dev.RichTracebackFormatter(show_locals=False),
+        )
 
     # structlog-native loggers write directly via PrintLoggerFactory.
     structlog.configure(

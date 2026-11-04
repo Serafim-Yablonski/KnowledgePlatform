@@ -31,6 +31,11 @@ from tests.support.acceptance import (
 from tests.support.fake_gemini import Reply
 
 MAX_ATTEMPTS = int(PIPELINE_ENV["PIPELINE_MAX_ATTEMPTS"])
+EMBED_SLOTS = int(PIPELINE_ENV["PIPELINE_EMBED_CONCURRENCY"])
+EMBED_TIMEOUT = float(PIPELINE_ENV["PIPELINE_EMBED_TIMEOUT"])
+# The worker's HTTP client gives up on a silent response after this (src/workers/
+# __main__.py); a provider that trickles bytes never trips it.
+CLIENT_READ_TIMEOUT = 30.0
 
 
 @cache
@@ -125,11 +130,11 @@ async def test_s3_a_worker_killed_mid_embedding_is_replaced_and_the_upload_index
 async def test_s4_a_database_outage_mid_attempt_costs_an_attempt_not_the_upload(
     pipeline: Pipeline, phase: str
 ) -> None:
-    working = threading.Event()
+    working, retrying = threading.Event(), threading.Event()
     if phase == "extract":
         doc = await _upload_slow_pdf(pipeline)
     else:
-        pipeline.provider.script(Reply(hold=working))
+        pipeline.provider.script(Reply(hold=working), Reply(hold=retrying))
         doc = await _upload_text(pipeline)
     pipeline.workers.start("extract")
     pipeline.workers.start("embed")
@@ -149,6 +154,17 @@ async def test_s4_a_database_outage_mid_attempt_costs_an_attempt_not_the_upload(
 
         await eventually(unrecorded, timeout=30, what="the outcome write to fail")
         await asyncio.sleep(1)
+
+    # The lease returns the document, and the next claim counts the attempt the
+    # outage cut off. Extraction's count is reset when it finishes, so it is read
+    # mid-attempt: the slow PDF parses for seconds, embedding waits on the fake.
+    owed = "PROCESSING" if phase == "extract" else "READY"
+
+    async def reclaimed() -> bool | None:
+        return True if await _row(pipeline, doc) == (owed, 2, False) else None
+
+    await eventually(reclaimed, timeout=30, what="the second attempt's claim")
+    retrying.set()
 
     rows = await pipeline.settle([doc])
     assert rows[doc].status == "INDEXED"
@@ -188,14 +204,24 @@ async def test_s7_a_provider_that_keeps_erring_fails_the_upload(
     assert len(pipeline.provider.requests) == 3 * MAX_ATTEMPTS
 
 
-async def test_s8_a_provider_that_hangs_costs_one_attempt(pipeline: Pipeline) -> None:
-    pipeline.provider.script(Reply(hold=threading.Event()))  # never answers
+async def test_s8_a_provider_that_hangs_costs_attempts_not_the_workers_slots(
+    pipeline: Pipeline,
+) -> None:
+    """A hang on every slot of the worker. Each attempt's timeout ends its own wait
+    and frees its slot; without it the lease would hand the document to the next
+    slot, until all of them hung, and only the client's read timeout would free one
+    (never, for a provider that trickles bytes)."""
+    never = threading.Event()
+    pipeline.provider.script(*[Reply(hold=never)] * EMBED_SLOTS)
     doc = await _upload_text(pipeline)
     pipeline.workers.start("extract")
     pipeline.workers.start("embed")
 
-    rows = await pipeline.settle([doc])
+    # Each hang lasts one attempt timeout; the margin covers the extraction,
+    # backoffs and polls, and stays well below the client's read timeout.
+    bound = EMBED_SLOTS * EMBED_TIMEOUT + 10
+    assert bound < CLIENT_READ_TIMEOUT
+    rows = await pipeline.settle([doc], timeout=bound)
 
-    # The attempt's own timeout ends the wait; the next attempt gets an answer.
-    assert (rows[doc].status, rows[doc].attempts) == ("INDEXED", 2)
-    assert len(pipeline.provider.requests) == 2
+    assert (rows[doc].status, rows[doc].attempts) == ("INDEXED", EMBED_SLOTS + 1)
+    assert len(pipeline.provider.requests) == EMBED_SLOTS + 1

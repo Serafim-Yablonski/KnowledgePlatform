@@ -9,6 +9,7 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+from pypdf import PageObject
 
 from src.workers import pdf_text
 from tests.pdfs import AWKWARD_TO_UNICODE, pdf_showing, pdf_with_text
@@ -23,22 +24,29 @@ def _restore_logging() -> Generator[None]:
     logging.disable(logging.NOTSET)
 
 
-def _run_main(monkeypatch: pytest.MonkeyPatch, data: bytes) -> tuple[int, bytes, str]:
+_NO_CAP = 1 << 40
+
+
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch, data: bytes, max_bytes: int = _NO_CAP
+) -> tuple[int, bytes, str]:
     stdout = io.TextIOWrapper(io.BytesIO())
     stderr = io.StringIO()
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
     monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)
-    code = pdf_text.main()
+    code = pdf_text.main(max_bytes)
     stdout.flush()
     return code, stdout.buffer.getvalue(), stderr.getvalue()  # type: ignore[attr-defined]
 
 
-def _run_child(data: bytes, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+def _run_child(
+    data: bytes, cwd: Path, max_bytes: int = _NO_CAP
+) -> subprocess.CompletedProcess[bytes]:
     # Exactly as extract_text runs it: by path, isolated (-I: no PYTHONPATH, no
-    # working directory or script directory on sys.path).
+    # working directory or script directory on sys.path), the cap as its argument.
     return subprocess.run(
-        [sys.executable, "-I", str(Path(pdf_text.__file__))],
+        [sys.executable, "-I", str(Path(pdf_text.__file__)), str(max_bytes)],
         input=data,
         capture_output=True,
         cwd=cwd,
@@ -59,6 +67,39 @@ def test_the_child_runs_by_path_in_isolation_and_writes_utf8_text(
 
     assert done.returncode == 0, done.stderr
     assert done.stdout.decode("utf-8") == "Hello from the child\nPage two"
+
+
+def test_text_past_the_cap_exits_too_large_with_nothing_written(
+    tmp_path: Path,
+) -> None:
+    # A small compressed PDF can extract to far more text than any upload (R4).
+    pdf = pdf_with_text("x" * 100, "y" * 100)
+    size = len(_run_child(pdf, tmp_path).stdout)
+
+    at_cap = _run_child(pdf, tmp_path, max_bytes=size)
+    past_cap = _run_child(pdf, tmp_path, max_bytes=size - 1)
+
+    assert (at_cap.returncode, len(at_cap.stdout)) == (0, size)
+    assert (past_cap.returncode, past_cap.stdout) == (pdf_text.TOO_LARGE, b"")
+
+
+def test_the_child_stops_parsing_at_the_page_that_passes_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The cap bounds the work, not just the output: later pages are never parsed.
+    parsed: list[str] = []
+    extract = PageObject.extract_text
+
+    def _counting(page: PageObject, *args: object, **kwargs: object) -> str:
+        text = extract(page, *args, **kwargs)  # type: ignore[arg-type]
+        parsed.append(text)
+        return text
+
+    monkeypatch.setattr(PageObject, "extract_text", _counting)
+
+    code, stdout, _ = _run_main(monkeypatch, pdf_with_text("a" * 50, "b", "c"), 10)
+
+    assert (code, stdout, len(parsed)) == (pdf_text.TOO_LARGE, b"", 1)
 
 
 def test_a_damaged_pdf_exits_parse_failed_and_stderr_names_only_the_type(

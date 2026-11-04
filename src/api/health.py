@@ -15,6 +15,8 @@ from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+# The API's one import from the workers (ADR-028): the claim's own definition of
+# "due", so the lag counts exactly what a claim would take.
 from src.workers.queue import EMBEDDING, EXTRACTION, lag_statement
 
 router = APIRouter(tags=["ops"])

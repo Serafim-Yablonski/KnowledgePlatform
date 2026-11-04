@@ -1,147 +1,224 @@
-"""Unit tests for MarkdownChunker and PlainTextChunker."""
+"""Chunking (ADR-031): every chunk fits the token bound with its overlap, chunks are
+the input's own text in order with none of it lost, and markdown sections follow the
+headings outside code fences. Properties are checked on generated documents built
+from what broke the old chunkers: a paragraph longer than a chunk among short ones,
+runs with no break at all, '## ' inside fences, tables and CJK."""
 
 from __future__ import annotations
 
+import pytest
+import tiktoken
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from src.ai.chunking import ChunkingStrategy
 from src.ai.chunking.markdown import MarkdownChunker
 from src.ai.chunking.plaintext import PlainTextChunker
 
+# The bound is counted in cl100k tokens, as the chunkers count it.
+_ENC = tiktoken.get_encoding("cl100k_base")
+
+
+def _tokens(text: str) -> int:
+    return len(_ENC.encode_ordinary(text))
+
+
+# Strings the tokenizer reserves (<|endoftext|>…): in a document they are text.
+_SPECIAL = sorted(_ENC.special_tokens_set)
+
+
+_word = st.text(
+    alphabet=st.characters(categories=("L", "N", "P", "S")), min_size=1, max_size=12
+)
+_blocks = st.one_of(
+    st.text(max_size=200),
+    st.lists(_word, max_size=150).map(" ".join),
+    st.text(alphabet="ABCDEFabcdef0123456789+/=", min_size=100, max_size=2000),
+    st.lists(_word, max_size=40).map(lambda ws: "```\n## " + " ".join(ws) + "\n```"),
+    st.lists(_word, min_size=1, max_size=6).map(
+        lambda ws: "| " + " | ".join(ws) + " |"
+    ),
+    st.text(alphabet=st.characters(min_codepoint=0x4E00, max_codepoint=0x9FFF)),
+    st.sampled_from(["## Setup", "### Install", "# Title", "#### Deep", "```", "~~~"]),
+    st.sampled_from(_SPECIAL),
+)
+documents = st.lists(
+    st.tuples(_blocks, st.sampled_from(["\n", "\n\n", " ", ""])), max_size=12
+).map(lambda parts: "".join(block + sep for block, sep in parts))
+
+# A small bound splits small documents; the production one runs on the same inputs.
+CHUNKERS = [
+    pytest.param(PlainTextChunker(max_tokens=32, overlap_tokens=8), 32, id="text-32"),
+    pytest.param(MarkdownChunker(max_tokens=32, overlap_tokens=8), 32, id="md-32"),
+    pytest.param(PlainTextChunker(), 512, id="text-512"),
+    pytest.param(MarkdownChunker(), 512, id="md-512"),
+]
+
+
+@pytest.mark.parametrize(("chunker", "bound"), CHUNKERS)
+@settings(deadline=None)
+@given(text=documents)
+def test_every_chunk_fits_the_bound_overlap_included(
+    chunker: ChunkingStrategy, bound: int, text: str
+) -> None:
+    for chunk in chunker.chunk(text, {}):
+        assert _tokens(chunk.text) <= bound
+        assert chunk.token_count == _tokens(chunk.text)
+
+
+@pytest.mark.parametrize(("chunker", "bound"), CHUNKERS)
+@settings(deadline=None)
+@given(text=documents)
+def test_chunks_are_the_input_in_order_and_lose_no_text(
+    chunker: PlainTextChunker | MarkdownChunker, bound: int, text: str
+) -> None:
+    spans = chunker.spans(text)
+
+    covered: set[int] = set()
+    for start, chunk in spans:
+        # Never whitespace alone; markdown keeps a chunk's leading indentation.
+        assert chunk.strip()
+        assert text[start : start + len(chunk)] == chunk
+        covered.update(range(start, start + len(chunk)))
+    starts = [start for start, _ in spans]
+    assert starts == sorted(set(starts))
+    lost = [i for i, char in enumerate(text) if not char.isspace() and i not in covered]
+    assert lost == []
+    assert [c.text for c in chunker.chunk(text, {})] == [chunk for _, chunk in spans]
+
+
+@pytest.mark.parametrize("chunker", [PlainTextChunker(), MarkdownChunker()])
+@pytest.mark.parametrize("special", _SPECIAL)
+def test_a_tokenizers_reserved_string_is_ordinary_text(
+    chunker: ChunkingStrategy, special: str
+) -> None:
+    # Notes about LLMs quote them; counting them as specials raised, and the
+    # document failed for good as internal_error.
+    text = f"GPT-2 ends each document with {special} in training data."
+
+    [chunk] = chunker.chunk(text, {})
+
+    assert chunk.text == text
+    assert chunk.token_count == _tokens(text)
+
+
+@pytest.mark.parametrize("chunker", [PlainTextChunker(), MarkdownChunker()])
+def test_whitespace_alone_is_no_chunk(chunker: ChunkingStrategy) -> None:
+    # A scanned PDF extracts to page separators only: no chunk, so FAILED(no_text).
+    assert chunker.chunk("", {}) == []
+    assert chunker.chunk("\n\n\n \t\f", {}) == []
+
+
+@pytest.mark.parametrize(
+    "chunker",
+    [
+        PlainTextChunker(max_tokens=40, overlap_tokens=10),
+        MarkdownChunker(max_tokens=40, overlap_tokens=10),
+    ],
+)
+def test_neighbouring_chunks_repeat_a_little_text(chunker: ChunkingStrategy) -> None:
+    # read_document's description promises it: a seam never cuts a thought in two.
+    text = " ".join(f"Sentence number {i} ends here." for i in range(60))
+    spans = chunker.spans(text)  # type: ignore[attr-defined]
+
+    assert len(spans) > 2
+    for (start, chunk), (next_start, _) in zip(spans, spans[1:], strict=False):
+        assert next_start < start + len(chunk)
+
+
+def test_plaintext_chunks_carry_the_metadata_given() -> None:
+    meta = {"document_id": "d"}
+    chunks = PlainTextChunker(max_tokens=8, overlap_tokens=2).chunk(
+        "Some words. " * 20, meta
+    )
+    assert len(chunks) > 1 and all(c.metadata == meta for c in chunks)
+
+
 # ---------------------------------------------------------------------------
-# MarkdownChunker
+# Markdown sections
 # ---------------------------------------------------------------------------
 
 
-class TestMarkdownChunker:
-    def test_splits_on_h2_and_h3_headers(self) -> None:
-        text = """\
-## Setup
-Some setup text here.
-
-### Prerequisites
-You need Python and Docker installed.
-
-## Usage
-Run the application.
-"""
-        chunks = MarkdownChunker().chunk(text, {})
-        assert len(chunks) >= 3
-        sections = [c.metadata["section"] for c in chunks]
-        assert any("## Setup" in s for s in sections)
-        assert any("### Prerequisites" in s for s in sections)
-        assert any("## Usage" in s for s in sections)
-
-    def test_metadata_contains_section_path(self) -> None:
-        text = """\
-## Setup
-
-### Prerequisites
-Install dependencies.
-"""
-        chunks = MarkdownChunker().chunk(text, {})
-        prereq_chunk = next(
-            c for c in chunks if "Prerequisites" in c.metadata.get("section", "")
-        )
-        assert "## Setup" in prereq_chunk.metadata["section"]
-        assert "### Prerequisites" in prereq_chunk.metadata["section"]
-
-    def test_large_section_splits_by_sentences(self) -> None:
-        # Build a section that exceeds max_tokens=64 (small limit for the test).
-        sentences = [f"This is sentence number {i}." for i in range(30)]
-        text = "## Big Section\n" + " ".join(sentences)
-        # overlap_tokens=0 so chunk size is bounded purely by max_tokens + one sentence.
-        chunks = MarkdownChunker(max_tokens=64, overlap_tokens=0).chunk(text, {})
-        assert len(chunks) > 1
-        # Each chunk body is ≤ max_tokens; one extra sentence may push it slightly over.
-        for c in chunks:
-            assert c.token_count <= 64 + 15
-
-    def test_overlap_carries_tail_sentences(self) -> None:
-        sentences = [f"Sentence {i} ends here." for i in range(20)]
-        text = "## Section\n" + " ".join(sentences)
-        chunks = MarkdownChunker(max_tokens=32, overlap_tokens=15).chunk(text, {})
-        assert len(chunks) >= 2
-        # The start of chunk[1] should contain text from chunk[0]'s tail.
-        tail_words = chunks[0].text.split()[-5:]
-        head_words = chunks[1].text.split()[:10]
-        assert any(w in head_words for w in tail_words)
-
-    def test_empty_text_returns_empty(self) -> None:
-        assert MarkdownChunker().chunk("", {}) == []
-        assert MarkdownChunker().chunk("   ", {}) == []
-
-    def test_text_shorter_than_one_chunk(self) -> None:
-        text = "## Intro\nJust one sentence."
-        chunks = MarkdownChunker().chunk(text, {})
-        assert len(chunks) == 1
-        assert "Just one sentence." in chunks[0].text
-
-    def test_no_headers_treated_as_single_section(self) -> None:
-        text = "Plain paragraph without any headers at all."
-        chunks = MarkdownChunker().chunk(text, {})
-        assert len(chunks) == 1
-        assert chunks[0].metadata["section"] == ""
-
-    def test_token_count_populated(self) -> None:
-        text = "## Section\nHello world."
-        chunks = MarkdownChunker().chunk(text, {})
-        assert all(c.token_count > 0 for c in chunks)
+def _sections(text: str, **kwargs: int) -> list[tuple[str, str]]:
+    return [
+        (c.metadata["section"], c.text)
+        for c in MarkdownChunker(**kwargs).chunk(text, {})
+    ]
 
 
-# ---------------------------------------------------------------------------
-# PlainTextChunker
-# ---------------------------------------------------------------------------
+def test_each_section_is_its_own_chunk_with_its_heading_path() -> None:
+    # Small sections are not merged: a chunk's section is exact, and its heading is
+    # part of its text, so reading the chunks in order reads the document.
+    text = "## Setup\nA.\n\n### Prerequisites\nB.\n\n## Usage\nC.\n\n### Flags\nD.\n"
+
+    assert _sections(text) == [
+        ("## Setup", "## Setup\nA."),
+        ("## Setup > ### Prerequisites", "### Prerequisites\nB."),
+        ("## Usage", "## Usage\nC."),
+        ("## Usage > ### Flags", "### Flags\nD."),
+    ]
 
 
-class TestPlainTextChunker:
-    def test_short_text_is_one_chunk(self) -> None:
-        text = "Short document."
-        chunks = PlainTextChunker().chunk(text, {})
-        assert len(chunks) == 1
-        assert chunks[0].text == "Short document."
+def test_a_heading_with_nothing_under_it_joins_the_next_section() -> None:
+    text = "## Setup\n\n### Prerequisites\nInstall.\n"
 
-    def test_chunk_sizes_within_max_tokens(self) -> None:
-        # Use overlap_tokens=0 so body size is bounded purely by max_tokens.
-        # With overlap > 0, chunks legitimately reach max_tokens + overlap_tokens.
-        words = ["word"] * 600
-        text = " ".join(words)
-        chunks = PlainTextChunker(max_tokens=64, overlap_tokens=0).chunk(text, {})
-        assert len(chunks) > 1
-        for c in chunks:
-            # One extra word may push a chunk past max_tokens at a word boundary.
-            assert c.token_count <= 64 + 5
+    assert _sections(text) == [
+        ("## Setup > ### Prerequisites", "## Setup\n\n### Prerequisites\nInstall.")
+    ]
 
-    def test_paragraph_splits_preferred_over_sentence_splits(self) -> None:
-        paragraphs = [f"Paragraph {i}. It has some words." for i in range(10)]
-        text = "\n\n".join(paragraphs)
-        chunks = PlainTextChunker(max_tokens=30).chunk(text, {})
-        # Each chunk should be at a paragraph boundary, not mid-paragraph.
-        for c in chunks:
-            assert "Paragraph" in c.text
 
-    def test_overlap_present_between_chunks(self) -> None:
-        words = ["unique_word"] + [f"w{i}" for i in range(200)]
-        text = " ".join(words)
-        chunks = PlainTextChunker(max_tokens=40, overlap_tokens=10).chunk(text, {})
-        assert len(chunks) >= 2
-        # Overlap words from chunk[0] tail should appear in chunk[1] head.
-        tail = set(chunks[0].text.split()[-5:])
-        head = set(chunks[1].text.split()[:15])
-        assert tail & head
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_a_heading_inside_a_code_fence_is_code(fence: str) -> None:
+    text = (
+        f"## Deploy\n{fence}bash\n## build the image\ndocker build .\n{fence}\nafter\n"
+    )
 
-    def test_empty_text_returns_empty(self) -> None:
-        assert PlainTextChunker().chunk("", {}) == []
-        assert PlainTextChunker().chunk("\n\n", {}) == []
+    assert _sections(text) == [("## Deploy", text.strip())]
 
-    def test_text_with_no_sentence_boundaries(self) -> None:
-        # A wall of words with no punctuation — falls back to word splitting.
-        text = " ".join([f"longword{i}" for i in range(200)])
-        chunks = PlainTextChunker(max_tokens=32).chunk(text, {})
-        assert len(chunks) > 1
 
-    def test_token_count_populated(self) -> None:
-        chunks = PlainTextChunker().chunk("Hello world.", {})
-        assert all(c.token_count > 0 for c in chunks)
+@pytest.mark.parametrize("inner", ["```", "~~~~", "```` info"])
+def test_a_fence_closes_only_on_its_own_kind_at_least_as_long(inner: str) -> None:
+    text = f"## Deploy\n````\n{inner}\n## still code\n````\nafter\n"
 
-    def test_metadata_passed_through(self) -> None:
-        meta = {"source": "test"}
-        chunks = PlainTextChunker().chunk("Some text.", meta)
-        assert all(c.metadata == meta for c in chunks)
+    assert _sections(text) == [("## Deploy", text.strip())]
+
+
+def test_an_unclosed_fence_runs_to_the_end() -> None:
+    text = "## Deploy\n```\n## not a heading\n"
+
+    assert _sections(text) == [("## Deploy", text.strip())]
+
+
+def test_only_level_two_and_three_headings_start_sections() -> None:
+    text = "# Title\nIntro.\n\n#### Detail\nMore.\n\n### Alone\nX.\n"
+
+    assert _sections(text) == [
+        ("", "# Title\nIntro.\n\n#### Detail\nMore."),
+        ("### Alone", "### Alone\nX."),
+    ]
+
+
+def test_a_long_section_splits_and_keeps_its_path() -> None:
+    body = " ".join(f"Sentence {i} is here." for i in range(80))
+    sections = _sections(f"## A\n### B\n{body}\n", max_tokens=32, overlap_tokens=8)
+
+    assert len(sections) > 2
+    assert {section for section, _ in sections} == {"## A > ### B"}
+
+
+def test_a_code_block_that_fits_is_never_cut() -> None:
+    # Markdown's own boundaries first: plain text splitting would cut this block at
+    # its blank line, as a paragraph break.
+    code = (
+        "```python\ndef build():\n    run('docker build .')\n\n\n"
+        "def push():\n    run('docker push')\n```"
+    )
+    text = (
+        "Build the image first, then push it to the registry used by the cluster."
+        f"\n\n{code}\n\nAfter pushing, deploy with the usual command."
+    )
+
+    chunks = [c for _, c in _sections(text, max_tokens=40, overlap_tokens=0)]
+
+    assert len(chunks) > 1
+    assert any(code in chunk for chunk in chunks)

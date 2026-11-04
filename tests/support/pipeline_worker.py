@@ -54,4 +54,4 @@ async def _work(sessions: async_sessionmaker[AsyncSession], _: AsyncExitStack) -
 
 
 if __name__ == "__main__":
-    asyncio.run(serve(_work, settings.ASYNC_DATABASE_URL))
+    asyncio.run(serve(_work, settings.ASYNC_DATABASE_URL.get_secret_value()))

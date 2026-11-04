@@ -21,6 +21,7 @@ from testcontainers.postgres import PostgresContainer
 
 from src.domain.documents import FINISH_EXTRACTION, DocumentStatus, FailureReason
 from src.models.document import Document
+from src.workers import __main__ as cli
 from src.workers.queue import (
     EMBEDDING,
     EXTRACTION,
@@ -32,6 +33,7 @@ from src.workers.queue import (
     fail,
     hand_off,
     lag_statement,
+    reindex,
     release,
     retry_later,
 )
@@ -129,9 +131,10 @@ async def _claim(
     async with sessions.begin() as s:
         if plan is not None:
             await s.execute(sa.text(f"SET LOCAL {plan}"))
-        return await asyncio.wait_for(
+        claimed = await asyncio.wait_for(
             claim(s, phase, lease=LEASE, max_attempts=BUDGET), NO_WAIT
         )
+        return claimed.claim
 
 
 async def _expire(sessions: async_sessionmaker[AsyncSession], doc: uuid.UUID) -> None:
@@ -197,7 +200,7 @@ async def test_a_claim_skips_a_row_another_claim_holds_instead_of_waiting(
         waited=[timedelta(minutes=2), timedelta(minutes=1)],
     )
     async with sessions.begin() as holder:
-        held = await claim(holder, EXTRACTION, lease=LEASE, max_attempts=BUDGET)
+        held = (await claim(holder, EXTRACTION, lease=LEASE, max_attempts=BUDGET)).claim
         # The holder hasn't committed: its row is locked, and it is the oldest.
         rival = await _claim(sessions)
         third = await _claim(sessions)
@@ -292,10 +295,11 @@ async def test_retry_later_hides_the_document_until_its_delay_passes(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     (doc,) = await _documents(sessions, DocumentStatus.PENDING)
-    await _claim(sessions)
+    claimed = await _claim(sessions)
+    assert claimed is not None
 
     async with sessions.begin() as s:
-        assert await retry_later(s, EXTRACTION, doc, timedelta(minutes=10))
+        assert await retry_later(s, EXTRACTION, claimed, timedelta(minutes=10))
 
     assert tuple(await _row(sessions, doc)) == (
         DocumentStatus.PROCESSING,
@@ -319,10 +323,11 @@ async def test_release_makes_the_document_claimable_at_once_and_refunds_the_atte
     owed: DocumentStatus,
 ) -> None:
     (doc,) = await _documents(sessions, owed)
-    await _claim(sessions, phase)
+    held = await _claim(sessions, phase)
+    assert held is not None
 
     async with sessions.begin() as s:
-        assert await release(s, phase, doc)
+        assert await release(s, phase, held)
 
     # The stop was ours, not the document's.
     claimed = await _claim(sessions, phase)
@@ -333,10 +338,11 @@ async def test_fail_records_the_reason(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     (doc,) = await _documents(sessions, DocumentStatus.READY)
-    await _claim(sessions, EMBEDDING)
+    claimed = await _claim(sessions, EMBEDDING)
+    assert claimed is not None
 
     async with sessions.begin() as s:
-        assert await fail(s, EMBEDDING, doc, FailureReason.EMBEDDING_FAILED)
+        assert await fail(s, EMBEDDING, claimed, FailureReason.EMBEDDING_FAILED)
 
     assert tuple(await _row(sessions, doc))[:2] == (
         DocumentStatus.FAILED,
@@ -360,15 +366,108 @@ async def test_outcome_writes_leave_a_document_that_moved_on_alone(
     moved_to: DocumentStatus,
 ) -> None:
     """A worker that outlived its lease writes after a rival finished: no effect."""
-    (doc,) = await _documents(sessions, moved_to)
+    owed = {EXTRACTION: DocumentStatus.PENDING, EMBEDDING: DocumentStatus.READY}
+    (doc,) = await _documents(sessions, owed[phase])
+    late = await _claim(sessions, phase)
+    assert late is not None
+    # The rival's outcome; it leaves the lease deadline as it was, so only the
+    # status tells the late worker it lost.
+    async with sessions.begin() as s:
+        await s.execute(
+            sa.update(Document).where(Document.id == doc).values(status=moved_to)
+        )
     before = tuple(await _row(sessions, doc))
 
     async with sessions.begin() as s:
-        assert not await retry_later(s, phase, doc, timedelta(minutes=10))
-        assert not await release(s, phase, doc)
-        assert not await fail(s, phase, doc, FailureReason.INTERNAL_ERROR)
+        assert not await retry_later(s, phase, late, timedelta(minutes=10))
+        assert not await release(s, phase, late)
+        assert not await fail(s, phase, late, FailureReason.INTERNAL_ERROR)
 
     assert tuple(await _row(sessions, doc)) == before
+
+
+@pytest.mark.parametrize(
+    ("phase", "owed"),
+    [(EXTRACTION, DocumentStatus.PENDING), (EMBEDDING, DocumentStatus.READY)],
+)
+@pytest.mark.parametrize("write", ["retry_later", "release"])
+async def test_a_lost_lease_is_not_moved_by_its_late_worker(
+    sessions: async_sessionmaker[AsyncSession],
+    phase: Phase,
+    owed: DocumentStatus,
+    write: str,
+) -> None:
+    """The lease writes are fenced by the claim's lease deadline: a worker whose
+    lease ran out and was claimed again neither frees nor shortens the new holder's
+    lease, nor refunds its attempt. The status alone can't tell them apart: both
+    runs see the same one."""
+    (doc,) = await _documents(sessions, owed)
+    late = await _claim(sessions, phase)
+    await _expire(sessions, doc)
+    live = await _claim(sessions, phase)
+    assert late is not None and live is not None
+    before = await _snapshot(sessions, doc)
+
+    async with sessions.begin() as s:
+        if write == "retry_later":
+            moved = await retry_later(s, phase, late, timedelta())
+        else:
+            moved = await release(s, phase, late)
+
+    assert not moved
+    assert await _snapshot(sessions, doc) == before
+    assert await _claim(sessions, phase) is None
+
+
+async def test_a_late_workers_permanent_failure_still_fails_the_document(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """``fail`` is not fenced: a permanent failure is the document's, whichever run
+    finds it; the live run's own outcome then finds FAILED and writes nothing."""
+    (doc,) = await _documents(sessions, DocumentStatus.PENDING)
+    late = await _claim(sessions)
+    await _expire(sessions, doc)
+    await _claim(sessions)
+    assert late is not None
+
+    async with sessions.begin() as s:
+        assert await fail(s, EXTRACTION, late, FailureReason.UNREADABLE_FILE)
+
+    assert tuple(await _row(sessions, doc))[:2] == (
+        DocumentStatus.FAILED,
+        FailureReason.UNREADABLE_FILE,
+    )
+
+
+async def test_a_lease_fenced_across_a_reindex_stays_the_new_holders(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A re-index resets ``attempts``: a run stalled from before it holds the same
+    attempt number as the claim after it. The lease deadline still tells them
+    apart."""
+    (doc,) = await _documents(sessions, DocumentStatus.READY)
+    async with sessions.begin() as s:
+        await s.execute(
+            sa.update(Document).where(Document.id == doc).values(raw_text="text")
+        )
+    late = await _claim(sessions, EMBEDDING)
+    await _expire(sessions, doc)
+    await _claim(sessions, EMBEDDING)
+    async with sessions.begin() as s:
+        await s.execute(
+            sa.update(Document)
+            .where(Document.id == doc)
+            .values(status=DocumentStatus.INDEXED)
+        )
+        await reindex(s, None)
+    live = await _claim(sessions, EMBEDDING)
+    assert late is not None and live is not None
+    assert late.attempt == live.attempt
+
+    async with sessions.begin() as s:
+        assert not await release(s, EMBEDDING, late)
+
+    assert await _claim(sessions, EMBEDDING) is None
 
 
 async def test_the_hand_off_starts_embedding_at_once_with_a_fresh_budget(
@@ -386,6 +485,99 @@ async def test_the_hand_off_starts_embedding_at_once_with_a_fresh_budget(
 
     claimed = await _claim(sessions, EMBEDDING)
     assert claimed is not None and (claimed.document_id, claimed.attempt) == (doc, 1)
+
+
+async def _snapshot(
+    sessions: async_sessionmaker[AsyncSession], doc: uuid.UUID
+) -> sa.Row[tuple[object, ...]]:
+    async with sessions() as s:
+        return (
+            await s.execute(
+                sa.select(
+                    Document.status,
+                    Document.failure_reason,
+                    Document.attempts,
+                    Document.available_at,
+                    Document.trace_context,
+                ).where(Document.id == doc)
+            )
+        ).one()
+
+
+async def test_a_reindex_owes_embedding_again_to_every_document_with_text(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """ADR-030: INDEXED, and FAILED after extraction, become READY, claimable by
+    embedding at once with a fresh budget, under the re-index's trace. Documents
+    already owed work keep their place, and a claim holding one keeps its lease; a
+    FAILED one without text has nothing to embed."""
+    indexed, failed_embedding, failed_extraction, pending, held = await _documents(
+        sessions,
+        DocumentStatus.INDEXED,
+        DocumentStatus.FAILED,
+        DocumentStatus.FAILED,
+        DocumentStatus.PENDING,
+        DocumentStatus.READY,
+    )
+    async with sessions.begin() as s:
+        await s.execute(
+            sa.update(Document)
+            .where(Document.id.in_([indexed, failed_embedding, held]))
+            .values(raw_text="text", attempts=3)
+        )
+        # As embedding leaves them: its outcome writes keep the claim's lease deadline.
+        await s.execute(
+            sa.update(Document)
+            .where(Document.id.in_([indexed, failed_embedding]))
+            .values(available_at=sa.func.now() + LEASE)
+        )
+        for doc, reason in [
+            (failed_embedding, FailureReason.EMBEDDING_FAILED),
+            (failed_extraction, FailureReason.UNREADABLE_FILE),
+        ]:
+            await s.execute(
+                sa.update(Document)
+                .where(Document.id == doc)
+                .values(failure_reason=reason)
+            )
+    assert (await _claim(sessions, EMBEDDING)).document_id == held  # type: ignore[union-attr]
+    untouched = [failed_extraction, pending, held]
+    before = [await _snapshot(sessions, doc) for doc in untouched]
+    carrier = {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+
+    async with sessions.begin() as s:
+        owed = await reindex(s, carrier)
+
+    assert owed == 2
+    assert [await _row(sessions, doc) for doc in (indexed, failed_embedding)] == [
+        (DocumentStatus.READY, None, 0, False)
+    ] * 2
+    assert [await _snapshot(sessions, doc) for doc in untouched] == before
+    claims = [await _claim(sessions, EMBEDDING), await _claim(sessions, EMBEDDING)]
+    assert {
+        (c.document_id, c.attempt, c.trace_context["traceparent"]) for c in claims if c
+    } == {
+        (indexed, 1, carrier["traceparent"]),
+        (failed_embedding, 1, carrier["traceparent"]),
+    }
+
+
+async def test_the_reindex_command_owes_every_document_under_one_trace(
+    sessions: async_sessionmaker[AsyncSession], queue_db: str
+) -> None:
+    """``python -m src.workers reindex``: one span for the command, and every
+    re-embedding continues it."""
+    docs = await _documents(sessions, DocumentStatus.INDEXED, DocumentStatus.INDEXED)
+    async with sessions.begin() as s:
+        await s.execute(
+            sa.update(Document).where(Document.id.in_(docs)).values(raw_text="t")
+        )
+
+    assert await cli.reindex_all(queue_db) == 2
+
+    contexts = [(await _snapshot(sessions, doc)).trace_context for doc in docs]
+    assert contexts[0] is not None and "traceparent" in contexts[0]
+    assert contexts[1] == contexts[0]
 
 
 @pytest.mark.parametrize("attempt", [1, 2, 3, 4, 5, 10])

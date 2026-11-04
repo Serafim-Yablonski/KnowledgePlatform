@@ -83,5 +83,17 @@ class RateLimitError(AppError):
 
 
 class ServiceUnavailableError(AppError):
+    """``retry_after``: seconds until a retry may succeed, when a dependency said so."""
+
     status_code = 503
     detail = "Service temporarily unavailable"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        *,
+        retry_after: int | None = None,
+        errors: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(detail, errors=errors)
+        self.retry_after = retry_after

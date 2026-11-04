@@ -8,11 +8,14 @@ from collections.abc import Generator
 
 import pytest
 import sqlalchemy as sa
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from testcontainers.postgres import PostgresContainer
 
 from alembic import command
 from src.core.config import settings
-from tests.support.database import alembic_config, scratch_database
+from src.models import Base
+from tests.support.database import alembic_config, migrate, scratch_database
 
 _BEFORE_ORIGINAL_FILENAME = "b3c4d5e6f7a8"
 _ORIGINAL_FILENAME = "c4d5e6f7a8b9"
@@ -351,3 +354,18 @@ def test_work_queue_columns_make_owed_rows_claimable_at_once(scratch_db: str) ->
     assert {"attempts", "available_at"}.isdisjoint(columns)
     assert "ix_documents_owed_available_at" not in indexes
     engine.dispose()
+
+
+def test_migrations_build_the_schema_the_models_declare(scratch_db: str) -> None:
+    # What `make revision` would autogenerate from a fully migrated database, server
+    # defaults included: anything here is drift a later revision would pick up unasked.
+    # Like autogenerate, it doesn't see an index's WITH options (m, ef_construction).
+    migrate(scratch_db)
+    engine = sa.create_engine(scratch_db)
+    with engine.connect() as conn:
+        context = MigrationContext.configure(
+            conn, opts={"compare_type": True, "compare_server_default": True}
+        )
+        diff = compare_metadata(context, Base.metadata)
+    engine.dispose()
+    assert diff == []

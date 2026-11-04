@@ -21,7 +21,7 @@ _async_client: aioredis.Redis | None = None
 async def init_redis() -> aioredis.Redis:
     global _async_pool, _async_client
     _async_pool = aioredis.ConnectionPool.from_url(
-        settings.REDIS_URL,
+        settings.REDIS_URL.get_secret_value(),
         decode_responses=True,
         max_connections=20,
     )

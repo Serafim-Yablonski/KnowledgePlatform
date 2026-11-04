@@ -15,7 +15,7 @@ from pydantic import Field
 
 from src.composition import open_services
 from src.core.config import settings
-from src.core.exceptions import AppError, RateLimitError
+from src.core.exceptions import AppError, RateLimitError, ServiceUnavailableError
 from src.core.rate_limit import SlidingWindowRateLimiter
 from src.core.redis import get_async_redis_client
 from src.domain.documents import DEFAULT_PAGE_SIZE, DocumentPageSize
@@ -277,12 +277,13 @@ def _app_errors_as_tool_errors(
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return await fn(*args, **kwargs)
-        except RateLimitError as exc:
-            # REST sends the wait in Retry-After; the model has only this text.
-            raise ToolError(
-                f"{exc.detail} — retry in {exc.retry_after} seconds"
-            ) from exc
         except AppError as exc:
+            # REST sends the wait in Retry-After; the model has only this text.
+            retry_after = (
+                exc.retry_after
+                if isinstance(exc, RateLimitError | ServiceUnavailableError)
+                else None
+            )
             if exc.status_code >= 500:
                 logger.error(
                     "tool error",
@@ -290,6 +291,10 @@ def _app_errors_as_tool_errors(
                     error_type=type(exc).__name__,
                     status_code=exc.status_code,
                 )
+            if retry_after is not None:
+                raise ToolError(
+                    f"{exc.detail} — retry in {retry_after} seconds"
+                ) from exc
             raise ToolError(exc.detail) from exc
 
     return wrapper

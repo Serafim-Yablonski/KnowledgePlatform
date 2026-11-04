@@ -367,6 +367,8 @@ async def test_a_failure_that_cannot_be_recorded_is_logged_and_left_for_the_leas
         "event": "could not record the outcome; the lease will return the document",
         "document_id": str(doc),
         "error_type": "OperationalError",
+        # The driver's exception, not SQLAlchemy's text with the statement.
+        "error": "lost",
         "log_level": "error",
     }.items() <= next(
         log for log in logs if log["event"].startswith("could not record")
@@ -396,6 +398,35 @@ async def test_a_claim_that_fails_is_retried_and_the_worker_keeps_going(
             await _until_status(sessions, doc, DocumentStatus.READY)
 
     assert [log["event"] for log in logs].count("claim failed; retrying") == 2
+
+
+async def test_a_failed_claim_logs_the_databases_reason_not_the_statement(
+    runner_db: str,
+) -> None:
+    """A worker started before the migrations: every poll fails with SQLAlchemy's
+    generic ProgrammingError, and only the driver's message says why. SQLAlchemy's
+    own text appends the statement and its parameters; the log leaves them out."""
+    unmigrated = create_async_engine(
+        runner_db,
+        poolclass=NullPool,
+        connect_args={"server_settings": {"search_path": "nowhere"}},
+    )
+    sessions = async_sessionmaker(unmigrated, expire_on_commit=False)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            async with _running(sessions, _extract_work(sessions)):
+
+                async def failed() -> bool:
+                    return any(e["event"] == "claim failed; retrying" for e in logs)
+
+                await _until(failed)
+    finally:
+        await unmigrated.dispose()
+
+    first = next(e for e in logs if e["event"] == "claim failed; retrying")
+    assert first["error_type"] == "ProgrammingError"
+    assert 'relation "documents" does not exist' in first["error"]
+    assert "UPDATE" not in first["error"]
 
 
 async def test_a_losing_runs_failure_never_overwrites_a_winners_indexed(
@@ -534,6 +565,34 @@ async def test_a_worker_runs_as_many_attempts_at_once_as_it_has_slots(
             return len(started) == 3
 
         await _until(all_started)
+
+
+async def test_an_idle_worker_claims_once_per_poll_whatever_its_slots(
+    sessions: Sessions,
+) -> None:
+    """One claimer fills every slot: an idle worker's claims don't grow with them.
+    The jittered delay is at least half the interval, so a window allows at most
+    window / (interval / 2) claims plus the first; a claim per slot would be
+    ``slots`` times that."""
+
+    class CountedTransactions:
+        def __init__(self) -> None:
+            self.opened = 0
+
+        def begin(self) -> Any:
+            self.opened += 1
+            return sessions.begin()
+
+    # Each claim here opens a connection (~25 ms): the poll must dwarf it.
+    poll, window, slots = 0.2, 1.0, 8
+    transactions = CountedTransactions()
+
+    async with _running(
+        transactions, _extract_work(sessions, concurrency=slots, poll_interval=poll)
+    ):
+        await asyncio.sleep(window)
+
+    assert 1 <= transactions.opened <= window / (poll / 2) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -708,3 +767,47 @@ async def test_an_attempt_without_a_stored_context_starts_its_own_trace(
         await _until(finished)
 
     assert _named(spans, "extract attempt").parent is None
+
+
+async def test_a_failure_as_interrupted_ends_the_uploads_trace(
+    sessions: Sessions, spans: InMemorySpanExporter
+) -> None:
+    """A crash loop's attempts died unrecorded, and their spans with them; the claim
+    that fails the document records it under the upload's trace, so the trace says
+    how the upload ended."""
+    with logfire.span("upload") as upload:
+        carrier = dict(logfire.get_context())
+    doc = await _document(sessions, DocumentStatus.PROCESSING, trace_context=carrier)
+    async with sessions.begin() as s:
+        await s.execute(
+            sa.update(Document)
+            .where(Document.id == doc)
+            .values(attempts=settings.PIPELINE_MAX_ATTEMPTS)
+        )
+    job = Counting(_hang)
+
+    with structlog.testing.capture_logs() as logs:
+        async with _running(sessions, _extract_work(sessions, job=job)):
+
+            async def recorded() -> bool:
+                names = {s.name for s in spans.get_finished_spans()}
+                return "extract interrupted" in names
+
+            await _until(recorded)
+
+    interrupted = _named(spans, "extract interrupted")
+    uploaded = upload.get_span_context()
+    assert interrupted.context is not None and interrupted.parent is not None
+    assert interrupted.context.trace_id == uploaded.trace_id
+    assert interrupted.parent.span_id == uploaded.span_id
+    assert {
+        k: (interrupted.attributes or {})[k]
+        for k in ("document_id", "failure_reason", "attempts")
+    } == {
+        "document_id": str(doc),
+        "failure_reason": "interrupted",
+        "attempts": settings.PIPELINE_MAX_ATTEMPTS,
+    }
+    assert job.runs == 0
+    failed = [e for e in logs if e["event"] == "document status FAILED"]
+    assert [e["document_id"] for e in failed] == [str(doc)]

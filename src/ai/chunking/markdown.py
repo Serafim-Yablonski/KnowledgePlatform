@@ -1,146 +1,99 @@
 import re
+from dataclasses import dataclass
 from typing import Any
 
-import tiktoken
+from semantic_text_splitter import MarkdownSplitter
 
-from src.ai.chunking import ChunkData
+from src.ai.chunking import TIKTOKEN_MODEL, ChunkData, count_tokens
 
-# cl100k_base is OpenAI's tokenizer, used here as a provider-agnostic approximation.
-# The exact count doesn't need to match the embedding model's tokenizer — what matters
-# is consistent, reproducible chunk size control across all document types.
-_ENC = tiktoken.get_encoding("cl100k_base")
-
-_HEADER_RE = re.compile(r"^(#{2,3})\s+(.+)$", re.MULTILINE)
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
-
-
-def _count_tokens(text: str) -> int:
-    return len(_ENC.encode(text))
+# CommonMark ATX headings of level 2 and 3, and code fences: a backtick fence's info
+# string has no backtick, and a fence closes on a line of the same character, at
+# least as long, with nothing after it.
+_HEADING = re.compile(r" {0,3}(#{2,3})[ \t]+(\S.*?)[ \t]*")
+_FENCE_OPEN = re.compile(r" {0,3}(?:(`{3,})[^`]*|(~{3,}).*)")
+_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
 
 
-def _split_sentences(text: str) -> list[str]:
-    parts = _SENTENCE_END_RE.split(text.strip())
-    return [p for p in parts if p.strip()]
+@dataclass(frozen=True)
+class _Section:
+    start: int
+    end: int
+    path: str  # "## A > ### B"; "" before the first heading
 
 
-def _overlap_prefix(sentences: list[str], overlap_tokens: int) -> str:
-    """Return the tail sentences of a chunk that fit within overlap_tokens."""
-    prefix_sentences: list[str] = []
-    tokens = 0
-    for sentence in reversed(sentences):
-        t = _count_tokens(sentence)
-        if tokens + t > overlap_tokens:
-            break
-        prefix_sentences.insert(0, sentence)
-        tokens += t
-    return " ".join(prefix_sentences)
+def _headings(text: str) -> list[tuple[int, int, str, int]]:
+    """(line start, level, heading, line end) of each heading outside code fences."""
+    found: list[tuple[int, int, str, int]] = []
+    fence: str | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        if fence is not None:
+            close = _FENCE_CLOSE.fullmatch(bare)
+            if close and close[1][0] == fence[0] and len(close[1]) >= len(fence):
+                fence = None
+        elif opening := _FENCE_OPEN.fullmatch(bare):
+            fence = opening[1] or opening[2]
+        elif heading := _HEADING.fullmatch(bare):
+            found.append((offset, len(heading[1]), heading[2], offset + len(line)))
+        offset += len(line)
+    return found
 
 
-def _split_section(
-    text: str,
-    section_header: str,
-    max_tokens: int,
-    overlap_tokens: int,
-) -> list[ChunkData]:
-    """Split a single markdown section by sentence boundaries if it exceeds max_tokens."""  # noqa: E501
-    if _count_tokens(text) <= max_tokens:
-        return [
-            ChunkData(
-                text=text.strip(),
-                metadata={"section": section_header},
-                token_count=_count_tokens(text.strip()),
-            )
-        ]
-
-    sentences = _split_sentences(text)
-    chunks: list[ChunkData] = []
-    current_sentences: list[str] = []
-    current_tokens = 0
-    prev_overlap = ""
-
-    for sentence in sentences:
-        st = _count_tokens(sentence)
-        if current_tokens + st > max_tokens and current_sentences:
-            body = " ".join(current_sentences)
-            full_text = (prev_overlap + " " + body).strip() if prev_overlap else body
-            chunks.append(
-                ChunkData(
-                    text=full_text,
-                    metadata={"section": section_header},
-                    token_count=_count_tokens(full_text),
-                )
-            )
-            prev_overlap = _overlap_prefix(current_sentences, overlap_tokens)
-            current_sentences = [sentence]
-            current_tokens = st
+def _sections(text: str) -> list[_Section]:
+    """The text between headings, each heading with what follows it. A heading with
+    nothing under it joins the next section, which keeps the deeper path."""
+    headings = _headings(text)
+    sections: list[_Section] = []
+    first = headings[0][0] if headings else len(text)
+    if text[:first].strip():
+        sections.append(_Section(0, first, ""))
+    h2 = ""
+    pending: int | None = None
+    for i, (start, level, title, line_end) in enumerate(headings):
+        end = headings[i + 1][0] if i + 1 < len(headings) else len(text)
+        if level == 2:
+            h2 = path = f"## {title}"
         else:
-            current_sentences.append(sentence)
-            current_tokens += st
-
-    if current_sentences:
-        body = " ".join(current_sentences)
-        full_text = (prev_overlap + " " + body).strip() if prev_overlap else body
-        chunks.append(
-            ChunkData(
-                text=full_text,
-                metadata={"section": section_header},
-                token_count=_count_tokens(full_text),
-            )
-        )
-
-    return chunks
+            path = f"{h2} > ### {title}" if h2 else f"### {title}"
+        if not text[line_end:end].strip() and i + 1 < len(headings):
+            pending = start if pending is None else pending
+            continue
+        sections.append(_Section(start if pending is None else pending, end, path))
+        pending = None
+    return sections
 
 
 class MarkdownChunker:
+    """Markdown (ADR-031): sections start at ``##`` and ``###`` headings outside code
+    fences, and a chunk never spans two, so its section path is exact. Each section,
+    heading included, is split like plain text but at markdown's own boundaries
+    first (blocks, code blocks, list items); every chunk, overlap included, is at
+    most ``max_tokens``."""
+
     def __init__(self, max_tokens: int = 512, overlap_tokens: int = 50) -> None:
-        self._max_tokens = max_tokens
-        self._overlap_tokens = overlap_tokens
+        self._splitter = MarkdownSplitter.from_tiktoken_model(
+            TIKTOKEN_MODEL, max_tokens, overlap_tokens
+        )
+
+    def _chunks(self, text: str) -> list[tuple[int, str, str]]:
+        return [
+            (section.start + offset, chunk, section.path)
+            for section in _sections(text)
+            for offset, chunk in self._splitter.chunk_indices(
+                text[section.start : section.end]
+            )
+        ]
+
+    def spans(self, text: str) -> list[tuple[int, str]]:
+        """Each chunk with its offset in ``text``: the input's own characters, trimmed
+        of surrounding whitespace, in order."""
+        return [(start, chunk) for start, chunk, _ in self._chunks(text)]
 
     def chunk(self, text: str, metadata: dict[str, Any]) -> list[ChunkData]:
-        if not text.strip():
-            return []
-
-        # Split on ## and ### header boundaries, preserving header text.
-        matches = list(_HEADER_RE.finditer(text))
-        if not matches:
-            return _split_section(text, "", self._max_tokens, self._overlap_tokens)
-
-        sections: list[tuple[str, str]] = []  # (header_path, body)
-        h2_current = ""
-        h3_current = ""
-
-        for i, match in enumerate(matches):
-            level = len(match.group(1))
-            header_text = match.group(2).strip()
-            body_start = match.end()
-            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            body = text[body_start:body_end].strip()
-
-            if level == 2:
-                h2_current = f"## {header_text}"
-                h3_current = ""
-                section_path = h2_current
-            else:
-                h3_current = f"### {header_text}"
-                sep = f"{h2_current} > {h3_current}"
-                section_path = sep if h2_current else h3_current
-
-            if body:
-                sections.append((section_path, body))
-
-        # Handle text before the first header
-        first_start = matches[0].start()
-        if first_start > 0:
-            preamble = text[:first_start].strip()
-            if preamble:
-                sections.insert(0, ("", preamble))
-
-        chunks: list[ChunkData] = []
-        for section_path, body in sections:
-            chunks.extend(
-                _split_section(
-                    body, section_path, self._max_tokens, self._overlap_tokens
-                )
+        return [
+            ChunkData(
+                text=chunk, metadata={"section": path}, token_count=count_tokens(chunk)
             )
-
-        return chunks
+            for _, chunk, path in self._chunks(text)
+        ]

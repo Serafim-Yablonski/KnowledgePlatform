@@ -24,6 +24,7 @@ from src.domain.documents import (
     clean_original_filename,
     decode_cursor,
     encode_cursor,
+    media_type,
     title_from_filename,
 )
 from src.domain.roles import Permission, WorkspaceRole, require_permission
@@ -65,12 +66,13 @@ FAILED_DETAILS: dict[FailureReason, str] = {
     ),
     FailureReason.EXTRACTION_TOO_LARGE: (
         f"{FAILED_DETAIL}: extracting its text needed more memory than the server "
-        "allows (the file is probably very large or complex). Retrying won't help; "
-        "the user can upload it in smaller parts"
+        "allows, or gave more text than the upload limit (the file is probably very "
+        "large or complex). Retrying won't help; the user can upload it in smaller "
+        "parts"
     ),
     FailureReason.EMBEDDING_FAILED: (
-        f"{FAILED_DETAIL}: the embedding service kept failing. Retrying won't help; "
-        "the user can upload it again later"
+        f"{FAILED_DETAIL}: the embedding service kept failing or rejected it. "
+        "Retrying won't help; the user can upload it again later"
     ),
     FailureReason.INTERNAL_ERROR: (
         f"{FAILED_DETAIL}: an internal error stopped its processing. Retrying won't "
@@ -183,10 +185,10 @@ class DocumentService:
         max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         if upload.declared_size is not None and upload.declared_size > max_bytes:
             raise _size_error()
-        content_type_str = upload.content_type
+        content_type_str = media_type(upload.content_type)
         if content_type_str not in ALLOWED_CONTENT_TYPES:
             raise InputValidationError(
-                f"Unsupported file type: {content_type_str!r}. "
+                f"Unsupported file type: {upload.content_type!r}. "
                 f"Allowed: {', '.join(ALLOWED_CONTENT_TYPES)}"
             )
         content_type = ALLOWED_CONTENT_TYPES[content_type_str]

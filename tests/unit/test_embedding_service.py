@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -10,7 +11,13 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from src.ai.embeddings import EmbeddingService
+from src.ai.embeddings import (
+    EmbeddingProviderError,
+    EmbeddingRateLimited,
+    EmbeddingRejected,
+    EmbeddingService,
+    EmbeddingUnavailable,
+)
 
 _DIMS = 768
 _MODEL = "gemini-embedding-001"
@@ -109,28 +116,157 @@ async def test_retry_on_429_then_success() -> None:
     assert len(results[0]) == _DIMS
 
 
-@pytest.mark.asyncio
-async def test_4xx_raises_immediately_without_retry() -> None:
-    """A 400 error raises RuntimeError immediately — no retries."""
-    service = _make_service()
-    call_count = 0
+def _rate_limited(retry_delay: str | None = None) -> httpx.Response:
+    """Gemini's 429: a google.rpc.Status whose details may carry a RetryInfo."""
+    details: list[dict[str, Any]] = [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": []}
+    ]
+    if retry_delay is not None:
+        details.append(
+            {
+                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                "retryDelay": retry_delay,
+            }
+        )
+    return httpx.Response(
+        429,
+        json={
+            "error": {
+                "code": 429,
+                "message": "Resource has been exhausted",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": details,
+            }
+        },
+    )
 
-    async def fake_post(url: str, json: Any, **_: Any) -> _MockResponse:  # type: ignore[override]
-        nonlocal call_count
-        call_count += 1
-        return _MockResponse(400, {"error": "bad request"})
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = fake_post
-        mock_client_cls.return_value = mock_client
+async def _embed_with(
+    replies: list[httpx.Response | Exception],
+) -> tuple[list[float], int, list[list[float]] | Exception]:
+    """Embed one text against scripted replies; return the sleeps, the number of
+    calls and the result or the raised error."""
+    calls = 0
 
-        with pytest.raises(RuntimeError, match="400"):
-            await service.embed_texts(["bad"])
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        reply = replies[min(calls, len(replies) - 1)]
+        calls += 1
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
-    assert call_count == 1
+    sleep = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = EmbeddingService(
+            api_key=_API_KEY, model=_MODEL, dimensions=_DIMS, http_client=client
+        )
+        with patch("src.ai.embeddings.asyncio.sleep", sleep):
+            try:
+                outcome: list[list[float]] | Exception = await service.embed_texts(
+                    ["t"]
+                )
+            except EmbeddingProviderError as exc:
+                outcome = exc
+    return [c.args[0] for c in sleep.await_args_list], calls, outcome
+
+
+_OK = httpx.Response(200, json=_gemini_response(["t"]))
+
+
+@pytest.mark.parametrize(
+    ("retry_delay", "slept"), [("7s", 7.0), ("2.5s", 2.5), ("0.2s", 1.0)]
+)
+async def test_a_rate_limit_waits_the_providers_delay_or_our_backoff_if_longer(
+    retry_delay: str, slept: float
+) -> None:
+    # The provider's delay is a hint that can be too short ("1s" while still
+    # limited): the first own backoff (1 s) is the floor.
+    sleeps, calls, outcome = await _embed_with([_rate_limited(retry_delay), _OK])
+
+    assert sleeps == [slept]
+    assert calls == 2
+    assert isinstance(outcome, list)
+
+
+async def test_a_rate_limit_too_long_to_wait_gives_up_at_once_with_the_delay() -> None:
+    # A daily quota asks for hours: neither a search request nor a worker attempt
+    # can wait that out, so the caller gets the delay to act on.
+    sleeps, calls, outcome = await _embed_with([_rate_limited("3600s")])
+
+    assert isinstance(outcome, EmbeddingRateLimited)
+    assert outcome.retry_after == 3600.0
+    assert (sleeps, calls) == ([], 1)
+
+
+async def test_a_lasting_rate_limit_raises_without_sleeping_after_the_last_try() -> (
+    None
+):
+    sleeps, calls, outcome = await _embed_with([_rate_limited()])
+
+    assert isinstance(outcome, EmbeddingRateLimited)
+    assert outcome.retry_after is None
+    assert (sleeps, calls) == ([1.0, 2.0], 3)
+
+
+@pytest.mark.parametrize(
+    "body", [{"error": "rate limited"}, {"error": {"details": [{"retryDelay": 5}]}}, []]
+)
+async def test_a_rate_limit_with_an_unreadable_delay_uses_our_backoff(
+    body: Any,
+) -> None:
+    sleeps, _, outcome = await _embed_with([httpx.Response(429, json=body), _OK])
+
+    assert sleeps == [1.0]
+    assert isinstance(outcome, list)
+
+
+async def test_a_server_error_that_persists_raises_unavailable() -> None:
+    sleeps, calls, outcome = await _embed_with([httpx.Response(503, text="down")])
+
+    assert isinstance(outcome, EmbeddingUnavailable)
+    assert (sleeps, calls) == ([1.0, 1.0], 3)
+
+
+async def test_a_network_error_raises_unavailable() -> None:
+    _, calls, outcome = await _embed_with([httpx.ConnectError("refused")])
+
+    assert isinstance(outcome, EmbeddingUnavailable)
+    assert calls == 1
+
+
+async def test_a_failed_batch_cancels_the_others_and_raises_its_own_error() -> None:
+    # A batch left running would call the provider for an attempt that already
+    # failed, overlapping the next attempt's calls.
+    cancelled = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if len(json.loads(request.content)["requests"]) == 100:
+            return httpx.Response(400, text="no")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = EmbeddingService(
+            api_key=_API_KEY, model=_MODEL, dimensions=_DIMS, http_client=client
+        )
+        with pytest.raises(EmbeddingRejected):
+            await service.embed_texts(["t"] * 150)
+
+        assert cancelled.is_set()
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+async def test_a_client_error_raises_rejected_without_retry(status: int) -> None:
+    sleeps, calls, outcome = await _embed_with([httpx.Response(status, text="no")])
+
+    assert isinstance(outcome, EmbeddingRejected)
+    assert outcome.status_code == status
+    assert (sleeps, calls) == ([], 1)
 
 
 @pytest.mark.asyncio

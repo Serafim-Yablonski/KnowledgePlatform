@@ -47,15 +47,16 @@ class Embedder(Protocol):
     async def embed_texts(self, texts: list[str]) -> list[list[float]]: ...
 
 
-async def _parse_pdf(data: bytes, timeout: float) -> str:
+async def _parse_pdf(data: bytes, timeout: float, max_bytes: int) -> str:
     """The PDF's text, parsed in a child process; its exit says whose fault a failure
     is. The child never outlives the call: a timeout or a cancellation kills it."""
-    from src.workers.pdf_text import PARSE_FAILED
+    from src.workers.pdf_text import PARSE_FAILED, TOO_LARGE
 
     child = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
         str(_PDF_CHILD),
+        str(max_bytes),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -78,6 +79,10 @@ async def _parse_pdf(data: bytes, timeout: float) -> str:
         # Its victim depends on what else is parsing: an attempt, not a verdict.
         logger.warning("PDF parse killed (out of memory?)", exit_code=code)
         raise ParseKilled(f"PDF parser killed by signal {signal.SIGKILL.name}")
+    if code == TOO_LARGE:
+        # The same file extracts to the same text: no retry gets it under the cap.
+        logger.info("PDF text past the cap", max_bytes=max_bytes)
+        raise PermanentFailure(FailureReason.EXTRACTION_TOO_LARGE)
     # PARSE_FAILED: pypdf raised. Another signal: a crash (segfault, abort), which the
     # same bytes repeat. Both are the file's.
     if code == PARSE_FAILED or code < 0:
@@ -93,12 +98,16 @@ async def _parse_pdf(data: bytes, timeout: float) -> str:
     )
 
 
-async def _extract(data: bytes, content_type: ContentType, parse_timeout: float) -> str:
-    """The file's text; failures the file causes are permanent."""
+async def _extract(
+    data: bytes, content_type: ContentType, parse_timeout: float, max_text_bytes: int
+) -> str:
+    """The file's text; failures the file causes are permanent. A text file is its
+    own text, under the cap already: the upload checked its size. A leading BOM is
+    an encoding mark, not text: kept, it would hide a Markdown file's first heading."""
     if content_type == ContentType.PDF:
-        return await _parse_pdf(data, parse_timeout)
+        return await _parse_pdf(data, parse_timeout, max_text_bytes)
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise PermanentFailure(FailureReason.UNREADABLE_FILE) from exc
 
@@ -108,6 +117,7 @@ async def extract_text(
     document_id: uuid.UUID,
     *,
     parse_timeout: float,
+    max_text_bytes: int,
 ) -> None:
     """Extract a claimed document's text and hand it to embedding (READY)."""
     with logfire.span("extract_text", document_id=str(document_id)) as span:
@@ -130,7 +140,7 @@ async def extract_text(
         # An OSError is transient; a document deleted meanwhile is found gone by the
         # next attempt's claim.
         data = await asyncio.to_thread(Path(file_path).read_bytes)
-        raw_text = await _extract(data, content_type, parse_timeout)
+        raw_text = await _extract(data, content_type, parse_timeout, max_text_bytes)
 
         async with sessions.begin() as session:
             saved = (
@@ -247,6 +257,10 @@ async def embed_chunks(
                     document_id=str(document_id),
                     error_type=type(exc).__name__,
                 )
+                # Transient, a 4xx included: with chunks bounded (ADR-031) a 4xx is
+                # config an operator fixes (Gemini answers an invalid key with
+                # 400), the same for every document; failing it at once would
+                # fail the whole queue in seconds.
                 raise EmbeddingError(type(exc).__name__) from exc
             embed_ms = round((time.monotonic() - embed_start) * 1000)
             embed_span.set_attribute("embedding_duration_ms", embed_ms)

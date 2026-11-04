@@ -5,14 +5,15 @@ from __future__ import annotations
 import uuid
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.documents import ContentType, DocumentStatus
+from src.domain.documents import ContentType, DocumentStatus, FailureReason
 from src.models.chunk import EMBEDDING_DIMS, DocumentChunk
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
-from src.repositories.search import SQLAlchemySearchRepository
+from src.repositories.search import SIMILAR_CHUNKS_SQL, SQLAlchemySearchRepository
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.schemas.auth import UserCreate
@@ -244,24 +245,38 @@ async def test_min_score_filters_low_similarity(
     assert len(results) == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (DocumentStatus.PENDING, None),
+        (DocumentStatus.PROCESSING, None),
+        # A re-index's: old chunks stay until the swap, out of search (ADR-030).
+        (DocumentStatus.READY, None),
+        (DocumentStatus.FAILED, FailureReason.EMBEDDING_FAILED),
+    ],
+)
 async def test_non_indexed_documents_excluded(
-    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+    db_session: AsyncSession,
+    test_workspace: Workspace,
+    test_user: User,
+    status: DocumentStatus,
+    reason: FailureReason | None,
 ) -> None:
     """Chunks belonging to non-INDEXED documents must not appear in results."""
-    pending_doc = Document(
+    doc = Document(
         workspace_id=test_workspace.id,
-        title="Pending",
+        title="Not indexed",
         content_type=ContentType.PLAINTEXT,
-        file_path="/tmp/pending.txt",
+        file_path=f"/tmp/{uuid.uuid4()}.txt",
         file_size_bytes=10,
         uploaded_by=test_user.id,
-        status=DocumentStatus.PENDING,
+        status=status,
+        failure_reason=reason,
     )
-    db_session.add(pending_doc)
+    db_session.add(doc)
     await db_session.flush()
 
-    await _create_chunk(db_session, pending_doc.id, _V1, text="should not appear")
+    await _create_chunk(db_session, doc.id, _V1, text="should not appear")
 
     repo = SQLAlchemySearchRepository(db_session)
     results = await repo.search_similar(
@@ -291,3 +306,87 @@ async def test_top_k_limits_results(
     )
 
     assert len(results) == 3
+
+
+async def test_a_workspace_gets_its_true_best_matches_when_others_hold_closer_ones(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # Exact search (ADR-029). A shared approximate index filtered by workspace keeps
+    # only the nearest candidates of all workspaces (HNSW: ef_search, 40 by default)
+    # before the filter drops the other workspace's: with 2,000 closer chunks there,
+    # none of ours would be left. Fewer rows don't show it: a tiny graph is searched
+    # whole.
+    other = await SQLAlchemyWorkspaceRepository(db_session).create(
+        name=f"Other {uuid.uuid4().hex[:4]}",
+        slug=f"other-{uuid.uuid4().hex[:8]}",
+        created_by_id=test_user.id,
+    )
+    other_doc = await _create_indexed_doc(db_session, other.id, test_user.id)
+    # _QUERY_NEAR_V1 plus distinct small offsets: each a distinct point, all closer
+    # to the query than _V1.
+    await db_session.execute(
+        sa.text(
+            f"""
+            INSERT INTO document_chunks
+                (document_id, chunk_index, text, embedding, token_count)
+            SELECT :doc, i, 'other', (
+                SELECT ('[0.9,0.1,' || string_agg(
+                    (((i * 7 + d) % 10) * 0.001)::text, ',') || ']')::vector
+                FROM generate_series(3, {EMBEDDING_DIMS}) AS d
+            ), 1
+            FROM generate_series(0, 1999) AS i
+            """
+        ),
+        {"doc": other_doc.id},
+    )
+    doc = await _create_indexed_doc(db_session, test_workspace.id, test_user.id)
+    ours = [
+        await _create_chunk(db_session, doc.id, embedding, chunk_index=i)
+        for i, embedding in enumerate([_LOW_SIM, _V1, _V2])
+    ]
+    # Statistics as a real database has them: on rows it has never counted, the
+    # planner walks from the one document and no index on the vectors is used.
+    await db_session.execute(sa.text("ANALYZE document_chunks, documents"))
+
+    results = await SQLAlchemySearchRepository(db_session).search_similar(
+        workspace_id=test_workspace.id,
+        embedding=_QUERY_NEAR_V1,
+        top_k=2,
+        min_score=0.0,
+    )
+
+    assert [r.chunk_id for r in results] == [ours[1].id, ours[2].id]
+
+
+def _chunk_scans(plan: dict) -> list[dict]:
+    found = [plan] if plan.get("Relation Name") == "document_chunks" else []
+    for child in plan.get("Plans", []):
+        found += _chunk_scans(child)
+    return found
+
+
+async def test_the_distance_is_computed_only_for_the_workspaces_chunks(
+    db_session: AsyncSession, test_workspace: Workspace
+) -> None:
+    # A search costs the workspace's chunks, not the table's (ADR-029): no node that
+    # reads document_chunks evaluates the distance, so it runs only on rows that
+    # survived the join to the workspace's documents. A score filter beside the
+    # workspace filter is pushed into the chunk scan, which then computes it for
+    # every chunk of every workspace.
+    vector = "[" + ",".join(str(x) for x in _QUERY_NEAR_V1) + "]"
+    explained = await db_session.execute(
+        sa.text("EXPLAIN (VERBOSE, FORMAT JSON) " + SIMILAR_CHUNKS_SQL),
+        {
+            "query_embedding": vector,
+            "workspace_id": test_workspace.id,
+            "status": DocumentStatus.INDEXED.name,
+            "top_k": 5,
+            "min_score": 0.3,
+        },
+    )
+    scans = _chunk_scans(explained.scalar_one()[0]["Plan"])
+
+    assert scans
+    for scan in scans:
+        evaluated = [scan.get("Filter", ""), scan.get("Index Cond", "")]
+        assert not any("<=>" in e for e in evaluated + scan["Output"]), scan

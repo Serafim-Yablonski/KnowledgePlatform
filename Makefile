@@ -1,4 +1,4 @@
-.PHONY: run test test-unit test-int test-compose lint typecheck \
+.PHONY: run test test-unit test-int test-compose lint typecheck reindex \
         migrate revision ci docker-build clean install mcp-config
 
 # ─── Development ──────────────────────────────────────────────────────────────
@@ -40,6 +40,10 @@ typecheck:
 
 migrate:
 	docker compose run --rm app .venv/bin/alembic upgrade head
+
+# After a chunking or embedding-model change, with the new workers running (ADR-030)
+reindex:
+	docker compose run --rm app .venv/bin/python -m src.workers reindex
 
 # Usage: make revision MESSAGE="add user table"
 revision:

@@ -28,6 +28,7 @@ dependencies = [
     "mcp==2.3.0",
     "tiktoken==0.12.0",
     "langgraph-checkpoint-postgres>=3.1.0",
+    "semantic-text-splitter==0.33.1",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +45,7 @@ dev = [
     "import-linter==2.15",
     # Tests read docker-compose.yml to run what compose runs.
     "pyyaml==6.0.3",
+    "hypothesis==6.170.14",
 ]
 
 [build-system]
@@ -144,6 +146,21 @@ forbidden_modules = [
     "src.core.http",
     "src.core.redis",
 ]
+
+[[tool.importlinter.contracts]]
+# ADR-028: /health reports lag with the claim's own predicate; nothing else in the
+# API process reaches into the workers.
+name = "The API process imports from the workers only the queue's lag"
+type = "forbidden"
+source_modules = [
+    "src.api",
+    "src.composition",
+    "src.main",
+    "src.mcp_server",
+    "src.services",
+]
+forbidden_modules = ["src.workers"]
+ignore_imports = ["src.api.health -> src.workers.queue"]
 
 [[tool.importlinter.contracts]]
 name = "Business logic is framework-free"
