@@ -57,14 +57,16 @@ async def _parsing(pipeline: Pipeline) -> None:
     async def running() -> bool | None:
         return True if parse_children() else None
 
-    await eventually(running, timeout=30, what="a PDF parse to start")
+    await eventually(running, timeout=30, what=pipeline.state("a PDF parse to start"))
 
 
 async def _provider_requests(pipeline: Pipeline, count: int) -> None:
     async def received() -> bool | None:
         return True if len(pipeline.provider.requests) >= count else None
 
-    await eventually(received, timeout=30, what=f"{count} provider requests")
+    await eventually(
+        received, timeout=30, what=pipeline.state(f"{count} provider requests")
+    )
 
 
 async def _row(pipeline: Pipeline, doc: uuid.UUID) -> tuple[str, int, bool]:
@@ -152,7 +154,9 @@ async def test_s4_a_database_outage_mid_attempt_costs_an_attempt_not_the_upload(
             log = pipeline.workers.log_text()
             return True if "could not record the outcome" in log else None
 
-        await eventually(unrecorded, timeout=30, what="the outcome write to fail")
+        await eventually(
+            unrecorded, timeout=30, what=pipeline.state("the outcome write to fail")
+        )
         await asyncio.sleep(1)
 
     # The lease returns the document, and the next claim counts the attempt the
@@ -163,7 +167,9 @@ async def test_s4_a_database_outage_mid_attempt_costs_an_attempt_not_the_upload(
     async def reclaimed() -> bool | None:
         return True if await _row(pipeline, doc) == (owed, 2, False) else None
 
-    await eventually(reclaimed, timeout=30, what="the second attempt's claim")
+    await eventually(
+        reclaimed, timeout=30, what=pipeline.state("the second attempt's claim")
+    )
     retrying.set()
 
     rows = await pipeline.settle([doc])

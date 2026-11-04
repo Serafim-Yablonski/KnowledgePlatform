@@ -116,16 +116,19 @@ async def eventually[T](
     check: Callable[[], Awaitable[T | None]],
     *,
     timeout: float,
-    what: str,
+    what: str | Callable[[], str],
     interval: float = 0.05,
 ) -> T:
-    """Poll ``check`` until it returns something other than None."""
+    """Poll ``check`` until it returns something other than None. A callable ``what``
+    is called only at the timeout, so it can describe the state then."""
     deadline = time.monotonic() + timeout
     while True:
         result = await check()
         if result is not None:
             return result
-        assert time.monotonic() < deadline, f"timed out after {timeout:.0f}s: {what}"
+        assert time.monotonic() < deadline, (
+            f"timed out after {timeout:.0f}s: {what() if callable(what) else what}"
+        )
         await asyncio.sleep(interval)
 
 
@@ -241,17 +244,27 @@ class Supervisor:
                         self._spawn(worker)
 
 
-def parse_children() -> list[int]:
-    """Every running PDF parse child."""
-    out = subprocess.run(
-        ["ps", "-A", "-o", "pid=", "-o", "args="],
+def processes() -> str:
+    """Every running process, one ``pid args`` line each, never cut.
+
+    ``-ww``: unlimited width. Linux's ps cuts ``args`` at ``COLUMNS`` even into a
+    pipe, and GNU readline, which pytest imports early, sets COLUMNS=80 in the C
+    environment (not ``os.environ``) that ps inherits: a parse child's path, past
+    column 80 in a CI checkout, would never match.
+    """
+    return subprocess.run(
+        ["ps", "-ww", "-A", "-o", "pid=", "-o", "args="],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
+
+
+def parse_children() -> list[int]:
+    """Every running PDF parse child."""
     return [
         int(line.split(None, 1)[0])
-        for line in out.splitlines()
+        for line in processes().splitlines()
         if str(PDF_CHILD) in line
     ]
 
@@ -417,6 +430,13 @@ class Pipeline:
     def database_outage(self) -> Any:
         return database_outage(self.database)
 
+    def state(self, what: str) -> Callable[[], str]:
+        """``what``, then the processes and the workers' logs at the time of the
+        call: an ``eventually`` timeout's message."""
+        return lambda: (
+            f"{what}\n--- processes ---\n{processes()}{self.workers.log_text()}"
+        )
+
     async def settle(
         self, documents: list[uuid.UUID], timeout: float | None = None
     ) -> dict[uuid.UUID, DocumentRow]:
@@ -434,6 +454,6 @@ class Pipeline:
             timeout=timeout
             if timeout is not None
             else settle_deadline_s(self.workers.popen_kwargs()["env"]),
-            what=f"{len(documents)} documents to settle\n{self.workers.log_text()}",
+            what=self.state(f"{len(documents)} documents to settle"),
         )
         return await assert_settled(self.observer, documents, self.workers)
