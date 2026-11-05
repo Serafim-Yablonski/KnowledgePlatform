@@ -13,12 +13,11 @@ dependencies = [
     "pydantic-ai-slim[anthropic,google,logfire]==1.89.1",
     "langgraph==1.1.10",
     "psycopg[binary]==3.3.4",
-    "celery[redis]==5.6.3",
     "redis==6.4.0",
-    "pypdf==6.10.2",
+    "pypdf==6.21.2",
     "structlog==25.5.0",
     "opentelemetry-api==1.45.1",
-    "logfire[asyncpg,celery,fastapi,httpx]==5.2.0",
+    "logfire[asyncpg,fastapi,httpx]==5.2.0",
     "httpx==0.28.1",
     # The MCP SDK client's HTTP library; tests build its clients directly.
     "httpx2==2.14.0",
@@ -29,6 +28,7 @@ dependencies = [
     "mcp==2.3.0",
     "tiktoken==0.12.0",
     "langgraph-checkpoint-postgres>=3.1.0",
+    "semantic-text-splitter==0.33.1",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +43,9 @@ dev = [
     "ruff==0.15.12",
     "fakeredis>=2.35.1",
     "import-linter==2.15",
+    # Tests read docker-compose.yml to run what compose runs.
+    "pyyaml==6.0.3",
+    "hypothesis==6.170.14",
 ]
 
 [build-system]
@@ -56,7 +59,10 @@ packages = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = ["-v", "--tb=short"]
+# The compose stack (tests/compose) builds the image and runs a whole stack: only
+# `make test-compose` (part of `make ci`) selects it.
+addopts = ["-v", "--tb=short", "-m", "not compose"]
+markers = ["compose: runs against a docker compose stack (make test-compose)"]
 # Logfire warns when a span adopts a caller's trace context; the API must never do
 # that (tests/unit/test_observability.py), so the warning fails the run.
 filterwarnings = ["error:Found propagated trace context:RuntimeWarning"]
@@ -76,9 +82,7 @@ strict = true
 
 [[tool.mypy.overrides]]
 module = [
-    "celery.*",
-    "kombu.*",
-    "billiard.*",
+    "asyncpg.*",
     "pgvector.*",
 ]
 ignore_missing_imports = true
@@ -88,8 +92,14 @@ target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20"]
+# ASYNC2: blocking calls in async functions. A worker's attempt timeouts are asyncio
+# timers, which a blocked event loop never fires (ADR-027).
+select = ["E", "F", "I", "UP", "B", "SIM", "BLE", "T20", "ASYNC2"]
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests read small temp files in their assertions.
+"tests/**" = ["ASYNC240"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
@@ -123,6 +133,34 @@ ignore_imports = [
 ]
 # Adapters reach repositories only through src.composition, which is the point.
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+# CLAUDE.md: each worker process opens its own engine and clients (ADR-027), and
+# loads none of the API's, even through another module.
+name = "Workers never use the API process's pools"
+type = "forbidden"
+source_modules = ["src.workers"]
+forbidden_modules = [
+    "src.composition",
+    "src.core.database",
+    "src.core.http",
+    "src.core.redis",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-028: /health reports lag with the claim's own predicate; nothing else in the
+# API process reaches into the workers.
+name = "The API process imports from the workers only the queue's lag"
+type = "forbidden"
+source_modules = [
+    "src.api",
+    "src.composition",
+    "src.main",
+    "src.mcp_server",
+    "src.services",
+]
+forbidden_modules = ["src.workers"]
+ignore_imports = ["src.api.health -> src.workers.queue"]
 
 [[tool.importlinter.contracts]]
 name = "Business logic is framework-free"

@@ -2,7 +2,6 @@
 
 from fastapi.testclient import TestClient
 
-import src.workers.celery_app
 from src.core.config import settings
 from src.main import app
 
@@ -16,10 +15,6 @@ def test_health_endpoint() -> None:
     data = response.json()
     assert "status" in data
     assert "checks" in data
-
-
-def test_celery_app_exists() -> None:
-    assert src.workers.celery_app.celery_app is not None
 
 
 def test_settings_defaults() -> None:

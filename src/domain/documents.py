@@ -22,6 +22,56 @@ class DocumentStatus(StrEnum):
     FAILED = "failed"
 
 
+class FailureReason(StrEnum):
+    """Why a document is FAILED. The first four are the file's (another upload
+    can fix them); the next two are ours (processing it again can); interrupted is
+    either: attempts that ended unrecorded (a killed worker, a lost host) used up
+    the phase's budget (ADR-027)."""
+
+    NO_TEXT = "no_text"
+    UNREADABLE_FILE = "unreadable_file"
+    EXTRACTION_TIMEOUT = "extraction_timeout"
+    # Stored by name in VARCHAR(20): EXTRACTION_TOO_LARGE is exactly 20 characters.
+    EXTRACTION_TOO_LARGE = "extraction_too_large"
+    EMBEDDING_FAILED = "embedding_failed"
+    INTERNAL_ERROR = "internal_error"
+    INTERRUPTED = "interrupted"
+
+
+@dataclass(frozen=True)
+class Transition:
+    """A pipeline status write and the statuses it may move a document from."""
+
+    to: DocumentStatus
+    allowed_from: frozenset[DocumentStatus]
+
+
+# The workers' status writes. Each applies only while the document is still in one of
+# its from-statuses, so a run never overwrites a status another run moved past, and
+# each task fails only the stage it owns. No run starts on FAILED; a run already under
+# way may still finish INDEXED: the chunk swap (embed_chunks) sets it from any status,
+# under the row lock.
+START_EXTRACTION = Transition(
+    DocumentStatus.PROCESSING,
+    # PROCESSING again: a run that crashed after claiming must be re-runnable.
+    frozenset({DocumentStatus.PENDING, DocumentStatus.PROCESSING}),
+)
+FINISH_EXTRACTION = Transition(
+    DocumentStatus.READY, frozenset({DocumentStatus.PROCESSING})
+)
+FAIL_EXTRACTION = Transition(
+    DocumentStatus.FAILED,
+    frozenset({DocumentStatus.PENDING, DocumentStatus.PROCESSING}),
+)
+FAIL_EMBEDDING = Transition(DocumentStatus.FAILED, frozenset({DocumentStatus.READY}))
+# Embedding's claim: READY stays READY while a worker holds the lease (ADR-027).
+START_EMBEDDING = Transition(DocumentStatus.READY, frozenset({DocumentStatus.READY}))
+# A re-index (ADR-030): a document with extracted text is owed embedding again.
+REINDEX = Transition(
+    DocumentStatus.READY, frozenset({DocumentStatus.INDEXED, DocumentStatus.FAILED})
+)
+
+
 class ContentType(StrEnum):
     PDF = "pdf"
     MARKDOWN = "markdown"
@@ -33,6 +83,13 @@ ALLOWED_CONTENT_TYPES: dict[str, ContentType] = {
     "text/markdown": ContentType.MARKDOWN,
     "text/plain": ContentType.PLAINTEXT,
 }
+
+
+def media_type(content_type: str) -> str:
+    """The media type of a Content-Type value, to look up in ALLOWED_CONTENT_TYPES:
+    its parameters dropped (``; charset=utf-8``), lowercased (RFC 9110 §8.3.1). A
+    declared charset is ignored: the bytes themselves are checked."""
+    return content_type.split(";", 1)[0].strip().lower()
 
 
 # One page of a document listing, the same for REST and MCP. The service trusts it:
@@ -134,7 +191,7 @@ class DocumentUpdateInput:
 
 @dataclass(frozen=True)
 class ChunkText:
-    chunk_index: int  # position in the document's current version, from 0
+    chunk_index: int  # position in the document's chunk set, from 0
     section: str | None  # markdown heading path; None for other formats
     chunk_text: str
 

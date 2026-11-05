@@ -4,6 +4,8 @@ import warnings
 from typing import TYPE_CHECKING
 
 import logfire
+from opentelemetry.propagate import set_global_textmap
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -25,6 +27,10 @@ def configure_logfire(
     switch our recording off, and its trace id would become ours. Logfire's default
     (None) trusts it and warns once.
     """
+    # W3C trace context only, no baggage: Logfire's no-extract wrapper resets just
+    # the parent span, so a caller's baggage would become attributes on our spans
+    # and ride the upload's stored context onto every worker attempt. We set none.
+    set_global_textmap(TraceContextTextMapPropagator())
     logfire.configure(
         token=token,
         # Explicit: given no token, Logfire would fall back to a LOGFIRE_TOKEN
@@ -50,9 +56,8 @@ def instrument_app(app: FastAPI) -> None:
 
 
 def instrument_libraries() -> None:
-    """Trace database queries, Celery tasks and outbound HTTP; both processes."""
+    """Trace database queries and outbound HTTP; the API and every worker."""
     logfire.instrument_asyncpg()
-    logfire.instrument_celery()
     logfire.instrument_httpx()
 
 

@@ -9,6 +9,32 @@ from src.domain.documents import DocumentStatus
 from src.domain.search import SearchResult
 from src.models.chunk import EMBEDDING_DIMS
 
+# Exact search over the workspace's chunks (ADR-029). The score filter sits outside
+# the LIMIT: beside the workspace filter, PostgreSQL pushes it into the chunk scan,
+# which then computes the distance for every chunk of every workspace. Applied to
+# the top k it gives the same rows, as they are ranked by that same score.
+SIMILAR_CHUNKS_SQL = f"""
+    SELECT * FROM (
+        SELECT
+            c.id,
+            c.chunk_index,
+            c.document_id,
+            d.title  AS document_title,
+            c.text,
+            1 - (c.embedding <=> (:query_embedding)::vector({EMBEDDING_DIMS}))
+                     AS similarity_score,
+            NULLIF(c.metadata_ ->> 'section', '') AS section
+        FROM  document_chunks c
+        JOIN  documents d ON c.document_id = d.id
+        WHERE d.workspace_id = :workspace_id
+          AND d.status       = :status
+        ORDER BY similarity_score DESC
+        LIMIT :top_k
+    ) AS nearest
+    WHERE  similarity_score >= :min_score
+    ORDER  BY similarity_score DESC
+"""
+
 
 class SQLAlchemySearchRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -30,36 +56,9 @@ class SQLAlchemySearchRepository:
         # str(float(x)) only produces digits/dots/signs — no injection risk.
         vec_str = "[" + ",".join(str(float(x)) for x in embedding) + "]"
 
-        # CTE computes the cosine similarity score once so PostgreSQL doesn't have
-        # to re-evaluate the vector distance expression in WHERE and ORDER BY.
-        stmt = sa.text(
-            f"""
-            WITH ranked AS (
-                SELECT
-                    c.id,
-                    c.chunk_index,
-                    c.document_id,
-                    d.title  AS document_title,
-                    c.text,
-                    1 - (c.embedding <=> (:query_embedding)::vector({EMBEDDING_DIMS}))
-                             AS similarity_score,
-                    NULLIF(c.metadata_ ->> 'section', '') AS section
-                FROM  document_chunks c
-                JOIN  documents d ON c.document_id = d.id
-                WHERE d.workspace_id = :workspace_id
-                  AND d.status       = :status
-                  AND c.version      = d.version
-            )
-            SELECT * FROM ranked
-            WHERE  similarity_score >= :min_score
-            ORDER  BY similarity_score DESC
-            LIMIT  :top_k
-            """
-        )
-
         rows = (
             await self._session.execute(
-                stmt,
+                sa.text(SIMILAR_CHUNKS_SQL),
                 {
                     "query_embedding": vec_str,
                     "workspace_id": workspace_id,

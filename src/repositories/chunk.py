@@ -13,19 +13,18 @@ _SECTION = sa.func.nullif(DocumentChunk.metadata_["section"].as_string(), "")
 
 
 class SQLAlchemyChunkRepository:
-    """Reads one version of a document's chunks; the caller scopes the document."""
+    """Reads a document's chunks; the caller scopes the document."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def read_page(
-        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+        self, document_id: uuid.UUID, *, start: int, limit: int
     ) -> list[ChunkText]:
         rows = await self._session.execute(
             sa.select(DocumentChunk.chunk_index, _SECTION, DocumentChunk.text)
             .where(
                 DocumentChunk.document_id == document_id,
-                DocumentChunk.version == version,
                 DocumentChunk.chunk_index >= start,
             )
             .order_by(DocumentChunk.chunk_index)
@@ -36,11 +35,8 @@ class SQLAlchemyChunkRepository:
             for index, section, text in rows.all()
         ]
 
-    async def count(self, document_id: uuid.UUID, *, version: int) -> int:
+    async def count(self, document_id: uuid.UUID) -> int:
         total = await self._session.scalar(
-            sa.select(sa.func.count()).where(
-                DocumentChunk.document_id == document_id,
-                DocumentChunk.version == version,
-            )
+            sa.select(sa.func.count()).where(DocumentChunk.document_id == document_id)
         )
         return total or 0

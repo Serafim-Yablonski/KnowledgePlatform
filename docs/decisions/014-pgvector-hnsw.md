@@ -1,5 +1,5 @@
 # 014. pgvector HNSW over IVFFlat for Embedding Search
-Status: Accepted | Date: 2026-05-25
+Status: Superseded by ADR-029 (2026-11-03: no search used the index, and a shared approximate index filtered by workspace loses results; search is exact per workspace) | Was: Accepted | Date: 2026-05-25
 
 ## Context
 The `document_chunks` table stores 768-dimensional embeddings (Gemini `gemini-embedding-001`) and is queried via cosine similarity for every RAG retrieval. pgvector offers two approximate nearest-neighbour index types: HNSW (Hierarchical Navigable Small World) and IVFFlat (Inverted File with Flat quantisation). The index type determines recall accuracy, query latency, and the operational complexity of index maintenance.

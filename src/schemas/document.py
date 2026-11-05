@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.domain.documents import ContentType, DocumentStatus
+from src.domain.documents import ContentType, DocumentStatus, FailureReason
 
 
 class DocumentCreate(BaseModel):
@@ -22,7 +22,9 @@ class DocumentResponse(BaseModel):
     title: str
     content_type: ContentType
     status: DocumentStatus
-    version: int
+    # Why a failed document failed; null otherwise, and for ones that failed before
+    # reasons were recorded.
+    failure_reason: FailureReason | None
     file_size_bytes: int
     original_filename: str | None
     uploaded_by: uuid.UUID

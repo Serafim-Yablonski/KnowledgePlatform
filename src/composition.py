@@ -1,9 +1,11 @@
 """Composition root: the one place that builds repositories and services.
 
-Adapters (REST, MCP), scripts and workers get finished services from here and never
-construct repositories themselves. ``Services`` takes its resources as arguments and
-never opens them, so each caller owns their lifetime: FastAPI per request,
-``open_services()`` per MCP call, a Celery task with its own engine and clients.
+Adapters (REST, MCP) and scripts get finished services from here and never construct
+repositories themselves. ``Services`` takes its resources as arguments and never
+opens them, so each caller owns their lifetime: FastAPI per request,
+``open_services()`` per MCP call. The pipeline workers need none of these: their jobs
+run their own queries on the engine each worker process opens, and the embed worker
+builds its ``EmbeddingService`` with the same ``from_settings`` (ADR-027).
 """
 
 from __future__ import annotations
@@ -64,13 +66,7 @@ class Services:
 
     @cached_property
     def embeddings(self) -> EmbeddingService:
-        cfg = get_settings()
-        return EmbeddingService(
-            api_key=cfg.EMBEDDING_API_KEY or cfg.GOOGLE_API_KEY or "",
-            model=cfg.EMBEDDING_MODEL,
-            dimensions=cfg.EMBEDDING_DIMENSIONS,
-            http_client=self._http,
-        )
+        return EmbeddingService.from_settings(get_settings(), self._http)
 
     @cached_property
     def auth(self) -> AuthService:

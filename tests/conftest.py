@@ -147,7 +147,7 @@ async def async_client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient]:
 def settings_override(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Patch individual Settings fields for a single test.
 
-    Usage: settings_override.setattr(settings, "SECRET_KEY", "test-value")
+    Usage: settings_override.setattr(settings, "MAX_UPLOAD_SIZE_MB", 1)
 
     ``settings`` is the instance ``get_settings()`` caches, so a patch reaches both.
     Never clear that cache here: the next ``get_settings()`` would build a new

@@ -1,4 +1,4 @@
-.PHONY: run test test-unit test-int lint typecheck \
+.PHONY: run test test-unit test-int test-compose lint typecheck reindex \
         migrate revision ci docker-build clean install mcp-config
 
 # ─── Development ──────────────────────────────────────────────────────────────
@@ -22,6 +22,10 @@ test-int:
 	uv run pytest tests/integration -x; \
 	ret=$$?; if [ $$ret -eq 5 ]; then exit 0; fi; exit $$ret
 
+# The shipped stack: the image and its wiring (tests/compose). Needs Docker.
+test-compose:
+	uv run pytest tests/compose -m compose
+
 # ─── Code Quality ─────────────────────────────────────────────────────────────
 
 lint:
@@ -37,6 +41,10 @@ typecheck:
 migrate:
 	docker compose run --rm app .venv/bin/alembic upgrade head
 
+# After a chunking or embedding-model change, with the new workers running (ADR-030)
+reindex:
+	docker compose run --rm app .venv/bin/python -m src.workers reindex
+
 # Usage: make revision MESSAGE="add user table"
 revision:
 	docker compose run --rm app .venv/bin/alembic revision --autogenerate -m "$(MESSAGE)"
@@ -47,6 +55,7 @@ ci:
 	$(MAKE) lint
 	$(MAKE) typecheck
 	$(MAKE) test
+	$(MAKE) test-compose
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
 

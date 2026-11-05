@@ -7,6 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.ai.embeddings import (
+    EmbeddingRateLimited,
+    EmbeddingRejected,
+    EmbeddingUnavailable,
+)
+from src.core.exceptions import ServiceUnavailableError
 from src.domain.search import SearchResult, SearchResults
 from src.services.search import SearchService
 
@@ -95,3 +101,29 @@ class TestSearchService:
             top_k=3,
             min_score=0.5,
         )
+
+    @pytest.mark.parametrize(
+        ("error", "retry_after"),
+        [
+            (EmbeddingRateLimited("429", retry_after=29.2), 30),
+            (EmbeddingRateLimited("429", retry_after=None), None),
+            (EmbeddingUnavailable("503"), None),
+            (EmbeddingRejected("403", 403), None),
+        ],
+        ids=["429-with-delay", "429", "5xx", "4xx"],
+    )
+    async def test_a_provider_failure_is_a_503_not_a_bug(
+        self, error: Exception, retry_after: int | None
+    ) -> None:
+        # Unmapped, it was a 500 on REST and an opaque error to an MCP client's
+        # model, which then can't tell "retry later" from a bug.
+        service, emb, repo = _make_service()
+        emb.embed_query.side_effect = error
+
+        with pytest.raises(ServiceUnavailableError) as exc_info:
+            await service.search(workspace_id=uuid.uuid4(), query="q")
+
+        assert exc_info.value.retry_after == retry_after
+        assert "embedding provider" in exc_info.value.detail
+        assert str(error) not in exc_info.value.detail
+        repo.search_similar.assert_not_awaited()

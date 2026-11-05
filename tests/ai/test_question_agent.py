@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,8 +13,9 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.test import TestModel
 
-from src.ai.agents.question import WorkspaceDeps, agent
+from src.ai.agents.question import WorkspaceDeps, agent, get_document_details
 from src.domain.ai import Answer, SourceReference
+from src.domain.documents import ContentType
 from src.domain.search import SearchResult, SearchResults
 
 _NOT_FOUND = "I could not find information about this in the workspace documents."
@@ -246,3 +250,24 @@ class TestQuestionAgent:
         assert len(result.output.sources) == 2
         assert all(isinstance(s, SourceReference) for s in result.output.sources)
         assert {s.document_id for s in result.output.sources} == {doc_id_a, doc_id_b}
+
+
+async def test_document_details_are_title_type_and_creation_time() -> None:
+    doc = SimpleNamespace(
+        title="Runbook",
+        content_type=ContentType.MARKDOWN,
+        created_at=datetime(2026, 10, 24, tzinfo=UTC),
+    )
+    deps = SimpleNamespace(
+        workspace_id=uuid.uuid4(),
+        document_service=SimpleNamespace(get=AsyncMock(return_value=doc)),
+    )
+    ctx: Any = SimpleNamespace(deps=deps)
+
+    details = await get_document_details(ctx, str(uuid.uuid4()))
+
+    assert details == {
+        "title": "Runbook",
+        "content_type": "markdown",
+        "created_at": "2026-10-24 00:00:00+00:00",
+    }

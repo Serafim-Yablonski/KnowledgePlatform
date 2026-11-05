@@ -38,7 +38,11 @@ def create_access_token(
         "iat": int(now.timestamp()),
         "exp": int((now + delta).timestamp()),
     }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return jwt.encode(
+        payload,
+        settings.SECRET_KEY.get_secret_value(),
+        algorithm=settings.JWT_ALGORITHM,
+    )
 
 
 def create_refresh_token(user_id: uuid.UUID) -> str:
@@ -50,13 +54,19 @@ def create_refresh_token(user_id: uuid.UUID) -> str:
         "iat": int(now.timestamp()),
         "exp": int((now + delta).timestamp()),
     }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return jwt.encode(
+        payload,
+        settings.SECRET_KEY.get_secret_value(),
+        algorithm=settings.JWT_ALGORITHM,
+    )
 
 
 def decode_token(token: str) -> TokenPayload:
     try:
         raw = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+            token,
+            settings.SECRET_KEY.get_secret_value(),
+            algorithms=[settings.JWT_ALGORITHM],
         )
         return TokenPayload.model_validate(raw)
     except jwt.PyJWTError as exc:

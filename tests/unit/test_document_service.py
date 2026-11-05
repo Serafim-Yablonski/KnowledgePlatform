@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import patch
 
 import anyio
+import logfire
 import pytest
 import structlog
 
@@ -28,6 +29,7 @@ from src.domain.documents import (
     DocumentStatus,
     DocumentUpdateInput,
     DocumentUpload,
+    FailureReason,
 )
 from src.domain.roles import WorkspaceRole
 from src.models.document import Document
@@ -36,6 +38,7 @@ from src.repositories.file_store import LocalFileStore
 from src.services.document import (
     _CHUNK,
     FAILED_DETAIL,
+    FAILED_DETAILS,
     INVALID_CURSOR_DETAIL,
     NOT_INDEXED_DETAIL,
     DocumentService,
@@ -69,7 +72,6 @@ def _make_document(workspace_id: uuid.UUID, uploaded_by: uuid.UUID) -> Document:
     doc.file_size_bytes = 1024
     doc.uploaded_by = uploaded_by
     doc.status = DocumentStatus.PENDING
-    doc.version = 1
     doc.created_at = datetime.now(UTC).replace(tzinfo=None)
     doc.updated_at = datetime.now(UTC).replace(tzinfo=None)
     return doc
@@ -120,9 +122,11 @@ class StubDocumentRepository:
         file_size_bytes: int,
         uploaded_by: uuid.UUID,
         original_filename: str | None = None,
+        trace_context: dict[str, str] | None = None,
     ) -> Document:
         doc = Document()
         doc.id = uuid.uuid4()
+        doc.trace_context = trace_context
         doc.workspace_id = workspace_id
         doc.title = title
         doc.original_filename = original_filename
@@ -132,7 +136,6 @@ class StubDocumentRepository:
         doc.file_size_bytes = file_size_bytes
         doc.uploaded_by = uploaded_by
         doc.status = DocumentStatus.PENDING
-        doc.version = 1
         doc.created_at = datetime.now(UTC).replace(tzinfo=None)
         doc.updated_at = datetime.now(UTC).replace(tzinfo=None)
         self._store[doc.id] = doc
@@ -147,7 +150,6 @@ class StubDocumentRepository:
     async def update(self, document: Document, data: DocumentUpdateInput) -> Document:
         if data.title is not None:
             document.title = data.title
-        document.version += 1
         return document
 
     async def delete(self, document: Document) -> None:
@@ -169,33 +171,33 @@ class StubDocumentRepository:
 
 
 class StubChunkRepository:
-    """In memory, filtered like the real query: document, version, start, order."""
+    """In memory, filtered like the real query: document, start, order."""
 
     def __init__(self) -> None:
-        self.rows: list[tuple[uuid.UUID, int, ChunkText]] = []
+        self.rows: list[tuple[uuid.UUID, ChunkText]] = []
         self.calls = 0
 
-    def add(self, doc: Document, version: int, *indexes: int) -> None:
+    def add(self, document_id: uuid.UUID, *indexes: int) -> None:
         for i in indexes:
-            text = ChunkText(chunk_index=i, section=None, chunk_text=f"v{version} {i}")
-            self.rows.append((doc.id, version, text))
+            text = ChunkText(chunk_index=i, section=None, chunk_text=f"chunk {i}")
+            self.rows.append((document_id, text))
 
-    def _of(self, document_id: uuid.UUID, version: int) -> list[ChunkText]:
+    def _of(self, document_id: uuid.UUID) -> list[ChunkText]:
         return sorted(
-            (c for d, v, c in self.rows if d == document_id and v == version),
+            (c for d, c in self.rows if d == document_id),
             key=lambda c: c.chunk_index,
         )
 
     async def read_page(
-        self, document_id: uuid.UUID, *, version: int, start: int, limit: int
+        self, document_id: uuid.UUID, *, start: int, limit: int
     ) -> list[ChunkText]:
         self.calls += 1
-        chunks = self._of(document_id, version)
+        chunks = self._of(document_id)
         return [c for c in chunks if c.chunk_index >= start][:limit]
 
-    async def count(self, document_id: uuid.UUID, *, version: int) -> int:
+    async def count(self, document_id: uuid.UUID) -> int:
         self.calls += 1
-        return len(self._of(document_id, version))
+        return len(self._of(document_id))
 
 
 class MockSession:
@@ -367,14 +369,13 @@ async def test_get_wrong_workspace_raises_not_found() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_update_increments_version() -> None:
+async def test_update_sets_the_title() -> None:
     service, repo = _make_service()
     user = _make_user()
     workspace_id = uuid.uuid4()
 
     doc = _make_document(workspace_id, user.id)
     repo._store[doc.id] = doc
-    original_version = doc.version
 
     result = await service.update(
         user,
@@ -383,7 +384,6 @@ async def test_update_increments_version() -> None:
         doc.id,
         DocumentUpdateInput(title="New"),
     )
-    assert result.version == original_version + 1
     assert result.title == "New"
 
 
@@ -611,6 +611,23 @@ async def test_existing_file_at_the_target_is_never_overwritten(
         )
 
     assert occupied[0].read_bytes() == b"someone else's document"
+
+
+async def test_an_upload_stores_its_trace_context_for_the_workers(
+    upload_dir: Path,
+) -> None:
+    """The workers continue the upload's trace (ADR-027): the row carries the
+    context of the span the upload ran in."""
+    service, _ = _make_service(upload_dir)
+    with logfire.span("upload") as span:
+        doc = await service.create(
+            _make_user(), uuid.uuid4(), WorkspaceRole.MEMBER, "Doc", _text_upload(b"x")
+        )
+        ids = span.get_span_context()
+
+    assert doc.trace_context is not None
+    _, trace_id, span_id, _ = doc.trace_context["traceparent"].split("-")
+    assert (trace_id, span_id) == (f"{ids.trace_id:032x}", f"{ids.span_id:016x}")
 
 
 # ---------------------------------------------------------------------------
@@ -901,6 +918,7 @@ async def test_update_nonexistent_document_raises_not_found() -> None:
 
 def _reader(
     status: DocumentStatus = DocumentStatus.INDEXED,
+    failure_reason: FailureReason | None = None,
 ) -> tuple[DocumentService, StubChunkRepository, Document]:
     repo, chunks = StubDocumentRepository(), StubChunkRepository()
     service = DocumentService(
@@ -911,21 +929,21 @@ def _reader(
     )
     doc = _make_document(uuid.uuid4(), uuid.uuid4())
     doc.status = status
-    doc.version = 2
+    doc.failure_reason = failure_reason
     repo._store[doc.id] = doc
-    # Chunks 0-4 of the current version; version 1's are stale.
-    chunks.add(doc, 2, 0, 1, 2, 3, 4)
-    chunks.add(doc, 1, *range(9))
+    # Chunks 0-4; another document's are never read.
+    chunks.add(doc.id, 0, 1, 2, 3, 4)
+    chunks.add(uuid.uuid4(), *range(9))
     return service, chunks, doc
 
 
-async def test_read_returns_a_page_of_the_current_version() -> None:
+async def test_read_returns_a_page_of_the_documents_chunks() -> None:
     service, _, doc = _reader()
 
     page = await service.read(doc.workspace_id, doc.id, start_chunk=1, max_chunks=2)
 
     assert (page.document_id, page.title, page.total_chunks) == (doc.id, doc.title, 5)
-    assert [c.chunk_text for c in page.chunks] == ["v2 1", "v2 2"]
+    assert [c.chunk_text for c in page.chunks] == ["chunk 1", "chunk 2"]
     assert page.next_start_chunk == 3
 
 
@@ -941,7 +959,7 @@ async def test_read_last_page_has_no_next_start() -> None:
 async def test_read_next_start_is_the_next_stored_index() -> None:
     # Not start + page size: positions come from the stored rows.
     service, chunks, doc = _reader()
-    chunks.rows = [r for r in chunks.rows if r[2].chunk_index != 3 or r[1] != 2]
+    chunks.rows = [r for r in chunks.rows if r[1].chunk_index != 3 or r[0] != doc.id]
 
     page = await service.read(doc.workspace_id, doc.id, start_chunk=1, max_chunks=2)
 
@@ -957,24 +975,36 @@ async def test_read_scopes_the_document_to_the_workspace() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "detail"),
+    ("status", "reason", "detail"),
     [
-        (DocumentStatus.PENDING, NOT_INDEXED_DETAIL),
-        (DocumentStatus.PROCESSING, NOT_INDEXED_DETAIL),
-        (DocumentStatus.READY, NOT_INDEXED_DETAIL),
-        # Retrying a failed document would loop, so it says so.
-        (DocumentStatus.FAILED, FAILED_DETAIL),
+        (DocumentStatus.PENDING, None, NOT_INDEXED_DETAIL),
+        (DocumentStatus.PROCESSING, None, NOT_INDEXED_DETAIL),
+        (DocumentStatus.READY, None, NOT_INDEXED_DETAIL),
+        # Retrying a failed document would loop, so it says so, and why when known.
+        (DocumentStatus.FAILED, None, FAILED_DETAIL),
+        *[
+            (DocumentStatus.FAILED, reason, FAILED_DETAILS[reason])
+            for reason in FailureReason
+        ],
     ],
 )
 async def test_read_refuses_a_document_that_is_not_indexed(
-    status: DocumentStatus, detail: str
+    status: DocumentStatus, reason: FailureReason | None, detail: str
 ) -> None:
-    service, chunks, doc = _reader(status)
+    service, chunks, doc = _reader(status, reason)
 
     with pytest.raises(ConflictError) as exc_info:
         await service.read(doc.workspace_id, doc.id)
     assert exc_info.value.detail == detail
     assert chunks.calls == 0
+
+
+def test_every_failure_reason_has_its_own_detail() -> None:
+    # The model reads the detail to decide what to tell the user; a reason that fell
+    # back to the generic text, or shared another's, would hide why it failed.
+    assert set(FAILED_DETAILS) == set(FailureReason)
+    assert len(set(FAILED_DETAILS.values())) == len(FailureReason)
+    assert FAILED_DETAIL not in FAILED_DETAILS.values()
 
 
 async def test_read_past_the_end_names_the_chunk_count() -> None:

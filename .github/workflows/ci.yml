@@ -23,7 +23,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -47,7 +47,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -65,7 +65,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -98,7 +98,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -125,6 +125,37 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  # R-a as a black box (tests/acceptance, P7): real worker processes, failures
+  # injected from outside, time passing for real. Worker code runs in subprocesses,
+  # so the job measures no coverage and isn't part of the gate.
+  test-acceptance:
+    name: Acceptance tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Pull test database image
+        run: docker pull pgvector/pgvector:pg18
+
+      - name: Run acceptance tests
+        run: uv run pytest tests/acceptance -x
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+
   test-api:
     name: API tests
     runs-on: ubuntu-latest
@@ -134,7 +165,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -166,7 +197,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -201,7 +232,7 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.16"
-          enable-caching: true
+          enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dev dependencies
@@ -241,7 +272,7 @@ jobs:
           --health-cmd "pg_isready -U user -d knowledge_platform"
           --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: redis:8-alpine
         ports:
           - 6379:6379
         options: >-
@@ -253,20 +284,43 @@ jobs:
       - name: Build Docker image
         run: docker build -t knowledge-platform:ci .
 
-      # Startup connects to Postgres (checkpointer) and Redis, so a broken image or
-      # config exits before /health answers. No Celery worker runs here, so /health
-      # is 503 with workers "unavailable"; the database and Redis must be "ok".
-      - name: Verify image starts and reaches Postgres and Redis
+      # The runtime user can't write __pycache__, so bytecode the image doesn't ship
+      # is compiled again by every process (Dockerfile, UV_COMPILE_BYTECODE).
+      - name: Verify the image ships its dependencies' bytecode
         run: |
-          docker run -d --name kp-ci-test --network host \
-            -e DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/knowledge_platform \
-            -e REDIS_URL=redis://localhost:6379/0 \
-            -e CELERY_BROKER_URL=redis://localhost:6379/0 \
-            -e CELERY_RESULT_BACKEND=redis://localhost:6379/1 \
-            -e SECRET_KEY=ci-test-secret-key \
-            -e GOOGLE_API_KEY=dummy \
-            -e ANTHROPIC_API_KEY=dummy \
+          docker run --rm knowledge-platform:ci python -c "
+          import importlib.util, pathlib, pypdf
+          pyc = pathlib.Path(importlib.util.cache_from_source(pypdf.__file__))
+          assert pyc.exists(), f'no bytecode: {pyc}'"
+
+      # Compose mounts a named volume at UPLOAD_DIR; a fresh one must be writable by
+      # the image's non-root user, or every upload on a new install is a 500.
+      - name: Verify a fresh uploads volume is writable
+        run: |
+          docker run --rm -v kp-ci-uploads:/data/uploads knowledge-platform:ci \
+            python -c "open('/data/uploads/probe', 'w').write('x')"
+          docker volume rm kp-ci-uploads
+
+      # Startup connects to Postgres (the checkpointer), so a broken image or database
+      # config exits before /health answers; Redis is checked by /health itself (its
+      # pool connects lazily). Migrated first, with the image's own
+      # alembic, so the pipeline's lag query has its columns. No worker runs here:
+      # /health is still 200 (lag never fails it, ADR-028) and nothing is owed.
+      - name: Verify image migrates, starts and reaches Postgres and Redis
+        run: |
+          env_args=(
+            -e DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/knowledge_platform
+            -e REDIS_URL=redis://localhost:6379/0
+            -e SECRET_KEY=ci-test-secret-key
+            -e GOOGLE_API_KEY=dummy
+            -e ANTHROPIC_API_KEY=dummy
+          )
+          docker run --rm --network host "${env_args[@]}" knowledge-platform:ci \
+            alembic upgrade head
+          docker run -d --name kp-ci-test --network host "${env_args[@]}" \
             knowledge-platform:ci
+          # Gone before the compose stack tests start, whatever this step's outcome.
+          trap 'docker rm -f kp-ci-test >/dev/null' EXIT
           body=""
           for _ in $(seq 1 30); do
             body=$(curl -s --max-time 10 http://localhost:8000/health) && break
@@ -274,4 +328,26 @@ jobs:
           done
           docker logs kp-ci-test 2>&1 | tail -20
           echo "health: $body"
-          echo "$body" | jq -e '.checks.database == "ok" and .checks.redis == "ok"'
+          echo "$body" | jq -e '.status == "healthy"
+            and .checks == {"database": "ok", "cache": "ok"}
+            and .pipeline == {"extract_lag_s": 0, "embed_lag_s": 0}'
+
+      # The shipped stack (tests/compose, P7d): the image indexes uploads end to end.
+      # Its own project, ports and env file: the service containers above don't
+      # take part.
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Run the compose stack tests
+        run: uv run pytest tests/compose -m compose
+        env:
+          ENVIRONMENT: test
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          GOOGLE_API_KEY: dummy
+          ANTHROPIC_API_KEY: dummy

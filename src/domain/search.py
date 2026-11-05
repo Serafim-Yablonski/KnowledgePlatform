@@ -17,7 +17,7 @@ SearchQuery = Annotated[
 @dataclass
 class SearchResult:
     chunk_id: uuid.UUID
-    chunk_index: int  # position in the document's current version, from 0
+    chunk_index: int  # position in the document's chunk set, from 0
     document_id: uuid.UUID
     document_title: str
     chunk_text: str

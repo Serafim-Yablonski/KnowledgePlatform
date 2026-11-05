@@ -11,7 +11,7 @@ _checkpointer: AsyncPostgresSaver | None = None
 
 
 def get_psycopg_connstr() -> str:
-    url = get_settings().SYNC_DATABASE_URL
+    url = get_settings().SYNC_DATABASE_URL.get_secret_value()
     # Strip SQLAlchemy driver prefix — psycopg3 needs a plain postgres:// URI.
     for prefix in ("postgresql+psycopg://", "postgresql+psycopg2://"):
         if url.startswith(prefix):

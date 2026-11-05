@@ -196,7 +196,7 @@ def workspace_rate_limit(
     """FastAPI dependency keyed on (user_id, workspace_id).
 
     Use for endpoints where resource cost is workspace-level (e.g. document
-    upload triggers Celery tasks shared across all workspace members).
+    upload queues extraction and embedding work shared by all workspace members).
     """
     from src.core.dependencies import (  # noqa: PLC0415
         get_current_user,

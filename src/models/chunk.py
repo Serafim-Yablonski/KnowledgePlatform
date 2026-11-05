@@ -18,10 +18,11 @@ EMBEDDING_DIMS: int = get_settings().EMBEDDING_DIMENSIONS
 class DocumentChunk(TimestampMixin, Base):
     __tablename__ = "document_chunks"
     __table_args__ = (
-        # Composite index for re-indexing queries: find all chunks for a document
-        # at a specific version to determine which are stale.
-        sa.Index("ix_chunks_document_version", "document_id", "version"),
-        sa.Index("ix_chunks_document_id", "document_id"),
+        # One chunk set per document, enforced by the database; also the index for
+        # reads by document (and the cascade), which use its leftmost prefix.
+        sa.UniqueConstraint(
+            "document_id", "chunk_index", name="uq_chunks_document_chunk_index"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -33,8 +34,6 @@ class DocumentChunk(TimestampMixin, Base):
     )
     chunk_index: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     text: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    # HNSW index defined in Alembic migration (not here) because pgvector HNSW
-    # requires CREATE INDEX ... USING hnsw syntax not expressible via table args.
     embedding: Mapped[list[float]] = mapped_column(
         Vector(EMBEDDING_DIMS), nullable=False
     )
@@ -44,6 +43,3 @@ class DocumentChunk(TimestampMixin, Base):
     metadata_: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         sa.JSON, nullable=False, server_default=sa.text("'{}'::jsonb")
     )
-    # Matches Document.version at the time of chunking. Used to safely delete
-    # stale chunks during re-indexing without serving wrong-dimension embeddings.
-    version: Mapped[int] = mapped_column(sa.Integer, nullable=False)

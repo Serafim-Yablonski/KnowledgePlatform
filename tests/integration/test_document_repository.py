@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.exc import InvalidRequestError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.documents import ContentType, Cursor, DocumentStatus
+from src.domain.documents import ContentType, Cursor, DocumentStatus, FailureReason
 from src.models.document import Document
 from src.models.user import User
 from src.models.workspace import Workspace
@@ -64,6 +64,7 @@ async def _create_doc(
         file_size_bytes=100,
         uploaded_by=uploaded_by,
         original_filename=None,
+        trace_context=None,
     )
     if status != DocumentStatus.PENDING:
         doc.status = status
@@ -316,6 +317,7 @@ async def test_create_and_get_by_id(
         file_size_bytes=2048,
         uploaded_by=test_user.id,
         original_filename="hello.pdf",
+        trace_context=None,
     )
     doc_id = doc.id  # save before flush/commit expiry
     await db_session.flush()
@@ -325,7 +327,6 @@ async def test_create_and_get_by_id(
     assert fetched.title == "Hello"
     assert fetched.original_filename == "hello.pdf"
     assert fetched.status == DocumentStatus.PENDING
-    assert fetched.version == 1
 
 
 async def test_get_by_id_scoped_to_workspace(
@@ -336,14 +337,18 @@ async def test_get_by_id_scoped_to_workspace(
     assert await repo.get_by_id(uuid.uuid4(), doc.id) is None
 
 
-async def test_update_increments_version(
+async def test_update_persists_the_title(
     db_session: AsyncSession, test_workspace: Workspace, test_user: User
 ) -> None:
     doc = await _create_doc(db_session, test_workspace.id, test_user.id)
+    doc_id = doc.id
     repo = SQLAlchemyDocumentRepository(db_session)
-    updated = await repo.update(doc, DocumentUpdate(title="Updated"))
-    assert updated.title == "Updated"
-    assert updated.version == 2
+    await repo.update(doc, DocumentUpdate(title="Updated"))
+    db_session.expunge_all()
+
+    fetched = await repo.get_by_id(test_workspace.id, doc_id)
+    assert fetched is not None
+    assert fetched.title == "Updated"
 
 
 async def test_delete_removes_record(
@@ -354,3 +359,38 @@ async def test_delete_removes_record(
     repo = SQLAlchemyDocumentRepository(db_session)
     await repo.delete(doc)
     assert await repo.get_by_id(test_workspace.id, doc_id) is None
+
+
+async def test_a_document_inserted_without_a_status_loads_as_pending(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    # The column default must be in the stored form: SQLAlchemy stores enum names.
+    doc_id = await db_session.scalar(
+        sa.text(
+            "INSERT INTO documents (workspace_id, title, content_type, file_path, "
+            "file_size_bytes, uploaded_by) "
+            "VALUES (:ws, 'Raw', 'PLAINTEXT', '/tmp/raw.txt', 1, :user) RETURNING id"
+        ),
+        {"ws": test_workspace.id, "user": test_user.id},
+    )
+    repo = SQLAlchemyDocumentRepository(db_session)
+
+    fetched = await repo.get_by_id(test_workspace.id, doc_id)
+
+    assert fetched is not None
+    assert fetched.status == DocumentStatus.PENDING
+
+
+async def test_only_a_failed_document_has_a_failure_reason(
+    db_session: AsyncSession, test_workspace: Workspace, test_user: User
+) -> None:
+    doc = await _create_doc(
+        db_session, test_workspace.id, test_user.id, status=DocumentStatus.READY
+    )
+    doc.failure_reason = FailureReason.NO_TEXT
+
+    with pytest.raises(
+        IntegrityError, match="ck_documents_failure_reason_only_when_failed"
+    ):
+        await db_session.flush()
+    await db_session.rollback()

@@ -621,7 +621,11 @@ INVALID_TOKEN = 'Bearer realm="knowledge-platform", error="invalid_token"'
 def _expired_access_token(user_id: uuid.UUID) -> str:
     now = int(time.time())
     payload = {"sub": str(user_id), "type": "access", "iat": now - 120, "exp": now - 60}
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return jwt.encode(
+        payload,
+        settings.SECRET_KEY.get_secret_value(),
+        algorithm=settings.JWT_ALGORITHM,
+    )
 
 
 async def _inactive_users_token(db_session: AsyncSession) -> str:

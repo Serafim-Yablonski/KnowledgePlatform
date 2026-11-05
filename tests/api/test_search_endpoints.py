@@ -48,7 +48,6 @@ class TestSearchEndpoint:
             file_size_bytes=100,
             uploaded_by=uuid.UUID(me["id"]),
             status=DocumentStatus.INDEXED,
-            version=1,
         )
         db_session.add(doc)
         await db_session.flush()
@@ -60,7 +59,6 @@ class TestSearchEndpoint:
                 embedding=_VECTOR,
                 token_count=5,
                 metadata_={"section": "Incidents > Credentials"},
-                version=1,
             )
         )
         await db_session.flush()
@@ -85,6 +83,54 @@ class TestSearchEndpoint:
                 "score": 1.0,
             }
         ]
+
+    async def test_renamed_document_is_still_found(
+        self, async_client: AsyncClient, db_session: AsyncSession
+    ) -> None:
+        # A rename re-chunks nothing, so it must not move the document off its chunks.
+        headers, ws_id = await _member_with_workspace(async_client)
+        me = (await async_client.get("/api/v1/auth/me", headers=headers)).json()
+        doc = Document(
+            workspace_id=uuid.UUID(ws_id),
+            title="Runbook",
+            content_type=ContentType.MARKDOWN,
+            file_path=f"/tmp/{uuid.uuid4()}.md",
+            file_size_bytes=100,
+            uploaded_by=uuid.UUID(me["id"]),
+            status=DocumentStatus.INDEXED,
+        )
+        db_session.add(doc)
+        await db_session.flush()
+        db_session.add(
+            DocumentChunk(
+                document_id=doc.id,
+                chunk_index=0,
+                text="Rotate the credentials first.",
+                embedding=_VECTOR,
+                token_count=5,
+            )
+        )
+        await db_session.flush()
+        gemini = httpx.AsyncClient(transport=httpx.MockTransport(_gemini))
+        app.dependency_overrides[get_http_client] = lambda: gemini
+
+        renamed = await async_client.patch(
+            f"{_WORKSPACES}/{ws_id}/documents/{doc.id}",
+            json={"title": "Ops runbook"},
+            headers=headers,
+        )
+        resp = await async_client.post(
+            f"{_WORKSPACES}/{ws_id}/search",
+            json={"query": "credential rotation"},
+            headers=headers,
+        )
+        await gemini.aclose()
+
+        assert renamed.status_code == 200
+        assert resp.status_code == 200
+        assert [
+            (r["document_title"], r["chunk_index"]) for r in resp.json()["results"]
+        ] == [("Ops runbook", 0)]
 
     async def test_query_is_capped_and_stripped(
         self, async_client: AsyncClient
@@ -112,3 +158,38 @@ class TestSearchEndpoint:
 
         assert statuses == [200, 422, 422]
         assert embedded == ["x" * 2000]
+
+    async def test_a_rate_limited_provider_answers_503_with_its_delay(
+        self, async_client: AsyncClient
+    ) -> None:
+        # A daily quota's delay is too long to wait in a request: the caller gets
+        # it as Retry-After instead of a 500.
+        headers, ws_id = await _member_with_workspace(async_client)
+
+        def gemini(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "code": 429,
+                        "status": "RESOURCE_EXHAUSTED",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                "retryDelay": "3600s",
+                            }
+                        ],
+                    }
+                },
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(gemini))
+        app.dependency_overrides[get_http_client] = lambda: client
+        resp = await async_client.post(
+            f"{_WORKSPACES}/{ws_id}/search", json={"query": "q"}, headers=headers
+        )
+        await client.aclose()
+
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "3600"
+        assert "embedding provider" in resp.json()["error"]["message"]
