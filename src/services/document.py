@@ -6,7 +6,6 @@ import anyio
 import anyio.lowlevel
 import logfire
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.exceptions import ConflictError, InputValidationError, NotFoundError
@@ -32,9 +31,9 @@ from src.domain.workspace import WorkspaceStats
 from src.models.document import Document
 from src.models.user import User
 from src.repositories.protocols import (
-    ChunkRepositoryProtocol,
-    DocumentRepositoryProtocol,
     FileStoreProtocol,
+    UnitOfWorkFactory,
+    UnitOfWorkProtocol,
 )
 
 logger = structlog.get_logger(__name__)
@@ -162,14 +161,10 @@ def _resolve_title(given: str | None, original_filename: str | None) -> str:
 class DocumentService:
     def __init__(
         self,
-        repo: DocumentRepositoryProtocol,
-        chunk_repo: ChunkRepositoryProtocol,
-        session: AsyncSession,
+        uow: UnitOfWorkFactory,
         files: FileStoreProtocol,
     ) -> None:
-        self._repo = repo
-        self._chunks = chunk_repo
-        self._session = session
+        self._uow = uow
         self._files = files
 
     async def create(
@@ -201,63 +196,62 @@ class DocumentService:
             _inspect_upload, upload.stream, content_type_str
         )
 
-        doc = await self._repo.create(
-            workspace_id=workspace_id,
-            title=title,
-            content_type=content_type,
-            file_path="",
-            file_size_bytes=size,
-            uploaded_by=user.id,
-            original_filename=original_filename,
-            # The workers continue this trace: each attempt is a child of the
-            # upload's span (ADR-027).
-            trace_context=dict(logfire.get_context()) or None,
-        )
+        # The one unit of work held across a wait outside the database, on purpose:
+        # the new row's lock on its workspace makes a workspace delete wait until
+        # the file is written and committed (ADR-033).
+        async with self._uow() as uow:
+            doc = await uow.documents.create(
+                workspace_id=workspace_id,
+                title=title,
+                content_type=content_type,
+                file_path="",
+                file_size_bytes=size,
+                uploaded_by=user.id,
+                original_filename=original_filename,
+                # The workers continue this trace: each attempt is a child of the
+                # upload's span (ADR-027).
+                trace_context=dict(logfire.get_context()) or None,
+            )
 
-        try:
-            key = await self._files.save(
-                workspace_id, doc.id, content_type, upload.stream
-            )
-        except OSError as exc:
-            logger.error(
-                "upload write failed", document_id=str(doc.id), errno=exc.errno
-            )
-            raise
-        try:
-            # The thread can't be interrupted, so a cancellation during the write is
-            # held back until here: surface it before the commit point.
-            await anyio.lowlevel.checkpoint()
-        except BaseException:
-            # Shielded: inside a cancelled scope any other await is cancelled at once.
-            with anyio.CancelScope(shield=True):
-                await self._files.remove(key)
-            raise
+            try:
+                key = await self._files.save(
+                    workspace_id, doc.id, content_type, upload.stream
+                )
+            except OSError as exc:
+                logger.error(
+                    "upload write failed", document_id=str(doc.id), errno=exc.errno
+                )
+                raise
+            try:
+                # The thread can't be interrupted, so a cancellation during the
+                # write is held back until here: surface it before the commit point.
+                await anyio.lowlevel.checkpoint()
+            except BaseException:
+                # Shielded: in a cancelled scope any other await is cancelled at once.
+                with anyio.CancelScope(shield=True):
+                    await self._files.remove(key)
+                raise
 
-        doc.file_path = key
-        # The commit point. From here on the file is kept whatever happens: a failed
-        # commit may still have committed, and a row without its file is corruption,
-        # while a file without its row is only garbage.
-        try:
-            # Single commit covers both the initial flush and the file_path update.
-            await self._session.commit()
-        except BaseException:
-            logger.error(
-                "upload commit failed; file kept",
-                document_id=str(doc.id),
-                path=key,
-            )
-            raise
+            # The commit point. From here on the file is kept whatever happens: a
+            # failed commit may still have committed, and a row without its file is
+            # corruption, while a file without its row is only garbage.
+            try:
+                await uow.documents.set_file_path(doc, key)
+                await uow.commit()
+            except BaseException:
+                logger.error(
+                    "upload commit failed; file kept",
+                    document_id=str(doc.id),
+                    path=key,
+                )
+                raise
         # Nothing to publish: the committed PENDING row is the work owed, and a
         # worker claims it from the table (ADR-027).
-        await self._session.refresh(doc)
-
         return doc
 
     async def get(self, workspace_id: uuid.UUID, document_id: uuid.UUID) -> Document:
-        doc = await self._repo.get_by_id(workspace_id, document_id)
-        if doc is None:
-            raise NotFoundError("Document not found")
-        return doc
+        async with self._uow() as uow:
+            return await _get(uow, workspace_id, document_id)
 
     async def list(
         self,
@@ -270,9 +264,10 @@ class DocumentService:
             cursor: Cursor | None = decode_cursor(cursor_str) if cursor_str else None
         except ValueError as exc:
             raise InputValidationError(INVALID_CURSOR_DETAIL) from exc
-        docs, next_cursor = await self._repo.list_by_workspace(
-            workspace_id, limit=limit, cursor=cursor, status=status
-        )
+        async with self._uow() as uow:
+            docs, next_cursor = await uow.documents.list_by_workspace(
+                workspace_id, limit=limit, cursor=cursor, status=status
+            )
         return DocumentPage(
             items=list(docs),
             next_cursor=encode_cursor(next_cursor) if next_cursor else None,
@@ -286,19 +281,20 @@ class DocumentService:
         max_chunks: int = 8,
     ) -> DocumentChunks:
         """Up to ``max_chunks`` of the document's chunks from ``start_chunk``."""
-        doc = await self.get(workspace_id, document_id)
-        if doc.status == DocumentStatus.FAILED:
-            reason = doc.failure_reason
-            raise ConflictError(
-                FAILED_DETAILS[reason] if reason is not None else FAILED_DETAIL
+        async with self._uow() as uow:
+            doc = await _get(uow, workspace_id, document_id)
+            if doc.status == DocumentStatus.FAILED:
+                reason = doc.failure_reason
+                raise ConflictError(
+                    FAILED_DETAILS[reason] if reason is not None else FAILED_DETAIL
+                )
+            if doc.status != DocumentStatus.INDEXED:
+                raise ConflictError(NOT_INDEXED_DETAIL)
+            # One extra row tells whether more follow, and where they start.
+            chunks = await uow.chunks.read_page(
+                doc.id, start=start_chunk, limit=max_chunks + 1
             )
-        if doc.status != DocumentStatus.INDEXED:
-            raise ConflictError(NOT_INDEXED_DETAIL)
-        # One extra row tells whether more follow, and where they start.
-        chunks = await self._chunks.read_page(
-            doc.id, start=start_chunk, limit=max_chunks + 1
-        )
-        total = await self._chunks.count(doc.id)
+            total = await uow.chunks.count(doc.id)
         if not chunks:
             raise InputValidationError(
                 f"start_chunk {start_chunk} is past the end: the document has "
@@ -314,7 +310,8 @@ class DocumentService:
         )
 
     async def get_workspace_stats(self, workspace_id: uuid.UUID) -> WorkspaceStats:
-        return await self._repo.get_workspace_stats(workspace_id)
+        async with self._uow() as uow:
+            return await uow.documents.get_workspace_stats(workspace_id)
 
     async def update(
         self,
@@ -327,9 +324,10 @@ class DocumentService:
         require_permission(role, Permission.UPDATE_DOCUMENT)
         if data.title is not None:
             data = DocumentUpdateInput(title=_clean_title(data.title))
-        doc = await self.get(workspace_id, document_id)
-        doc = await self._repo.update(doc, data)
-        await self._session.commit()
+        async with self._uow() as uow:
+            doc = await _get(uow, workspace_id, document_id)
+            doc = await uow.documents.update(doc, data)
+            await uow.commit()
         return doc
 
     async def delete(
@@ -340,12 +338,13 @@ class DocumentService:
         document_id: uuid.UUID,
     ) -> None:
         require_permission(role, Permission.DELETE_DOCUMENT)
-        doc = await self.get(workspace_id, document_id)
-        file_path = doc.file_path
         # Delete the DB record first — a consistent DB with an orphaned file is better
         # than a deleted file with a stale DB row pointing at nothing.
-        await self._repo.delete(doc)
-        await self._session.commit()
+        async with self._uow() as uow:
+            doc = await _get(uow, workspace_id, document_id)
+            file_path = doc.file_path
+            await uow.documents.delete(doc)
+            await uow.commit()
         if file_path:
             try:
                 await self._files.remove(file_path)
@@ -355,3 +354,12 @@ class DocumentService:
                     path=file_path,
                     error=str(exc),
                 )
+
+
+async def _get(
+    uow: UnitOfWorkProtocol, workspace_id: uuid.UUID, document_id: uuid.UUID
+) -> Document:
+    doc = await uow.documents.get_by_id(workspace_id, document_id)
+    if doc is None:
+        raise NotFoundError("Document not found")
+    return doc

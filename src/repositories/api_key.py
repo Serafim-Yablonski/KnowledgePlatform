@@ -23,7 +23,7 @@ class SQLAlchemyApiKeyRepository:
     ) -> ApiKey:
         key = ApiKey(user_id=user_id, key_hash=key_hash, prefix=prefix, name=name)
         self._session.add(key)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(key)
         return key
 
@@ -53,17 +53,9 @@ class SQLAlchemyApiKeyRepository:
 
     async def touch_last_used(self, key_id: uuid.UUID) -> None:
         # Server-side now(): the column is a naive timestamp, so no Python tz handling.
-        try:
-            await self._session.execute(
-                sa.update(ApiKey)
-                .where(ApiKey.id == key_id)
-                .values(last_used_at=func.now())
-            )
-            await self._session.commit()
-        except BaseException:
-            # Leave the shared session usable for whatever runs after auth.
-            await self._session.rollback()
-            raise
+        await self._session.execute(
+            sa.update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=func.now())
+        )
 
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None:
         await self._session.execute(
@@ -71,7 +63,3 @@ class SQLAlchemyApiKeyRepository:
             .where(ApiKey.id == key_id, ApiKey.user_id == user_id)
             .values(is_active=False)
         )
-        await self._session.commit()
-
-    async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None:
-        pass  # no cache layer here; CachedApiKeyRepository overrides this

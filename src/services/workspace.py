@@ -9,33 +9,24 @@ from src.domain.slug import generate_slug
 from src.domain.workspace import WorkspaceInfo, WorkspaceMember, WorkspaceUpdateInput
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
-from src.repositories.protocols import (
-    FileStoreProtocol,
-    UserRepositoryProtocol,
-    WorkspaceRepositoryProtocol,
-)
+from src.repositories.protocols import FileStoreProtocol, UnitOfWorkFactory
 
 logger = structlog.get_logger(__name__)
 
 
 class WorkspaceService:
-    def __init__(
-        self,
-        workspace_repo: WorkspaceRepositoryProtocol,
-        user_repo: UserRepositoryProtocol,
-        files: FileStoreProtocol,
-    ) -> None:
-        self._repo = workspace_repo
-        self._user_repo = user_repo
+    def __init__(self, uow: UnitOfWorkFactory, files: FileStoreProtocol) -> None:
+        self._uow = uow
         self._files = files
 
     async def get_workspace_for_user(
         self, workspace_id: uuid.UUID, user_id: uuid.UUID
     ) -> tuple[Workspace, WorkspaceMembership]:
-        membership = await self._repo.get_membership(workspace_id, user_id)
-        if membership is None:
-            raise ForbiddenError("Not a member of this workspace")
-        workspace = await self._repo.get_by_id(workspace_id)
+        async with self._uow() as uow:
+            membership = await uow.workspaces.get_membership(workspace_id, user_id)
+            if membership is None:
+                raise ForbiddenError("Not a member of this workspace")
+            workspace = await uow.workspaces.get_by_id(workspace_id)
         if workspace is None:
             raise ForbiddenError("Not a member of this workspace")
         return workspace, membership
@@ -47,17 +38,20 @@ class WorkspaceService:
         description: str | None = None,
     ) -> WorkspaceInfo:
         slug = generate_slug(name)
-        workspace = await self._repo.create(
-            name=name,
-            slug=slug,
-            created_by_id=actor.id,
-            description=description,
-        )
-        await self._repo.add_member(
-            workspace_id=workspace.id,
-            user_id=actor.id,
-            role=WorkspaceRole.OWNER,
-        )
+        # One transaction: a workspace never exists without its owner.
+        async with self._uow() as uow:
+            workspace = await uow.workspaces.create(
+                name=name,
+                slug=slug,
+                created_by_id=actor.id,
+                description=description,
+            )
+            await uow.workspaces.add_member(
+                workspace_id=workspace.id,
+                user_id=actor.id,
+                role=WorkspaceRole.OWNER,
+            )
+            await uow.commit()
         logger.info(
             "workspace created",
             workspace_id=str(workspace.id),
@@ -75,10 +69,11 @@ class WorkspaceService:
         )
 
     async def get_by_id(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
-        workspace = await self._repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundError("Workspace not found")
-        count = await self._repo.count_members(workspace_id)
+        async with self._uow() as uow:
+            workspace = await uow.workspaces.get_by_id(workspace_id)
+            if workspace is None:
+                raise NotFoundError("Workspace not found")
+            count = await uow.workspaces.count_members(workspace_id)
         return WorkspaceInfo(
             id=workspace.id,
             name=workspace.name,
@@ -97,8 +92,10 @@ class WorkspaceService:
         data: WorkspaceUpdateInput,
     ) -> WorkspaceInfo:
         require_permission(role, Permission.UPDATE_WORKSPACE)
-        workspace = await self._repo.update(workspace_id, data)
-        count = await self._repo.count_members(workspace_id)
+        async with self._uow() as uow:
+            workspace = await uow.workspaces.update(workspace_id, data)
+            count = await uow.workspaces.count_members(workspace_id)
+            await uow.commit()
         return WorkspaceInfo(
             id=workspace.id,
             name=workspace.name,
@@ -110,7 +107,8 @@ class WorkspaceService:
         )
 
     async def list_for_user(self, actor: User) -> list[WorkspaceInfo]:
-        rows = await self._repo.list_for_user_with_counts(actor.id)
+        async with self._uow() as uow:
+            rows = await uow.workspaces.list_for_user_with_counts(actor.id)
         return [
             WorkspaceInfo(
                 id=ws.id,
@@ -139,25 +137,29 @@ class WorkspaceService:
         if ROLE_RANK[role] > ROLE_RANK[actor_role]:
             raise ForbiddenError("Cannot grant a role higher than your own")
 
-        target = await self._user_repo.get_by_email(user_email)
-        # Return the same error regardless of whether the email is unknown or
-        # already a member — prevents leaking which emails are registered to
-        # ADMIN-level callers who have manage_members permission.
-        if target is None:
-            raise ConflictError("Invitation could not be sent")
-        existing = await self._repo.get_membership(workspace_id, target.id)
-        if existing is not None:
-            raise ConflictError("Invitation could not be sent")
+        async with self._uow() as uow:
+            target = await uow.users.get_by_email(user_email)
+            # Return the same error regardless of whether the email is unknown or
+            # already a member — prevents leaking which emails are registered to
+            # ADMIN-level callers who have manage_members permission.
+            if target is None:
+                raise ConflictError("Invitation could not be sent")
+            existing = await uow.workspaces.get_membership(workspace_id, target.id)
+            if existing is not None:
+                raise ConflictError("Invitation could not be sent")
 
-        try:
-            new_membership = await self._repo.add_member(
-                workspace_id=workspace_id,
-                user_id=target.id,
-                role=role,
-                invited_by_id=actor.id,
-            )
-        except IntegrityError as exc:
-            raise ConflictError("Invitation could not be sent") from exc
+            # A concurrent add can pass the check above; the unique constraint is
+            # the real guard, and the repository flushes so it fires here.
+            try:
+                new_membership = await uow.workspaces.add_member(
+                    workspace_id=workspace_id,
+                    user_id=target.id,
+                    role=role,
+                    invited_by_id=actor.id,
+                )
+            except IntegrityError as exc:
+                raise ConflictError("Invitation could not be sent") from exc
+            await uow.commit()
 
         logger.info(
             "workspace member added",
@@ -182,23 +184,25 @@ class WorkspaceService:
     ) -> None:
         require_permission(actor_role, Permission.MANAGE_MEMBERS)
 
-        target_membership = await self._repo.get_membership(
-            workspace_id, target_user_id
-        )
-        if target_membership is None:
-            raise NotFoundError("User is not a member of this workspace")
+        async with self._uow() as uow:
+            target_membership = await uow.workspaces.get_membership(
+                workspace_id, target_user_id
+            )
+            if target_membership is None:
+                raise NotFoundError("User is not a member of this workspace")
 
-        # Prevent privilege escalation: a role can only remove members of equal
-        # or lower rank (e.g. ADMIN cannot remove an OWNER).
-        if ROLE_RANK[target_membership.role] > ROLE_RANK[actor_role]:
-            raise ForbiddenError("Cannot remove a member with a higher role")
+            # Prevent privilege escalation: a role can only remove members of equal
+            # or lower rank (e.g. ADMIN cannot remove an OWNER).
+            if ROLE_RANK[target_membership.role] > ROLE_RANK[actor_role]:
+                raise ForbiddenError("Cannot remove a member with a higher role")
 
-        if target_membership.role == WorkspaceRole.OWNER:
-            owner_count = await self._repo.count_owners_for_update(workspace_id)
-            if owner_count <= 1:
-                raise ConflictError("Cannot remove the last owner of a workspace")
+            if target_membership.role == WorkspaceRole.OWNER:
+                owner_count = await uow.workspaces.count_owners_for_update(workspace_id)
+                if owner_count <= 1:
+                    raise ConflictError("Cannot remove the last owner of a workspace")
 
-        await self._repo.remove_member(workspace_id, target_user_id)
+            await uow.workspaces.remove_member(workspace_id, target_user_id)
+            await uow.commit()
         logger.info(
             "workspace member removed",
             workspace_id=str(workspace_id),
@@ -213,11 +217,13 @@ class WorkspaceService:
         role: WorkspaceRole,
     ) -> None:
         require_permission(role, Permission.DELETE_WORKSPACE)
-        # Rows first (the repository commits), files after: if the delete fails the
-        # workspace is intact; if file removal fails, the leftovers are only garbage.
-        # An upload into this workspace holds a lock the delete waits for, so no
-        # upload is still writing here once the delete has committed.
-        await self._repo.delete(workspace.id)
+        # Rows first, files after the commit: if the delete fails the workspace is
+        # intact; if file removal fails, the leftovers are only garbage. An upload
+        # into this workspace holds a lock the delete waits for, so no upload is
+        # still writing here once the delete has committed.
+        async with self._uow() as uow:
+            await uow.workspaces.delete(workspace.id)
+            await uow.commit()
         await self._files.remove_workspace(workspace.id)
         logger.info(
             "workspace deleted",
@@ -232,7 +238,8 @@ class WorkspaceService:
         return membership.role
 
     async def list_members(self, workspace_id: uuid.UUID) -> list[WorkspaceMember]:
-        members = await self._repo.list_members(workspace_id)
+        async with self._uow() as uow:
+            members = await uow.workspaces.list_members(workspace_id)
         return [
             WorkspaceMember(
                 user_id=m.user_id,

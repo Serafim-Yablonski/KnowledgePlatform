@@ -15,6 +15,7 @@ from src.ai.embeddings import (
 from src.core.exceptions import ServiceUnavailableError
 from src.domain.search import SearchResult, SearchResults
 from src.services.search import SearchService
+from tests.support.unit_of_work import FakeUnitOfWork
 
 
 def _make_service(
@@ -26,10 +27,7 @@ def _make_service(
     repo = MagicMock()
     repo.search_similar = AsyncMock(return_value=repo_results or [])
 
-    service = SearchService(
-        search_repo=repo,
-        embedding_service=embedding_svc,
-    )
+    service = SearchService(FakeUnitOfWork(search=repo), embedding_svc)
     return service, embedding_svc, repo
 
 

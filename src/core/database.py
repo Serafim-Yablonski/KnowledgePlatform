@@ -1,30 +1,13 @@
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
-
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from src.core.config import settings
-
-engine = create_async_engine(
-    settings.ASYNC_DATABASE_URL.get_secret_value(),
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
-    echo=False,
-)
-
-async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 
-@asynccontextmanager
-async def get_session() -> AsyncGenerator[AsyncSession]:
-    async with async_session_factory() as session:
-        try:
-            yield session
-        except BaseException:
-            await session.rollback()
-            raise
+def build_engine(url: str) -> AsyncEngine:
+    """The API process's engine; its lifespan builds one (ADR-033).
+
+    Sessions come only from the unit of work (src/repositories/unit_of_work.py).
+    ``pool_pre_ping``: without it the first request on each stale pooled connection
+    after a Postgres restart is a 500.
+    """
+    return create_async_engine(
+        url, pool_size=10, max_overflow=20, pool_pre_ping=True, echo=False
+    )

@@ -28,8 +28,6 @@ class SQLAlchemyWorkspaceRepository:
             created_by=created_by_id,
         )
         self._session.add(workspace)
-        # Flush only — the caller (WorkspaceService.create) adds a membership next
-        # and the two writes are committed together atomically by add_member().
         await self._session.flush()
         await self._session.refresh(workspace)
         return workspace
@@ -56,7 +54,7 @@ class SQLAlchemyWorkspaceRepository:
             workspace.name = data.name
         if data.description is not None:
             workspace.description = data.description
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(workspace)
         return workspace
 
@@ -105,7 +103,9 @@ class SQLAlchemyWorkspaceRepository:
             invited_by=invited_by_id,
         )
         self._session.add(membership)
-        await self._session.commit()
+        # Flushed here so a duplicate's IntegrityError surfaces in the caller's
+        # block, where it maps to a conflict, not at its commit.
+        await self._session.flush()
         await self._session.refresh(membership)
         return membership
 
@@ -116,7 +116,6 @@ class SQLAlchemyWorkspaceRepository:
                 WorkspaceMembership.user_id == user_id,
             )
         )
-        await self._session.commit()
 
     async def get_membership(
         self, workspace_id: uuid.UUID, user_id: uuid.UUID
@@ -153,7 +152,6 @@ class SQLAlchemyWorkspaceRepository:
         await self._session.execute(
             sa.delete(Workspace).where(Workspace.id == workspace_id)
         )
-        await self._session.commit()
 
     async def count_owners_for_update(self, workspace_id: uuid.UUID) -> int:
         # Lock the actual owner rows (FOR UPDATE on rows, not aggregate).

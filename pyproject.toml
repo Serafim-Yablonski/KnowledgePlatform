@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]==0.46.0",
     "sqlalchemy[asyncio]==2.0.49",
     "asyncpg==0.31.0",
+    # Shields the unit of work's cleanup from level-triggered cancellation (ADR-033).
+    "anyio==4.16.0",
     "alembic==1.18.4",
     "pydantic-settings==2.14.0",
     "pydantic-ai-slim[anthropic,google,logfire]==1.89.1",
@@ -135,17 +137,16 @@ ignore_imports = [
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
-# CLAUDE.md: each worker process opens its own engine and clients (ADR-027), and
-# loads none of the API's, even through another module.
-name = "Workers never use the API process's pools"
+# CLAUDE.md: each worker process opens its own engine and clients (ADR-027). The
+# API's exist only inside its lifespan, so no import can reach them (ADR-033;
+# test_importing_the_app_opens_no_pool_or_client). Importing src.main builds the
+# app, which sets up logging at import: test_worker_logs_go_through_our_structlog_bridge
+# fails on it too, but without naming the import. src.composition stays allowed: a
+# worker builds its own Services from its own engine (Track 3).
+name = "Workers never import the API's app"
 type = "forbidden"
 source_modules = ["src.workers"]
-forbidden_modules = [
-    "src.composition",
-    "src.core.database",
-    "src.core.http",
-    "src.core.redis",
-]
+forbidden_modules = ["src.main"]
 
 [[tool.importlinter.contracts]]
 # ADR-028: /health reports lag with the claim's own predicate; nothing else in the

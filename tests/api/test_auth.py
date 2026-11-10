@@ -235,15 +235,15 @@ async def test_refresh_with_invalid_token(async_client: AsyncClient) -> None:
 
 
 async def test_refresh_with_deactivated_user(
-    async_client: AsyncClient, db_session: AsyncSession
+    async_client: AsyncClient, committing_session: AsyncSession
 ) -> None:
     from sqlalchemy import update
 
     from src.models.user import User
 
     tokens, _ = await _register_and_login(async_client)
-    await db_session.execute(update(User).values(is_active=False))
-    await db_session.commit()
+    await committing_session.execute(update(User).values(is_active=False))
+    await committing_session.commit()
     resp = await async_client.post(
         _REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
     )

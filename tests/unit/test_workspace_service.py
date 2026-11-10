@@ -13,6 +13,7 @@ from src.domain.workspace import WorkspaceUpdateInput
 from src.models.user import User
 from src.models.workspace import Workspace, WorkspaceMembership
 from src.services.workspace import WorkspaceService
+from tests.support.unit_of_work import FakeUnitOfWork
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -198,11 +199,8 @@ def _make_service(
     user_store = {u.id: u for u in users}
     ws_repo = StubWorkspaceRepository(user_store=user_store)
     user_repo = StubUserRepository(users)
-    return (
-        WorkspaceService(ws_repo, user_repo, RecordingFileStore()),
-        ws_repo,
-        user_repo,
-    )
+    uow = FakeUnitOfWork(workspaces=ws_repo, users=user_repo)
+    return WorkspaceService(uow, RecordingFileStore()), ws_repo, user_repo
 
 
 class RecordingFileStore:
@@ -644,12 +642,13 @@ def _deleting_service() -> tuple[
         events.append(("rows deleted", workspace_id))
 
     ws_repo.delete = recording_delete  # type: ignore[method-assign]
-    return (
-        WorkspaceService(ws_repo, StubUserRepository([]), files),
-        ws_repo,
-        files,
-        events,
-    )
+    uow = FakeUnitOfWork(workspaces=ws_repo, users=StubUserRepository([]))
+
+    async def recording_commit() -> None:
+        events.append("committed")
+
+    uow.commit = recording_commit  # type: ignore[method-assign]
+    return WorkspaceService(uow, files), ws_repo, files, events
 
 
 async def test_delete_removes_files_after_the_rows() -> None:
@@ -659,13 +658,18 @@ async def test_delete_removes_files_after_the_rows() -> None:
 
     await service.delete(owner, ws_repo._workspaces[created.id], WorkspaceRole.OWNER)
 
-    assert events == [("rows deleted", created.id), ("files removed", created.id)]
+    assert events[-3:] == [
+        ("rows deleted", created.id),
+        "committed",
+        ("files removed", created.id),
+    ]
 
 
 async def test_failed_row_delete_keeps_the_files() -> None:
     service, ws_repo, files, _ = _deleting_service()
     owner = _make_user()
     created = await service.create(owner, "Team")
+    files.events.clear()  # the create's commit
 
     async def db_down(workspace_id: uuid.UUID) -> None:
         raise ConnectionError("database unavailable")
@@ -683,6 +687,7 @@ async def test_forbidden_delete_touches_no_files() -> None:
     service, ws_repo, files, _ = _deleting_service()
     owner = _make_user()
     created = await service.create(owner, "Team")
+    files.events.clear()  # the create's commit
 
     with pytest.raises(ForbiddenError):
         await service.delete(

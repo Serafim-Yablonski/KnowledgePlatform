@@ -8,8 +8,6 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -49,7 +47,13 @@ from src.domain.documents import (
 from src.domain.roles import WorkspaceRole
 from src.domain.search import SearchResult, SearchResults
 from src.domain.workspace import WorkspaceInfo
-from src.mcp_server.auth import McpContext, _authenticate_request, get_mcp_user
+from src.mcp_server.auth import (
+    McpContext,
+    _authenticate_request,
+    get_mcp_redis,
+    get_mcp_services,
+    get_mcp_user,
+)
 from src.mcp_server.schemas import (
     ChunkContent,
     DocumentContent,
@@ -137,14 +141,9 @@ def mock_user() -> User:
 
 @pytest.fixture
 def fake_services():
-    """Patch open_services to yield a stub Services; tests attach service mocks."""
+    """A stub Services as the tools' lifespan state; tests attach service mocks."""
     services = MagicMock()
-
-    @asynccontextmanager
-    async def _fake_open_services() -> AsyncGenerator[MagicMock]:
-        yield services
-
-    with patch("src.mcp_server.tools.open_services", _fake_open_services):
+    with patch("src.mcp_server.tools.get_mcp_services", return_value=services):
         yield services
 
 
@@ -156,7 +155,7 @@ def mock_redis():
     # limiter always passes in tests (well under any per-user limit).
     pipe_mock.execute = AsyncMock(return_value=[1, 0, 1, [], 1])
     redis_mock.pipeline.return_value = pipe_mock
-    with patch("src.mcp_server.tools.get_async_redis_client", return_value=redis_mock):
+    with patch("src.mcp_server.tools.get_mcp_redis", return_value=redis_mock):
         yield
 
 
@@ -183,6 +182,19 @@ class TestGetMcpUser:
     def test_raises_when_state_holds_no_user(self, state: dict[str, Any]) -> None:
         with pytest.raises(UnauthorizedError):
             get_mcp_user(_ctx_with_state(state))
+
+
+class TestLifespanStateHelpers:
+    def test_read_the_lifespan_state_of_the_request(self) -> None:
+        services, redis = MagicMock(), MagicMock()
+        ctx = _ctx_with_state({"services": services, "redis": redis})
+
+        assert (get_mcp_services(ctx), get_mcp_redis(ctx)) == (services, redis)
+
+    @pytest.mark.parametrize("helper", [get_mcp_services, get_mcp_redis])
+    def test_raise_outside_a_request(self, helper: Any) -> None:
+        with pytest.raises(UnauthorizedError):
+            helper(Context())
 
 
 def _workspace_info(name: str, description: str | None) -> WorkspaceInfo:
@@ -502,22 +514,16 @@ async def test_no_tool_exposes_ctx_to_the_model() -> None:
 
 
 @pytest.fixture
-def auth_services():
-    """Patch open_services in the auth module; tests configure auth/api_key mocks."""
-    services = MagicMock()
-
-    @asynccontextmanager
-    async def _fake_open_services() -> AsyncGenerator[MagicMock]:
-        yield services
-
-    with patch("src.mcp_server.auth.open_services", _fake_open_services):
-        yield services
+def auth_services() -> MagicMock:
+    """A stub Services; tests configure auth/api_key mocks."""
+    return MagicMock()
 
 
 class TestAuthenticateRequest:
     async def test_jwt_bearer_uses_auth_service(self, auth_services: MagicMock) -> None:
         request = MagicMock()
         request.headers = {"Authorization": "Bearer header.payload.signature"}
+        request.state.services = auth_services
         expected_user = _make_user()
         auth_services.auth.get_current_user = AsyncMock(return_value=expected_user)
         auth_services.api_key.authenticate = AsyncMock()
@@ -535,6 +541,7 @@ class TestAuthenticateRequest:
     ) -> None:
         request = MagicMock()
         request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+        request.state.services = auth_services
         expected_user = _make_user()
         auth_services.api_key.authenticate = AsyncMock(return_value=expected_user)
 
@@ -553,6 +560,7 @@ class TestAuthenticateRequest:
         # The docstring's claim: the same header yields the same token on REST and MCP.
         request = MagicMock()
         request.headers = {"Authorization": header}
+        request.state.services = auth_services
         auth_services.api_key.authenticate = AsyncMock(return_value=_make_user())
 
         await _authenticate_request(request)
@@ -581,6 +589,7 @@ class TestAuthenticateRequest:
     ) -> None:
         request = MagicMock()
         request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+        request.state.services = auth_services
         auth_services.api_key.authenticate = AsyncMock(
             side_effect=InvalidTokenError("Invalid or revoked API key")
         )
@@ -588,20 +597,16 @@ class TestAuthenticateRequest:
         with pytest.raises(InvalidTokenError, match="Invalid or revoked"):
             await _authenticate_request(request)
 
-    async def test_db_error_propagates(self) -> None:
+    async def test_db_error_propagates(self, auth_services: MagicMock) -> None:
         """A DB error during auth propagates rather than being masked as 401."""
         request = MagicMock()
         request.headers = {"Authorization": "Bearer not-a-jwt-no-dots"}
+        request.state.services = auth_services
+        auth_services.api_key.authenticate = AsyncMock(
+            side_effect=RuntimeError("DB unavailable")
+        )
 
-        @asynccontextmanager
-        async def _failing() -> AsyncGenerator[MagicMock]:
-            raise RuntimeError("DB unavailable")
-            yield  # noqa: RET508
-
-        with (
-            patch("src.mcp_server.auth.open_services", _failing),
-            pytest.raises(RuntimeError, match="DB unavailable"),
-        ):
+        with pytest.raises(RuntimeError, match="DB unavailable"):
             await _authenticate_request(request)
 
 
@@ -757,7 +762,7 @@ class TestRateLimitedTools:
         settings_override.setattr(settings, f"{setting}_WINDOW", 60)
         redis = FakeRedis()
 
-        with patch("src.mcp_server.tools.get_async_redis_client", return_value=redis):
+        with patch("src.mcp_server.tools.get_mcp_redis", return_value=redis):
             for _ in range(2):
                 await tool(_ctx(mock_user), uuid.uuid4(), "q")
             with pytest.raises(RateLimitError):
@@ -782,7 +787,7 @@ class TestRateLimitedTools:
             side_effect=RedisConnectionError("down")
         )
 
-        with patch("src.mcp_server.tools.get_async_redis_client", return_value=redis):
+        with patch("src.mcp_server.tools.get_mcp_redis", return_value=redis):
             if fail_open:
                 await search_documents(_ctx(mock_user), uuid.uuid4(), "q")
             else:
@@ -1161,7 +1166,7 @@ async def test_malformed_workspace_id_is_refused_before_the_tool_runs(
 
     with (
         patch("src.mcp_server.tools.get_mcp_user", return_value=mock_user),
-        patch("src.mcp_server.tools.get_async_redis_client", return_value=redis),
+        patch("src.mcp_server.tools.get_mcp_redis", return_value=redis),
     ):
         async with Client(mcp) as client:
             result = await client.call_tool(

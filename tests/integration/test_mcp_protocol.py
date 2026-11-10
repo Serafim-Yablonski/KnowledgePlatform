@@ -2,7 +2,8 @@
 
 Each test builds a fresh app (a session manager runs once per instance) and starts
 its manager with ``running()``. Auth and tools run on real services over the test
-DB; Redis is faked and outbound HTTP is refused.
+database with real commits, each operation in its own unit of work (ADR-033), so
+concurrent calls run concurrently; Redis is faked and outbound HTTP is refused.
 """
 
 from __future__ import annotations
@@ -28,14 +29,12 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 from mcp.types.jsonrpc import HEADER_MISMATCH, UNSUPPORTED_PROTOCOL_VERSION
 from mcp.types.version import HANDSHAKE_PROTOCOL_VERSIONS
-from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import NullPool, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-import src.composition
-import src.core.http
-import src.core.redis
 import src.mcp_server.tools
+from src.composition import build_services
 from src.core.config import settings
 from src.core.security import (
     create_access_token,
@@ -49,16 +48,14 @@ from src.models.user import User
 from src.repositories.user import SQLAlchemyUserRepository
 from src.repositories.workspace import SQLAlchemyWorkspaceRepository
 from src.schemas.auth import UserCreate
+from tests.support.lifespan import ServedWithState
+from tests.support.mcp import PROTOCOL_VERSION, rpc_request
 
 # Default base URL: a local client against a dev server.
 LOCAL_URL = "http://localhost:8000"
 # A deployment's real hostname, for tests where a non-localhost Host is the point:
 # the SDK's localhost-only Host allowlist (now disabled) rejected it with 421 (F2).
 PUBLIC_URL = "http://kp.example.com"
-
-# The only protocol revision we support: every request is self-contained (no
-# initialize handshake, no session id) and names its version in a header and _meta.
-PROTOCOL_VERSION = "2026-07-28"
 
 
 # ---------------------------------------------------------------------------
@@ -71,65 +68,63 @@ class Member(NamedTuple):
     workspace_id: uuid.UUID
 
 
-async def _create_member(db_session: AsyncSession, name: str) -> Member:
+async def _create_member(session: AsyncSession, name: str) -> Member:
     """A user who owns one workspace, with a JWT for it."""
-    user = await SQLAlchemyUserRepository(db_session).create(
+    user = await SQLAlchemyUserRepository(session).create(
         UserCreate(email=f"{name}@example.com", password="password123"),
         hashed_password="$2b$12$fixturehash",
     )
-    repo = SQLAlchemyWorkspaceRepository(db_session)
+    repo = SQLAlchemyWorkspaceRepository(session)
     ws = await repo.create(
         name=f"{name}-ws",
         slug=f"{name}-{uuid.uuid4().hex[:8]}",
         created_by_id=user.id,
     )
     await repo.add_member(workspace_id=ws.id, user_id=user.id, role=WorkspaceRole.OWNER)
+    await session.commit()
     return Member(create_access_token(user.id), ws.id)
 
 
 @pytest.fixture
-async def mcp_backends(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> AsyncGenerator[None]:
-    """Route the real open_services() — auth and tools alike — to test resources.
-
-    Every unit of work shares the test's one session, so they run one at a time:
-    concurrent tool calls would otherwise use the session concurrently, which
-    SQLAlchemy rejects.
-    """
-    one_at_a_time = anyio.Lock()
-
-    @asynccontextmanager
-    async def _test_session() -> AsyncGenerator[AsyncSession]:
-        async with one_at_a_time:
-            yield db_session
+async def lifespan_state(
+    committing_engine: AsyncEngine,
+) -> AsyncGenerator[dict[str, Any]]:
+    """What the lifespan would hand every request, on test resources."""
 
     def _no_network(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"unexpected outbound HTTP call: {request.url}")
 
     fake_redis = FakeRedis(decode_responses=True)
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_no_network))
-    monkeypatch.setattr(src.composition, "get_session", _test_session)
-    monkeypatch.setattr(src.core.redis, "_async_client", fake_redis)
-    monkeypatch.setattr(src.core.http, "_http_client", http_client)
-    yield
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_no_network)) as http:
+        yield {
+            "services": build_services(committing_engine, fake_redis, http),
+            "redis": fake_redis,
+            "engine": committing_engine,
+        }
     await fake_redis.aclose()
-    await http_client.aclose()
+
+
+def _served(state: dict[str, Any]) -> FastAPI:
+    """A fresh app whose requests carry ``state``, as a server's would after the
+    lifespan (its MCP session manager is started by ``running``)."""
+    app = create_app()
+    app.add_middleware(ServedWithState, state=state)
+    return app
 
 
 @pytest.fixture
-def app(mcp_backends: None) -> FastAPI:
-    return create_app()
+def app(lifespan_state: dict[str, Any]) -> FastAPI:
+    return _served(lifespan_state)
 
 
 @pytest.fixture
-async def alice(db_session: AsyncSession) -> Member:
-    return await _create_member(db_session, "alice")
+async def alice(committing_session: AsyncSession) -> Member:
+    return await _create_member(committing_session, "alice")
 
 
 @pytest.fixture
-async def bob(db_session: AsyncSession) -> Member:
-    return await _create_member(db_session, "bob")
+async def bob(committing_session: AsyncSession) -> Member:
+    return await _create_member(committing_session, "bob")
 
 
 # ---------------------------------------------------------------------------
@@ -219,37 +214,12 @@ def _tool_json(result: CallToolResult) -> Any:
 async def _post_rpc(
     app: FastAPI, headers: dict[str, str], base_url: str = LOCAL_URL
 ) -> httpx.Response:
-    """A raw, valid tools/list POST, for tests about HTTP status and headers.
-
-    Shaped as the SDK client sends it: the version and method in headers and the
-    version and client details in ``params._meta`` (without them the SDK answers 400).
-    """
-    body = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list",
-        "params": {
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-                "io.modelcontextprotocol/clientCapabilities": {},
-                "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"},
-            }
-        },
-    }
+    """A raw, valid tools/list POST, for tests about HTTP status and headers."""
+    body, rpc_headers = rpc_request("tools/list")
     async with httpx.AsyncClient(
         transport=ASGITransport(app), base_url=base_url, follow_redirects=False
     ) as http:
-        return await http.post(
-            "/mcp",
-            json=body,
-            headers={
-                # Without this Accept the SDK answers 406 whatever else is wrong.
-                "Accept": "application/json, text/event-stream",
-                "MCP-Protocol-Version": PROTOCOL_VERSION,
-                "MCP-Method": "tools/list",
-                **headers,
-            },
-        )
+        return await http.post("/mcp", json=body, headers={**rpc_headers, **headers})
 
 
 # ---------------------------------------------------------------------------
@@ -312,44 +282,6 @@ async def test_default_mode_client_discovers_the_server(
 
 
 # ---------------------------------------------------------------------------
-# Harness
-# ---------------------------------------------------------------------------
-
-
-async def test_units_of_work_never_overlap(
-    app: FastAPI, alice: Member, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Two concurrent tool calls would use the shared test session at once, which
-    # SQLAlchemy rejects; the fixture's lock must serialize them.
-    locked_session = src.composition.get_session
-    in_flight = peak = 0
-
-    @asynccontextmanager
-    async def _counting_session() -> AsyncGenerator[AsyncSession]:
-        nonlocal in_flight, peak
-        async with locked_session() as session:
-            in_flight += 1
-            peak = max(peak, in_flight)
-            try:
-                await anyio.sleep(0.05)  # widen the window an overlap would need
-                yield session
-            finally:
-                in_flight -= 1
-
-    monkeypatch.setattr(src.composition, "get_session", _counting_session)
-
-    async with (
-        running(app),
-        mcp_client(app, _SwappableBearer(alice.token)) as client,
-        anyio.create_task_group() as tg,
-    ):
-        for _ in range(2):
-            tg.start_soon(client.call_tool, "list_workspaces", {})
-
-    assert peak == 1
-
-
-# ---------------------------------------------------------------------------
 # Identity and tenancy
 # ---------------------------------------------------------------------------
 
@@ -389,7 +321,10 @@ async def test_two_users_isolated(app: FastAPI, alice: Member, bob: Member) -> N
 
 
 async def test_concurrent_callers_each_see_themselves(
-    alice: Member, bob: Member, mcp_backends: None, monkeypatch: pytest.MonkeyPatch
+    alice: Member,
+    bob: Member,
+    lifespan_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Both requests pass auth before either tool reads its user, so identity kept
     # anywhere the two requests share (a module global, a shared dict) would show
@@ -408,7 +343,7 @@ async def test_concurrent_callers_each_see_themselves(
         return await list_workspaces(*args, **kwargs)
 
     monkeypatch.setattr(src.mcp_server.tools, "list_workspaces", _after_both_arrive)
-    app = create_app()  # registers the patched tool
+    app = _served(lifespan_state)  # registers the patched tool
     results: dict[str, CallToolResult] = {}
 
     async def _call(name: str, client: Client) -> None:
@@ -428,12 +363,13 @@ async def test_concurrent_callers_each_see_themselves(
 
 
 async def test_user_never_written_into_server_state(
-    app: FastAPI, alice: Member
+    lifespan_state: dict[str, Any], alice: Member
 ) -> None:
     # A server puts its own ``state`` dict in each request's scope (lifespan state,
     # copied per request by uvicorn). The user must not be written into it: if that
     # dict were ever shared, the user would leak into other requests.
-    server_state: dict[str, Any] = {"from_lifespan": "kept"}
+    server_state: dict[str, Any] = {**lifespan_state, "from_lifespan": "kept"}
+    app = create_app()  # no ServedWithState: the server below passes its own dict
 
     async def _server(scope: Scope, receive: Receive, send: Send) -> None:
         scope["state"] = server_state  # the same dict for every request
@@ -443,7 +379,7 @@ async def test_user_never_written_into_server_state(
         result = await c.call_tool("list_workspaces", {})
 
     assert _workspace_ids(result) == [str(alice.workspace_id)]
-    assert server_state == {"from_lifespan": "kept"}
+    assert server_state == {**lifespan_state, "from_lifespan": "kept"}
 
 
 async def test_non_member_workspace_is_tool_error(
@@ -628,12 +564,13 @@ def _expired_access_token(user_id: uuid.UUID) -> str:
     )
 
 
-async def _inactive_users_token(db_session: AsyncSession) -> str:
-    member = await _create_member(db_session, "carol")
+async def _inactive_users_token(session: AsyncSession) -> str:
+    member = await _create_member(session, "carol")
     user_id = decode_token(member.token).sub
-    await db_session.execute(
+    await session.execute(
         update(User).where(User.id == user_id).values(is_active=False)
     )
+    await session.commit()
     return member.token
 
 
@@ -652,7 +589,7 @@ async def _inactive_users_token(db_session: AsyncSession) -> str:
 )
 async def test_credential_failures_are_401(
     app: FastAPI,
-    db_session: AsyncSession,
+    committing_session: AsyncSession,
     alice: Member,
     authorization: str | None,
     challenge: str,
@@ -666,7 +603,7 @@ async def test_credential_failures_are_401(
         "refresh": lambda: create_refresh_token(alice_id),
     }
     if authorization == "inactive":
-        authorization = f"Bearer {await _inactive_users_token(db_session)}"
+        authorization = f"Bearer {await _inactive_users_token(committing_session)}"
     elif authorization in tokens:
         authorization = f"Bearer {tokens[authorization]()}"
     headers = {"Authorization": authorization} if authorization else {}
@@ -679,18 +616,23 @@ async def test_credential_failures_are_401(
 
 
 async def test_auth_backend_failure_is_503_not_401(
-    app: FastAPI, alice: Member, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI,
+    alice: Member,
+    lifespan_state: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # An outage must not look like bad credentials: a 401 would make clients drop a
     # valid token and re-authenticate.
-    @asynccontextmanager
-    async def _db_down() -> AsyncGenerator[AsyncSession]:
-        raise ConnectionRefusedError("database unavailable")
-        yield  # pragma: no cover
+    # Nothing listens on port 1: the connection is refused, as with Postgres down.
+    db_down = create_async_engine(
+        "postgresql+asyncpg://kp:kp@127.0.0.1:1/kp", poolclass=NullPool
+    )
+    async with httpx.AsyncClient() as unused:
+        db_down_services = build_services(db_down, lifespan_state["redis"], unused)
+        monkeypatch.setitem(lifespan_state, "services", db_down_services)
 
-    monkeypatch.setattr(src.composition, "get_session", _db_down)
-
-    response = await _post_rpc(app, {"Authorization": f"Bearer {alice.token}"})
+        response = await _post_rpc(app, {"Authorization": f"Bearer {alice.token}"})
+    await db_down.dispose()
 
     assert response.status_code == 503
     assert "www-authenticate" not in response.headers
