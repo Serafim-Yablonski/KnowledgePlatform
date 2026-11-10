@@ -1,5 +1,5 @@
 # 016. Search Result Cache Invalidation Strategy
-Status: Withdrawn (2026-11-03): the search-result cache it describes was never built, and nothing calls its invalidation. A cache added later must be invalidated on every chunk swap (embedding, re-index, ADR-030) and document delete, not only on update and delete as below | Was: Accepted | Date: 2026-05-26
+Status: Withdrawn (2026-11-03): the search-result cache it describes was built and then removed, because its hit rate was zero, and nothing calls its invalidation. A cache added later must be invalidated on every chunk swap (embedding, re-index, ADR-030) and document delete, not only on update and delete as below | Was: Accepted | Date: 2026-05-26
 
 ## Context
 Search results are cached in Redis for 300 s (key: `nexus:response:search:{workspace_id}:{query_hash}:{top_k}:{min_score}`). Without invalidation, deleting or updating a document leaves ghost chunks in cached results for up to 5 minutes — users clicking them receive 404s. The cache key contains no document ID because a single result set ranks chunks from many documents, making per-document targeting impossible without a reverse index.

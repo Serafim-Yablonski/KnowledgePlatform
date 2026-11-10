@@ -1,4 +1,6 @@
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import BinaryIO, Protocol
 
 from src.domain.documents import (
@@ -95,6 +97,8 @@ class DocumentRepositoryProtocol(Protocol):
         self, workspace_id: uuid.UUID, document_id: uuid.UUID
     ) -> Document | None: ...
 
+    async def set_file_path(self, document: Document, file_path: str) -> None: ...
+
     async def update(
         self, document: Document, data: DocumentUpdateInput
     ) -> Document: ...
@@ -150,7 +154,36 @@ class ApiKeyRepositoryProtocol(Protocol):
 
     async def deactivate(self, key_id: uuid.UUID, user_id: uuid.UUID) -> None: ...
 
-    async def invalidate_all_for_user(self, user_id: uuid.UUID) -> None: ...
+
+class UnitOfWorkProtocol(Protocol):
+    """One transaction with every repository bound to it (ADR-033).
+
+    Opened by a service method with ``async with self._uow() as uow:``. Nothing is
+    written unless the block calls ``commit()``; leaving it any other way rolls back.
+    """
+
+    @property
+    def users(self) -> UserRepositoryProtocol: ...
+
+    @property
+    def workspaces(self) -> WorkspaceRepositoryProtocol: ...
+
+    @property
+    def documents(self) -> DocumentRepositoryProtocol: ...
+
+    @property
+    def chunks(self) -> ChunkRepositoryProtocol: ...
+
+    @property
+    def search(self) -> SearchRepositoryProtocol: ...
+
+    @property
+    def api_keys(self) -> ApiKeyRepositoryProtocol: ...
+
+    async def commit(self) -> None: ...
+
+
+type UnitOfWorkFactory = Callable[[], AbstractAsyncContextManager[UnitOfWorkProtocol]]
 
 
 class FileStoreProtocol(Protocol):

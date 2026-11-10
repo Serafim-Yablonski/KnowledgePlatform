@@ -1,34 +1,51 @@
 import traceback
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import TypedDict
 
+import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import Route
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from src.ai.graphs.checkpointer import setup_checkpointer
 from src.api.health import router as health_router
 from src.api.v1 import router as v1_router
+from src.composition import Services, build_services
 from src.core.config import get_settings
-from src.core.database import engine
+from src.core.database import build_engine
 from src.core.exceptions import (
     AppError,
     RateLimitError,
     ServiceUnavailableError,
     UnauthorizedError,
 )
-from src.core.http import close_http_client, init_http_client
+from src.core.http import build_http_client
 from src.core.logging import setup_logging
 from src.core.observability import instrument_app, setup_observability
-from src.core.redis import close_redis, init_redis
+from src.core.redis import build_redis
 
 logger = structlog.get_logger(__name__)
 
 
+class LifespanState(TypedDict):
+    """What the lifespan hands every request (Starlette's lifespan state: the server
+    copies it into each request's ``request.state``). REST reads it in
+    ``src.core.dependencies`` and ``src.api.health``, MCP in ``src.mcp_server.auth``.
+    """
+
+    services: Services
+    engine: AsyncEngine  # /health's own probe
+    redis: aioredis.Redis  # the rate limiters and /health
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[LifespanState]:
+    """The process's pools and clients, opened here and nowhere at import, so each
+    app instance has its own (ADR-033)."""
     cfg = get_settings()
 
     setup_logging(environment=cfg.ENVIRONMENT, log_level=cfg.LOG_LEVEL)
@@ -38,21 +55,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         service_name=cfg.SERVICE_NAME,
     )
 
-    await init_redis()
-    await init_http_client()
-    app.state.engine = engine
-
-    async with setup_checkpointer() as checkpointer:
-        app.state.checkpointer = checkpointer
+    async with AsyncExitStack() as stack:
+        engine = build_engine(cfg.ASYNC_DATABASE_URL.get_secret_value())
+        stack.push_async_callback(engine.dispose)
+        redis = await stack.enter_async_context(
+            build_redis(cfg.REDIS_URL.get_secret_value())
+        )
+        http = await stack.enter_async_context(build_http_client())
+        await stack.enter_async_context(setup_checkpointer())
         # The MCP session manager handles requests in an anyio task group that
         # only its run() provides; nothing else starts it.
-        async with app.state.mcp_session_manager.run():
-            logger.info("startup complete", environment=cfg.ENVIRONMENT)
-            yield
-
-    await close_http_client()
-    await engine.dispose()
-    await close_redis()
+        await stack.enter_async_context(app.state.mcp_session_manager.run())
+        logger.info("startup complete", environment=cfg.ENVIRONMENT)
+        yield LifespanState(
+            services=build_services(engine, redis, http), engine=engine, redis=redis
+        )
     logger.info("shutdown complete")
 
 

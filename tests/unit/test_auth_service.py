@@ -15,6 +15,7 @@ from src.core.security import create_access_token
 from src.domain.user import TokenPair
 from src.models.user import User
 from src.services.auth import AuthService
+from tests.support.unit_of_work import FakeUnitOfWork
 
 
 class StubUserRepository:
@@ -62,7 +63,7 @@ class StubUserRepository:
 
 def _make_service() -> tuple[AuthService, StubUserRepository]:
     repo = StubUserRepository()
-    return AuthService(repo), repo
+    return AuthService(FakeUnitOfWork(users=repo)), repo
 
 
 # ---------------------------------------------------------------------------
@@ -229,8 +230,7 @@ async def test_refresh_rejects_inactive_user() -> None:
 
 
 async def test_password_is_hashed_in_repository() -> None:
-    _, repo = _make_service()
-    service = AuthService(repo)
+    service, repo = _make_service()
     await service.register("eve@example.com", "plaintext1")
     user = await repo.get_by_email("eve@example.com")
     assert user is not None

@@ -2,38 +2,30 @@
 
 Adapters (REST, MCP) and scripts get finished services from here and never construct
 repositories themselves. ``Services`` takes its resources as arguments and never
-opens them, so each caller owns their lifetime: FastAPI per request,
-``open_services()`` per MCP call. The pipeline workers need none of these: their jobs
-run their own queries on the engine each worker process opens, and the embed worker
-builds its ``EmbeddingService`` with the same ``from_settings`` (ADR-027).
+opens them, so its caller owns their lifetime: in the API, the lifespan builds one
+per process and hands it to the adapters as lifespan state (``src.main``). It holds
+no session: each service method opens its own unit of work from the factory
+(ADR-033). The pipeline workers
+need none of these: their jobs run their own queries on the engine each worker
+process opens, and the embed worker builds its ``EmbeddingService`` with the same
+``from_settings`` (ADR-027).
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from functools import cached_property
 from pathlib import Path
 
 import httpx
 import redis.asyncio as aioredis
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.ai.embeddings import EmbeddingService
 from src.core.cache import ResponseCache
 from src.core.config import get_settings, settings
-from src.core.database import get_session
-from src.core.http import get_async_http_client
-from src.core.redis import get_async_redis_client
-from src.repositories.api_key import SQLAlchemyApiKeyRepository
-from src.repositories.api_key_cached import CachedApiKeyRepository
-from src.repositories.chunk import SQLAlchemyChunkRepository
-from src.repositories.document import SQLAlchemyDocumentRepository
 from src.repositories.file_store import LocalFileStore
-from src.repositories.search import SQLAlchemySearchRepository
-from src.repositories.user import SQLAlchemyUserRepository
-from src.repositories.workspace import SQLAlchemyWorkspaceRepository
-from src.repositories.workspace_cached import CachedWorkspaceRepository
+from src.repositories.protocols import UnitOfWorkFactory
+from src.repositories.unit_of_work import unit_of_work_factory
 from src.services.ai import AIService
 from src.services.api_key import ApiKeyService
 from src.services.auth import AuthService
@@ -44,25 +36,21 @@ from src.services.workspace import WorkspaceService
 
 
 class Services:
-    """All services for one unit of work, sharing one DB session.
+    """All services, on one unit-of-work factory.
 
-    Built lazily: a request that only needs ``workspace`` never builds the embedding
-    client. Not shareable across concurrent requests — the session isn't.
+    Built lazily: a caller that only needs ``workspace`` never builds the embedding
+    client. Holds no session, so concurrent callers can share one instance.
     """
 
     def __init__(
         self,
-        session: AsyncSession,
+        uow: UnitOfWorkFactory,
         redis: aioredis.Redis,
         http_client: httpx.AsyncClient,
     ) -> None:
-        self._session = session
+        self._uow = uow
         self._redis = redis
         self._http = http_client
-
-    @cached_property
-    def _cache(self) -> ResponseCache:
-        return ResponseCache(self._redis)
 
     @cached_property
     def embeddings(self) -> EmbeddingService:
@@ -70,21 +58,15 @@ class Services:
 
     @cached_property
     def auth(self) -> AuthService:
-        return AuthService(SQLAlchemyUserRepository(self._session))
+        return AuthService(self._uow)
 
     @cached_property
     def api_key(self) -> ApiKeyService:
-        inner = SQLAlchemyApiKeyRepository(self._session)
-        return ApiKeyService(CachedApiKeyRepository(inner, self._cache))
+        return ApiKeyService(self._uow, ResponseCache(self._redis))
 
     @cached_property
     def workspace(self) -> WorkspaceService:
-        inner = SQLAlchemyWorkspaceRepository(self._session)
-        return WorkspaceService(
-            workspace_repo=CachedWorkspaceRepository(inner, self._cache),
-            user_repo=SQLAlchemyUserRepository(self._session),
-            files=self.files,
-        )
+        return WorkspaceService(self._uow, files=self.files)
 
     @cached_property
     def files(self) -> LocalFileStore:
@@ -93,19 +75,11 @@ class Services:
 
     @cached_property
     def document(self) -> DocumentService:
-        return DocumentService(
-            repo=SQLAlchemyDocumentRepository(self._session),
-            chunk_repo=SQLAlchemyChunkRepository(self._session),
-            session=self._session,
-            files=self.files,
-        )
+        return DocumentService(self._uow, files=self.files)
 
     @cached_property
     def search(self) -> SearchService:
-        return SearchService(
-            search_repo=SQLAlchemySearchRepository(self._session),
-            embedding_service=self.embeddings,
-        )
+        return SearchService(self._uow, embedding_service=self.embeddings)
 
     @cached_property
     def ai(self) -> AIService:
@@ -116,8 +90,7 @@ class Services:
         return ResearchService(search_service=self.search, redis_client=self._redis)
 
 
-@asynccontextmanager
-async def open_services() -> AsyncGenerator[Services]:
-    """One unit of work over the API process's pools, for callers outside FastAPI."""
-    async with get_session() as session:
-        yield Services(session, get_async_redis_client(), get_async_http_client())
+def build_services(
+    db: AsyncEngine, redis: aioredis.Redis, http_client: httpx.AsyncClient
+) -> Services:
+    return Services(unit_of_work_factory(db), redis, http_client)

@@ -21,12 +21,12 @@ from sqlalchemy import NullPool, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-import src.core.redis
 from src.api import health
 from src.domain.documents import DocumentStatus
 from src.main import app
 from tests.integration.test_work_queue import _documents
 from tests.support.database import migrate, scratch_database
+from tests.support.lifespan import ServedWithState
 
 
 @pytest.fixture(scope="module")
@@ -48,22 +48,21 @@ async def engine(health_db: str) -> AsyncGenerator[AsyncEngine]:
 
 
 @pytest.fixture
-def cache(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
-    """The app's Redis client, as the lifespan would set it."""
-    fake = FakeRedis()
-    monkeypatch.setattr(src.core.redis, "_async_client", fake)
-    return fake
+def cache() -> FakeRedis:
+    """A reachable Redis for the app's client."""
+    return FakeRedis()
 
 
-async def _health(monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine) -> Any:
-    monkeypatch.setattr(app.state, "engine", engine, raising=False)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+async def _health(engine: AsyncEngine, cache: aioredis.Redis) -> Any:
+    """/health served with ``engine`` and ``cache`` as the lifespan's own."""
+    served = ServedWithState(app, {"engine": engine, "redis": cache})
+    async with AsyncClient(transport=ASGITransport(served), base_url="http://t") as c:
         response = await c.get("/health")
     return response.status_code, response.json()
 
 
 async def test_a_ready_api_answers_200_and_reports_each_phases_lag(
-    monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine, cache: FakeRedis
+    engine: AsyncEngine, cache: FakeRedis
 ) -> None:
     await _documents(
         async_sessionmaker(engine),
@@ -72,7 +71,7 @@ async def test_a_ready_api_answers_200_and_reports_each_phases_lag(
         waited=[timedelta(hours=1), timedelta(hours=2)],
     )
 
-    status, body = await _health(monkeypatch, engine)
+    status, body = await _health(engine, cache)
 
     assert status == 200
     assert body["status"] == "healthy"
@@ -82,14 +81,14 @@ async def test_a_ready_api_answers_200_and_reports_each_phases_lag(
 
 
 async def test_lag_is_information_a_lagging_pipeline_stays_200(
-    monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine, cache: FakeRedis
+    engine: AsyncEngine, cache: FakeRedis
 ) -> None:
     """A week-old upload no worker took: the API itself is still ready."""
     await _documents(
         async_sessionmaker(engine), DocumentStatus.PENDING, waited=[timedelta(days=7)]
     )
 
-    status, body = await _health(monkeypatch, engine)
+    status, body = await _health(engine, cache)
 
     assert (status, body["status"]) == (200, "healthy")
     assert body["pipeline"]["extract_lag_s"] >= 7 * 24 * 3600
@@ -101,7 +100,7 @@ async def test_a_failed_lag_query_is_reported_and_leaves_the_status_alone(
     # A real database error, raised by PostgreSQL itself.
     monkeypatch.setattr(health, "lag_statement", lambda _: sa.text("SELECT 1/0"))
 
-    status, body = await _health(monkeypatch, engine)
+    status, body = await _health(engine, cache)
 
     assert (status, body["status"]) == (200, "healthy")
     assert body["pipeline"] == "error"
@@ -137,14 +136,13 @@ async def refusing(health_db: str) -> AsyncGenerator[dict[str, str]]:
     "how", ["port-closed", "wrong-password", "missing-database", "connection-limit"]
 )
 async def test_a_database_that_refuses_the_api_is_unhealthy(
-    monkeypatch: pytest.MonkeyPatch,
     cache: FakeRedis,
     refusing: dict[str, str],
     how: str,
 ) -> None:
     refused = create_async_engine(refusing[how], poolclass=NullPool)
     try:
-        status, body = await _health(monkeypatch, refused)
+        status, body = await _health(refused, cache)
     finally:
         await refused.dispose()
 
@@ -182,7 +180,7 @@ async def test_a_database_that_never_answers_fails_within_one_bound(
     )
     started = time.monotonic()
     try:
-        status, body = await asyncio.wait_for(_health(monkeypatch, silent), 10)
+        status, body = await asyncio.wait_for(_health(silent, cache), 10)
     finally:
         await silent.dispose()
 
@@ -199,10 +197,9 @@ async def test_a_cache_that_never_answers_fails_within_the_bound(
 ) -> None:
     monkeypatch.setattr(health, "PROBE_TIMEOUT_S", 1.0)
     silent = aioredis.Redis(host="127.0.0.1", port=silent_server)
-    monkeypatch.setattr(src.core.redis, "_async_client", silent)
     started = time.monotonic()
     try:
-        status, body = await asyncio.wait_for(_health(monkeypatch, engine), 10)
+        status, body = await asyncio.wait_for(_health(engine, silent), 10)
     finally:
         await silent.aclose()
 
@@ -210,28 +207,7 @@ async def test_a_cache_that_never_answers_fails_within_the_bound(
     assert (status, body["checks"]) == (503, {"database": "ok", "cache": "error"})
 
 
-async def test_before_startup_nothing_is_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No engine and no cache client yet (the lifespan hasn't run)."""
-    monkeypatch.setattr(src.core.redis, "_async_client", None)
-    monkeypatch.delattr(app.state, "engine", raising=False)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        response = await c.get("/health")
-
-    assert response.status_code == 503
-    assert response.json()["checks"] == {
-        "database": "unavailable",
-        "cache": "unavailable",
-    }
-    assert response.json()["pipeline"] == "unavailable"
-
-
-async def test_an_unreachable_cache_is_unhealthy(
-    monkeypatch: pytest.MonkeyPatch, engine: AsyncEngine
-) -> None:
-    monkeypatch.setattr(src.core.redis, "_async_client", FakeRedis(connected=False))
-
-    status, body = await _health(monkeypatch, engine)
+async def test_an_unreachable_cache_is_unhealthy(engine: AsyncEngine) -> None:
+    status, body = await _health(engine, FakeRedis(connected=False))
 
     assert (status, body["checks"]["cache"]) == (503, "error")

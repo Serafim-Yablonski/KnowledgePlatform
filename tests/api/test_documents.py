@@ -306,7 +306,7 @@ async def test_full_crud_cycle(async_client: AsyncClient) -> None:
 
 
 async def test_a_failed_document_says_why(
-    async_client: AsyncClient, db_session: AsyncSession
+    async_client: AsyncClient, committing_session: AsyncSession
 ) -> None:
     token, _ = await _register_and_token(async_client)
     ws_id = await _create_workspace(async_client, token)
@@ -321,8 +321,8 @@ async def test_a_failed_document_says_why(
         status=DocumentStatus.FAILED,
         failure_reason=FailureReason.NO_TEXT,
     )
-    db_session.add(doc)
-    await db_session.flush()
+    committing_session.add(doc)
+    await committing_session.commit()
 
     got = await async_client.get(f"{_docs_url(ws_id)}/{doc.id}", headers=_auth(token))
     listed = await async_client.get(_docs_url(ws_id), headers=_auth(token))

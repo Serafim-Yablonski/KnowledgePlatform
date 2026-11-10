@@ -13,14 +13,17 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from src.composition import open_services
 from src.core.config import settings
 from src.core.exceptions import AppError, RateLimitError, ServiceUnavailableError
 from src.core.rate_limit import SlidingWindowRateLimiter
-from src.core.redis import get_async_redis_client
 from src.domain.documents import DEFAULT_PAGE_SIZE, DocumentPageSize
 from src.domain.search import SearchQuery
-from src.mcp_server.auth import McpContext, get_mcp_user
+from src.mcp_server.auth import (
+    McpContext,
+    get_mcp_redis,
+    get_mcp_services,
+    get_mcp_user,
+)
 from src.mcp_server.schemas import (
     ChunkContent,
     DocumentContent,
@@ -36,11 +39,15 @@ logger = structlog.get_logger(__name__)
 
 
 async def _mcp_rate_limit(
-    user_id: uuid.UUID, key_prefix: str, max_requests: int, window_seconds: int
+    ctx: McpContext,
+    user_id: uuid.UUID,
+    key_prefix: str,
+    max_requests: int,
+    window_seconds: int,
 ) -> None:
     # REST's settings for the same operation, in MCP's own buckets (key_prefix).
     limiter = SlidingWindowRateLimiter(
-        get_async_redis_client(),
+        get_mcp_redis(ctx),
         key_prefix,
         max_requests,
         window_seconds,
@@ -67,19 +74,20 @@ async def search_documents(
 ) -> SearchHits:
     user = get_mcp_user(ctx)
     await _mcp_rate_limit(
+        ctx,
         user.id,
         "mcp_search",
         settings.RATE_LIMIT_SEARCH_REQUESTS,
         settings.RATE_LIMIT_SEARCH_WINDOW,
     )
-    async with open_services() as services:
-        workspace_svc = services.workspace
-        # ForbiddenError if not a member
-        await workspace_svc.get_user_role(user, workspace_id)
-        search_svc = services.search
-        result = await search_svc.search(
-            workspace_id=workspace_id, query=query, top_k=top_k
-        )
+    services = get_mcp_services(ctx)
+    workspace_svc = services.workspace
+    # ForbiddenError if not a member
+    await workspace_svc.get_user_role(user, workspace_id)
+    search_svc = services.search
+    result = await search_svc.search(
+        workspace_id=workspace_id, query=query, top_k=top_k
+    )
     return SearchHits(
         results=[
             SearchHit(
@@ -109,10 +117,10 @@ async def list_documents(
     ] = DEFAULT_PAGE_SIZE,
 ) -> DocumentList:
     user = get_mcp_user(ctx)
-    async with open_services() as services:
-        # ForbiddenError if not a member
-        await services.workspace.get_user_role(user, workspace_id)
-        page = await services.document.list(workspace_id, cursor, limit)
+    services = get_mcp_services(ctx)
+    # ForbiddenError if not a member
+    await services.workspace.get_user_role(user, workspace_id)
+    page = await services.document.list(workspace_id, cursor, limit)
     return DocumentList(
         documents=[
             DocumentSummary(
@@ -145,12 +153,12 @@ async def read_document(
     ] = 8,
 ) -> DocumentContent:
     user = get_mcp_user(ctx)
-    async with open_services() as services:
-        # ForbiddenError if not a member
-        await services.workspace.get_user_role(user, workspace_id)
-        doc = await services.document.read(
-            workspace_id, document_id, start_chunk, max_chunks
-        )
+    services = get_mcp_services(ctx)
+    # ForbiddenError if not a member
+    await services.workspace.get_user_role(user, workspace_id)
+    doc = await services.document.read(
+        workspace_id, document_id, start_chunk, max_chunks
+    )
     return DocumentContent(
         document_id=doc.document_id,
         title=doc.title,
@@ -189,21 +197,22 @@ async def start_research(
 ) -> dict[str, Any]:
     user = get_mcp_user(ctx)
     await _mcp_rate_limit(
+        ctx,
         user.id,
         "mcp_research_start",
         settings.RATE_LIMIT_RESEARCH_START_REQUESTS,
         settings.RATE_LIMIT_RESEARCH_START_WINDOW,
     )
-    async with open_services() as services:
-        workspace_svc = services.workspace
-        await workspace_svc.get_user_role(user, workspace_id)
-        research_svc = services.research
-        thread_id = await research_svc.start_research(
-            workspace_id=workspace_id,
-            user_id=user.id,
-            topic=topic,
-            max_iterations=max_iterations,
-        )
+    services = get_mcp_services(ctx)
+    workspace_svc = services.workspace
+    await workspace_svc.get_user_role(user, workspace_id)
+    research_svc = services.research
+    thread_id = await research_svc.start_research(
+        workspace_id=workspace_id,
+        user_id=user.id,
+        topic=topic,
+        max_iterations=max_iterations,
+    )
     return {"thread_id": thread_id, "status": "running"}
 
 
@@ -219,13 +228,13 @@ async def get_research_status(
     ],
 ) -> dict[str, Any]:
     user = get_mcp_user(ctx)
-    async with open_services() as services:
-        workspace_svc = services.workspace
-        await workspace_svc.get_user_role(user, workspace_id)
-        research_svc = services.research
-        status = await research_svc.get_status(
-            workspace_id=workspace_id, user_id=user.id, thread_id=str(thread_id)
-        )
+    services = get_mcp_services(ctx)
+    workspace_svc = services.workspace
+    await workspace_svc.get_user_role(user, workspace_id)
+    research_svc = services.research
+    status = await research_svc.get_status(
+        workspace_id=workspace_id, user_id=user.id, thread_id=str(thread_id)
+    )
     result: dict[str, Any] = {
         "thread_id": status.thread_id,
         "status": status.status,
@@ -245,8 +254,8 @@ async def get_research_status(
 
 async def list_workspaces(ctx: McpContext) -> WorkspaceList:
     user = get_mcp_user(ctx)
-    async with open_services() as services:
-        workspaces = await services.workspace.list_for_user(user)
+    services = get_mcp_services(ctx)
+    workspaces = await services.workspace.list_for_user(user)
     return WorkspaceList(
         workspaces=[
             WorkspaceSummary(id=ws.id, name=ws.name, description=ws.description)

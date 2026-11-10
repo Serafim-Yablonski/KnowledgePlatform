@@ -1,8 +1,8 @@
 """Integration tests for the MCP server against real PostgreSQL.
 
-Tools and auth run on real services built by the composition root over
-the test DB session; only external calls are faked: Gemini's HTTP API (the real
-EmbeddingService runs) and rate limiting.
+Tools and auth run on real services built by the composition root over the test
+database, with real commits; only external calls are faked: Gemini's HTTP API (the
+real EmbeddingService runs) and rate limiting.
 Protocol-level tests through the MCP client live in test_mcp_protocol.py.
 """
 
@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncGenerator, Generator
-from contextlib import ExitStack, asynccontextmanager
+from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -23,10 +22,10 @@ from fakeredis.aioredis import FakeRedis
 from mcp.server.context import ServerRequestContext
 from mcp.server.mcpserver import Context
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from starlette.requests import Request
 
-from src.composition import Services
+from src.composition import Services, build_services
 from src.core.exceptions import ForbiddenError, InvalidTokenError, NotFoundError
 from src.domain.documents import (
     ContentType,
@@ -48,6 +47,7 @@ from src.mcp_server.tools import (
     read_document,
     search_documents,
 )
+from src.models.api_key import ApiKey
 from src.models.chunk import EMBEDDING_DIMS, DocumentChunk
 from src.models.document import Document
 from src.models.user import User
@@ -61,28 +61,19 @@ from src.schemas.auth import UserCreate
 
 
 @pytest.fixture
-async def mcp_user(db_session: AsyncSession) -> User:
-    repo = SQLAlchemyUserRepository(db_session)
-    return await repo.create(
+async def mcp_user(committing_session: AsyncSession) -> User:
+    repo = SQLAlchemyUserRepository(committing_session)
+    user = await repo.create(
         UserCreate(email="mcp-test@example.com", password="password123"),
         hashed_password="$2b$12$fixturehash",
     )
+    await committing_session.commit()
+    return user
 
 
 @pytest.fixture
-async def mcp_workspace(db_session: AsyncSession, mcp_user: User) -> uuid.UUID:
-    repo = SQLAlchemyWorkspaceRepository(db_session)
-    ws = await repo.create(
-        name="MCP Test Workspace",
-        slug=f"mcp-test-{uuid.uuid4().hex[:8]}",
-        created_by_id=mcp_user.id,
-    )
-    await repo.add_member(
-        workspace_id=ws.id,
-        user_id=mcp_user.id,
-        role=WorkspaceRole.OWNER,
-    )
-    return ws.id
+async def mcp_workspace(committing_session: AsyncSession, mcp_user: User) -> uuid.UUID:
+    return await _workspace_of(committing_session, mcp_user, "MCP Test Workspace")
 
 
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIMS - 1)
@@ -96,40 +87,29 @@ def embedded() -> list[str]:
 
 @pytest.fixture
 async def services(
-    db_session: AsyncSession, embedded: list[str]
+    committing_engine: AsyncEngine, fake_redis: FakeRedis, embedded: list[str]
 ) -> AsyncGenerator[Services]:
     def gemini(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         embedded.extend(r["content"]["parts"][0]["text"] for r in body["requests"])
         return httpx.Response(200, json={"embeddings": [{"values": _VECTOR}]})
 
-    fake_redis = FakeRedis()
     async with httpx.AsyncClient(transport=httpx.MockTransport(gemini)) as http:
-        yield Services(db_session, fake_redis, http_client=http)
-    await fake_redis.aclose()
+        yield build_services(committing_engine, fake_redis, http)
 
 
 @pytest.fixture
-def real_services(services: Services) -> Generator[Services]:
-    """Route every MCP entry point's open_services() to the test-DB services."""
-
-    @asynccontextmanager
-    async def _open() -> AsyncGenerator[Services]:
-        yield services
-
-    with ExitStack() as stack:
-        for module in ("auth", "tools"):
-            stack.enter_context(patch(f"src.mcp_server.{module}.open_services", _open))
-        stack.enter_context(
-            patch("src.mcp_server.tools._mcp_rate_limit", new=AsyncMock())
-        )
-        yield services
+def real_services(services: Services) -> Services:
+    """The services the lifespan state carries to every entry point below."""
+    return services
 
 
 @pytest.fixture
-def as_user(mcp_user: User) -> McpContext:
-    """The tool Context of a request MCP auth let through as ``mcp_user``."""
-    scope = {"type": "http", "path": "/mcp", "state": {"mcp_user": mcp_user}}
+def as_user(mcp_user: User, services: Services, fake_redis: FakeRedis) -> McpContext:
+    """The tool Context of a request MCP auth let through as ``mcp_user``, beside
+    what the lifespan put in its state."""
+    state = {"mcp_user": mcp_user, "services": services, "redis": fake_redis}
+    scope = {"type": "http", "path": "/mcp", "state": state}
     request_context = ServerRequestContext(
         request_id=1,
         protocol_version="2026-07-28",
@@ -142,7 +122,7 @@ def as_user(mcp_user: User) -> McpContext:
     return Context(request_context=request_context)
 
 
-def _bearer_request(token: str) -> Request:
+def _bearer_request(token: str, services: Services) -> Request:
     return Request(
         {
             "type": "http",
@@ -150,6 +130,7 @@ def _bearer_request(token: str) -> Request:
             "path": "/mcp",
             "query_string": b"",
             "headers": [(b"authorization", f"Bearer {token}".encode())],
+            "state": {"services": services},
         }
     )
 
@@ -157,43 +138,69 @@ def _bearer_request(token: str) -> Request:
 class TestApiKeyAuth:
     @pytest.mark.asyncio
     async def test_db_api_key_authenticates_and_records_use(
-        self, mcp_user: User, db_session: AsyncSession, real_services: Services
+        self,
+        mcp_user: User,
+        committing_session: AsyncSession,
+        real_services: Services,
     ) -> None:
         api_key, raw_key = await real_services.api_key.create(mcp_user.id, "laptop")
         assert api_key.last_used_at is None
 
-        user = await _authenticate_request(_bearer_request(raw_key))
+        user = await _authenticate_request(_bearer_request(raw_key, real_services))
 
         assert user.id == mcp_user.id
-        await db_session.refresh(api_key)
-        assert api_key.last_used_at is not None
+        # Also catches a write lost to the nesting guard (sanity check SC3).
+        last_used = await committing_session.scalar(
+            sa.select(ApiKey.last_used_at).where(ApiKey.id == api_key.id)
+        )
+        assert last_used is not None
 
     @pytest.mark.asyncio
-    async def test_failed_use_write_does_not_break_auth_on_cache_miss(
+    async def test_failed_use_write_does_not_break_auth(
         self,
         mcp_user: User,
-        db_session: AsyncSession,
         real_services: Services,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # Regression (ADR-019): on a cache miss the key is loaded into the session;
-        # the failed UPDATE's rollback must not expire the user auth returns.
+        # Regression (ADR-019): a failed last_used_at write must not fail the auth
+        # or touch the user it returns; the write runs in its own unit of work.
         _, raw_key = await real_services.api_key.create(mcp_user.id, "laptop")
         user_id = mcp_user.id
-        db_session.expunge_all()  # like production: a fresh session per auth
 
-        real_execute = db_session.execute
+        real_execute = AsyncSession.execute
 
-        async def _fail_updates(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        async def _fail_updates(
+            self: AsyncSession, statement: Any, *args: Any, **kwargs: Any
+        ) -> Any:
             if isinstance(statement, sa.Update):
                 raise OperationalError("UPDATE api_keys", {}, Exception("DB hiccup"))
-            return await real_execute(statement, *args, **kwargs)
+            return await real_execute(self, statement, *args, **kwargs)
 
-        monkeypatch.setattr(db_session, "execute", _fail_updates)
+        monkeypatch.setattr(AsyncSession, "execute", _fail_updates)
 
-        user = await _authenticate_request(_bearer_request(raw_key))
+        user = await _authenticate_request(_bearer_request(raw_key, real_services))
 
         assert user.id == user_id
+
+    @pytest.mark.asyncio
+    async def test_revoked_key_is_refused_on_the_next_request(
+        self,
+        mcp_user: User,
+        committing_session: AsyncSession,
+        real_services: Services,
+    ) -> None:
+        """ADR-034: a key revoked by any path — here a write that bypasses the
+        service, as a race with a reader could — stops working at once."""
+        api_key, raw_key = await real_services.api_key.create(mcp_user.id, "laptop")
+        await _authenticate_request(_bearer_request(raw_key, real_services))
+
+        await committing_session.execute(
+            sa.update(ApiKey).where(ApiKey.id == api_key.id).values(is_active=False)
+        )
+        await committing_session.commit()
+
+        with pytest.raises(InvalidTokenError, match="Invalid or revoked"):
+            await _authenticate_request(_bearer_request(raw_key, real_services))
 
     @pytest.mark.asyncio
     async def test_deactivated_api_key_is_rejected(
@@ -203,7 +210,7 @@ class TestApiKeyAuth:
         await real_services.api_key.deactivate(api_key.id, mcp_user.id)
 
         with pytest.raises(InvalidTokenError, match="Invalid or revoked"):
-            await _authenticate_request(_bearer_request(raw_key))
+            await _authenticate_request(_bearer_request(raw_key, real_services))
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +224,7 @@ async def _workspace_of(session: AsyncSession, user: User, name: str) -> uuid.UU
         name=name, slug=f"{name.lower()}-{uuid.uuid4().hex[:8]}", created_by_id=user.id
     )
     await repo.add_member(workspace_id=ws.id, user_id=user.id, role=WorkspaceRole.OWNER)
+    await session.commit()
     return ws.id
 
 
@@ -233,7 +241,7 @@ async def _indexed_doc(
         status=DocumentStatus.INDEXED,
     )
     session.add(doc)
-    await session.flush()
+    await session.commit()
     return doc
 
 
@@ -254,7 +262,7 @@ async def _chunk(
             metadata_={} if section is None else {"section": section},
         )
     )
-    await session.flush()
+    await session.commit()
 
 
 async def _listed_doc(
@@ -278,14 +286,14 @@ async def _listed_doc(
         created_at=created_at,
     )
     session.add(doc)
-    await session.flush()
+    await session.commit()
     return doc
 
 
 class TestSearchDocumentsIntegration:
     async def test_search_runs_the_real_query(
         self,
-        db_session: AsyncSession,
+        committing_session: AsyncSession,
         mcp_user: User,
         as_user: McpContext,
         mcp_workspace: uuid.UUID,
@@ -295,11 +303,13 @@ class TestSearchDocumentsIntegration:
         # Both chunks have the query's own vector, so only the SQL's workspace filter
         # can tell them apart: the user is also a member of the other workspace
         # (filtered by the query, not by membership).
-        other = await _workspace_of(db_session, mcp_user, "Other")
-        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user, title="Guide")
-        foreign = await _indexed_doc(db_session, other, mcp_user)
-        await _chunk(db_session, doc, index=4, section="Setup > Install")
-        await _chunk(db_session, foreign, index=0, section=None)
+        other = await _workspace_of(committing_session, mcp_user, "Other")
+        doc = await _indexed_doc(
+            committing_session, mcp_workspace, mcp_user, title="Guide"
+        )
+        foreign = await _indexed_doc(committing_session, other, mcp_user)
+        await _chunk(committing_session, doc, index=4, section="Setup > Install")
+        await _chunk(committing_session, foreign, index=0, section=None)
 
         result = await search_documents(
             as_user, workspace_id=mcp_workspace, query="how to install", top_k=5
@@ -330,14 +340,15 @@ class TestSearchDocumentsIntegration:
 class TestListWorkspacesIntegration:
     async def test_one_query_and_no_lookups_per_workspace(
         self,
-        db_session: AsyncSession,
+        committing_engine: AsyncEngine,
+        committing_session: AsyncSession,
         mcp_user: User,
         as_user: McpContext,
         real_services: Services,
     ) -> None:
         # A lookup per workspace multiplied the cost by the number of workspaces,
         # and failed the whole listing if one membership vanished in between.
-        repo = SQLAlchemyWorkspaceRepository(db_session)
+        repo = SQLAlchemyWorkspaceRepository(committing_session)
         created = []
         for i, description in enumerate(["Runbooks and postmortems", None, "ML"]):
             ws = await repo.create(
@@ -348,9 +359,10 @@ class TestListWorkspacesIntegration:
             )
             await repo.add_member(ws.id, mcp_user.id, WorkspaceRole.VIEWER)
             created.append(ws)
+        await committing_session.commit()
 
         statements: list[str] = []
-        engine = db_session.bind.sync_engine  # type: ignore[union-attr]
+        engine = committing_engine.sync_engine
 
         def _record(*args: Any) -> None:
             statements.append(args[2])
@@ -361,7 +373,6 @@ class TestListWorkspacesIntegration:
         finally:
             sa.event.remove(engine, "before_cursor_execute", _record)
 
-        # The cache starts empty, so a lookup per workspace would reach the DB.
         assert len(statements) == 1
         assert {(w.id, w.name, w.description) for w in result.workspaces} == {
             (ws.id, ws.name, ws.description) for ws in created
@@ -371,7 +382,7 @@ class TestListWorkspacesIntegration:
 class TestListDocumentsIntegration:
     async def test_pages_through_the_real_listing(
         self,
-        db_session: AsyncSession,
+        committing_session: AsyncSession,
         mcp_user: User,
         as_user: McpContext,
         mcp_workspace: uuid.UUID,
@@ -382,9 +393,9 @@ class TestListDocumentsIntegration:
         # document sits in another workspace the user also belongs to: only the
         # query's filter keeps it out. Every status is listed, unlike search.
         t1, t2, t3 = (datetime(2026, 10, 23, 9, 0, s, 250_000) for s in (1, 2, 3))
-        other = await _workspace_of(db_session, mcp_user, "Other")
+        other = await _workspace_of(committing_session, mcp_user, "Other")
         await _listed_doc(
-            db_session,
+            committing_session,
             other,
             mcp_user,
             created_at=datetime(2026, 10, 23, 10, 0),
@@ -392,7 +403,7 @@ class TestListDocumentsIntegration:
         )
         seeded = [
             await _listed_doc(
-                db_session,
+                committing_session,
                 mcp_workspace,
                 mcp_user,
                 created_at=at,
@@ -439,16 +450,16 @@ class TestListDocumentsIntegration:
 class TestReadDocumentIntegration:
     async def test_reads_the_document_to_the_end(
         self,
-        db_session: AsyncSession,
+        committing_session: AsyncSession,
         mcp_user: User,
         as_user: McpContext,
         mcp_workspace: uuid.UUID,
         real_services: Services,
     ) -> None:
         # Pages of 2 over 5 chunks, inserted out of order, end with a short one.
-        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user)
+        doc = await _indexed_doc(committing_session, mcp_workspace, mcp_user)
         for i in (4, 0, 3, 1, 2):
-            await _chunk(db_session, doc, index=i, section="## Ops")
+            await _chunk(committing_session, doc, index=i, section="## Ops")
 
         read: list[ChunkContent] = []
         page_sizes: list[int] = []
@@ -481,15 +492,15 @@ class TestReadDocumentIntegration:
 
     async def test_renamed_document_keeps_its_chunks(
         self,
-        db_session: AsyncSession,
+        committing_session: AsyncSession,
         mcp_user: User,
         as_user: McpContext,
         mcp_workspace: uuid.UUID,
         real_services: Services,
     ) -> None:
         # A rename re-chunks nothing, so it must not move the document off its chunks.
-        doc = await _indexed_doc(db_session, mcp_workspace, mcp_user)
-        await _chunk(db_session, doc, index=0, section=None)
+        doc = await _indexed_doc(committing_session, mcp_workspace, mcp_user)
+        await _chunk(committing_session, doc, index=0, section=None)
         await real_services.document.update(
             mcp_user,
             mcp_workspace,
@@ -507,7 +518,7 @@ class TestReadDocumentIntegration:
 
     async def test_document_of_another_workspace_is_not_found(
         self,
-        db_session: AsyncSession,
+        committing_session: AsyncSession,
         mcp_user: User,
         as_user: McpContext,
         mcp_workspace: uuid.UUID,
@@ -515,9 +526,9 @@ class TestReadDocumentIntegration:
     ) -> None:
         # The user belongs to both workspaces, so only the document lookup's
         # workspace filter refuses the pairing.
-        other = await _workspace_of(db_session, mcp_user, "Other")
-        foreign = await _indexed_doc(db_session, other, mcp_user)
-        await _chunk(db_session, foreign, index=0, section=None)
+        other = await _workspace_of(committing_session, mcp_user, "Other")
+        foreign = await _indexed_doc(committing_session, other, mcp_user)
+        await _chunk(committing_session, foreign, index=0, section=None)
 
         with pytest.raises(NotFoundError):
             await read_document(
