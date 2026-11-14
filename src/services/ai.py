@@ -67,8 +67,8 @@ class AIService:
             set_llm_span_attrs(
                 span,
                 get_settings().LLM_MODEL,
-                usage.request_tokens or 0,
-                usage.response_tokens or 0,
+                usage.input_tokens or 0,
+                usage.output_tokens or 0,
             )
 
         logger.info(

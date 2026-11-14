@@ -1,21 +1,16 @@
-"""FastAPI glue: request-scoped resources and services (wiring: src.composition)."""
+"""FastAPI glue: the process's services and clients, and the request's user and
+workspace (wiring: src.composition; built in the lifespan, src.main)."""
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator
 
-import httpx
 import redis.asyncio as aioredis
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.composition import Services
-from src.core.database import get_session
 from src.core.exceptions import UnauthorizedError
-from src.core.http import get_async_http_client
-from src.core.redis import get_redis
 from src.domain.roles import WorkspaceRole
 from src.models.user import User
 from src.models.workspace import Workspace
@@ -30,23 +25,16 @@ from src.services.workspace import WorkspaceService
 _bearer = HTTPBearer(auto_error=False)
 
 
-async def get_db() -> AsyncGenerator[AsyncSession]:
-    async with get_session() as session:
-        yield session
+def get_services(request: Request) -> Services:
+    """The process's one ``Services``, from the lifespan's state (ADR-033)."""
+    services: Services = request.state.services
+    return services
 
 
-def get_http_client() -> httpx.AsyncClient:
-    return get_async_http_client()
-
-
-def get_services(
-    session: AsyncSession = Depends(get_db),
-    redis: aioredis.Redis = Depends(get_redis),
-    http_client: httpx.AsyncClient = Depends(get_http_client),
-) -> Services:
-    # FastAPI caches dependencies per request, so every service in one request
-    # shares this instance and its session.
-    return Services(session, redis, http_client)
+def get_redis(request: Request) -> aioredis.Redis:
+    """The process's Redis client (the rate limiters), from the lifespan's state."""
+    redis: aioredis.Redis = request.state.redis
+    return redis
 
 
 def get_auth_service(services: Services = Depends(get_services)) -> AuthService:

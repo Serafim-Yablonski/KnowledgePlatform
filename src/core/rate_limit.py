@@ -12,8 +12,9 @@ from fastapi import Depends, Request, Response
 from redis.exceptions import RedisError
 
 from src.core.config import settings
+from src.core.dependencies import get_current_user, get_current_workspace, get_redis
 from src.core.exceptions import RateLimitError, ServiceUnavailableError
-from src.core.redis import PREFIX_RATELIMIT, get_redis
+from src.core.redis import PREFIX_RATELIMIT
 from src.models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -165,10 +166,6 @@ def rate_limit(
     window_seconds: int,
 ) -> Callable[..., Coroutine[Any, Any, None]]:
     """FastAPI dependency for user-scoped rate limiting (authenticated routes)."""
-    # Import here to avoid circular imports at module load time:
-    # rate_limit.py is imported by api/v1/search.py, which is loaded after
-    # dependencies.py, so this lazy import is safe.
-    from src.core.dependencies import get_current_user  # noqa: PLC0415
 
     async def _check(
         response: Response,
@@ -198,10 +195,6 @@ def workspace_rate_limit(
     Use for endpoints where resource cost is workspace-level (e.g. document
     upload queues extraction and embedding work shared by all workspace members).
     """
-    from src.core.dependencies import (  # noqa: PLC0415
-        get_current_user,
-        get_current_workspace,
-    )
 
     async def _check(
         response: Response,

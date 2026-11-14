@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from redis.exceptions import RedisError
 
+from src.core.dependencies import get_redis
 from src.core.exceptions import AppError, RateLimitError, ServiceUnavailableError
 from src.core.rate_limit import (
     SlidingWindowRateLimiter,
@@ -18,7 +19,6 @@ from src.core.rate_limit import (
     rate_limit,
     workspace_rate_limit,
 )
-from src.core.redis import get_redis
 
 
 async def _app_error_handler(request: Request, exc: Exception) -> JSONResponse:

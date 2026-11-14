@@ -47,12 +47,18 @@ class SQLAlchemyDocumentRepository:
             status=DocumentStatus.PENDING,
         )
         self._session.add(doc)
-        # Flush to get the server-generated uuidv7 ID without committing.
-        # The caller (DocumentService.create) writes the file and commits once
-        # after updating file_path, keeping the whole operation in one transaction.
+        # Flush for the server-generated uuidv7 ID: the caller names the file after
+        # it, then sets file_path and commits both in one transaction.
         await self._session.flush()
         await self._session.refresh(doc)
         return doc
+
+    async def set_file_path(self, document: Document, file_path: str) -> None:
+        document.file_path = file_path
+        await self._session.flush()
+        # The flush expired updated_at (set by the database); loaded now, while the
+        # session can, so the document stays readable after its unit of work.
+        await self._session.refresh(document)
 
     async def get_by_id(
         self, workspace_id: uuid.UUID, document_id: uuid.UUID

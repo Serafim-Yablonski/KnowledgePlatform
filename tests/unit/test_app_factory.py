@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 
@@ -169,3 +172,36 @@ async def test_mcp_route_passes_every_method_to_mcp(method: str) -> None:
         )
 
     assert response.status_code == 401
+
+
+def test_importing_the_app_opens_no_pool_or_client() -> None:
+    # ADR-033: the lifespan opens them, so two apps in one process never share one,
+    # and a worker importing an API module gets none. In a fresh interpreter: what
+    # an import leaves behind is per process, and this test process has many.
+    probe = textwrap.dedent(
+        """
+        import gc
+
+        import httpx
+        import redis.asyncio
+        from sqlalchemy.engine import Engine
+        from sqlalchemy.ext.asyncio import AsyncEngine
+
+        import src.main
+        import src.workers.__main__
+
+        kinds = (AsyncEngine, Engine, redis.asyncio.ConnectionPool, httpx.AsyncClient)
+        opened = {type(o).__name__ for o in gc.get_objects() if isinstance(o, kinds)}
+        print(sorted(opened))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]"

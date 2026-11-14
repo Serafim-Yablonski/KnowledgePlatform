@@ -81,6 +81,9 @@ class AuthSettings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # Resolution of api_keys.last_used_at: at most one DB write per key per window
+    # (seconds, ADR-019).
+    API_KEY_LAST_USED_RESOLUTION: int = 300
 
 
 class AISettings(BaseSettings):
@@ -119,17 +122,6 @@ class AppSettings(BaseSettings):
     # Only used when TRUSTED_PROXY_HEADERS=True. In Docker Compose set this to the
     # nginx/load-balancer container IP or bridge subnet.
     TRUSTED_PROXY_IPS: str = "127.0.0.1"
-
-
-class CacheSettings(BaseSettings):
-    model_config = _ENV_CONFIG
-
-    CACHE_TTL_WORKSPACE: int = 300  # seconds; override per environment via env var
-    CACHE_TTL_MEMBERSHIP: int = 300
-    # Safety-net TTL — revocation propagates via explicit cache.delete(), not expiry.
-    CACHE_TTL_API_KEY: int = 300
-    # Resolution of api_keys.last_used_at: at most one DB write per key per window.
-    API_KEY_LAST_USED_RESOLUTION: int = 300
 
 
 class PipelineSettings(BaseSettings):
@@ -240,7 +232,6 @@ class Settings(
     AISettings,
     ObservabilitySettings,
     AppSettings,
-    CacheSettings,
     PipelineSettings,
     RateLimitSettings,
 ):

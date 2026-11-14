@@ -1,16 +1,19 @@
-"""MCP authentication: pure ASGI middleware, and the helper tools read the user with.
+"""MCP authentication: pure ASGI middleware, and the helpers tools read the user,
+the services and the Redis client with.
 
-The middleware stores the user in the request's ASGI ``state``; the SDK hands each
-tool the Request that carried its call, so identity follows every request. Not a
-ContextVar: whether one follows each request depends on how the SDK carries context
-between its tasks — ``mcp`` 1.x copied the session opener's into the session task,
-so tools saw that user forever (F1). The Request is handed over explicitly.
+The middleware stores the user in the request's ASGI ``state``, beside what the
+lifespan put there (``src.main.LifespanState``); the SDK hands each tool the Request
+that carried its call, so identity follows every request. Not a ContextVar: whether
+one follows each request depends on how the SDK carries context between its tasks —
+``mcp`` 1.x copied the session opener's into the session task, so tools saw that user
+forever (F1). The Request is handed over explicitly.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import redis.asyncio as aioredis
 import structlog
 from mcp.server.mcpserver import Context
 from mcp.shared.inbound import (
@@ -24,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from src.composition import open_services
+from src.composition import Services
 from src.core.exceptions import AppError, UnauthorizedError
 from src.models.user import User
 
@@ -50,12 +53,24 @@ async def _authenticate_request(request: Request) -> User:
         raise UnauthorizedError(
             "Authentication required — provide Authorization: Bearer <token>"
         )
-    async with open_services() as services:
-        if _looks_like_jwt(token):
-            # Can't be an API key (they never contain "."), so surface the JWT's real
-            # error (expired, bad signature), not "Invalid or revoked API key".
-            return await services.auth.get_current_user(token)
-        return await services.api_key.authenticate(token)
+    services: Services = request.state.services
+    if _looks_like_jwt(token):
+        # Can't be an API key (they never contain "."), so surface the JWT's real
+        # error (expired, bad signature), not "Invalid or revoked API key".
+        return await services.auth.get_current_user(token)
+    return await services.api_key.authenticate(token)
+
+
+def _request(ctx: McpContext) -> Request:
+    """The HTTP request behind ``ctx``; UnauthorizedError if there is none, so a tool
+    reached any other way fails closed."""
+    try:
+        request = ctx.request_context.request
+    except ValueError:  # Context created outside a request
+        request = None
+    if request is None:
+        raise UnauthorizedError("Authentication required")
+    return request
 
 
 def get_mcp_user(ctx: McpContext) -> User:
@@ -64,16 +79,22 @@ def get_mcp_user(ctx: McpContext) -> User:
     Raises UnauthorizedError when there is no such request or user, so a tool reached
     any other way fails closed.
     """
-    try:
-        request = ctx.request_context.request
-    except ValueError:  # Context created outside a request
-        request = None
-    user = (
-        getattr(request.state, _USER_STATE_KEY, None) if request is not None else None
-    )
+    user = getattr(_request(ctx).state, _USER_STATE_KEY, None)
     if not isinstance(user, User):
         raise UnauthorizedError("Authentication required")
     return user
+
+
+def get_mcp_services(ctx: McpContext) -> Services:
+    """The process's one ``Services``, from the lifespan's state (ADR-033)."""
+    services: Services = _request(ctx).state.services
+    return services
+
+
+def get_mcp_redis(ctx: McpContext) -> aioredis.Redis:
+    """The process's Redis client (the rate limits), from the lifespan's state."""
+    redis: aioredis.Redis = _request(ctx).state.redis
+    return redis
 
 
 def _refuse_legacy_protocol(request: Request) -> Response | None:

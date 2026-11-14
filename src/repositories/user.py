@@ -30,14 +30,14 @@ class SQLAlchemyUserRepository:
             display_name=data.display_name,
         )
         self._session.add(user)
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(user)
         return user
 
     async def update(self, user: User, *, is_active: bool | None = None) -> User:
         if is_active is not None:
             user.is_active = is_active
-        await self._session.commit()
+        await self._session.flush()
         await self._session.refresh(user)
         return user
 

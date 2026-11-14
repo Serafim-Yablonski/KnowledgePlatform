@@ -12,13 +12,12 @@ import pytest
 import sqlalchemy as sa
 from fakeredis.aioredis import FakeRedis
 from sqlalchemy import NullPool
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.postgres import PostgresContainer
 
 from src.api.v1 import documents as documents_api
+from src.composition import build_services
 from src.core.config import settings
-from src.core.dependencies import get_db, get_http_client
-from src.core.redis import get_redis
 from src.main import app
 from tests.support.acceptance import (
     AcceptanceDatabase,
@@ -29,6 +28,7 @@ from tests.support.acceptance import (
 )
 from tests.support.database import migrate, scratch_database
 from tests.support.fake_gemini import FakeGemini
+from tests.support.lifespan import ServedWithState
 
 
 @pytest.fixture(scope="module")
@@ -69,24 +69,20 @@ async def pipeline(
     observer = Observer(acceptance_db.url)
 
     engine = create_async_engine(acceptance_db.url, poolclass=NullPool)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-
-    async def committing_db() -> AsyncIterator[AsyncSession]:
-        async with sessions() as session:
-            yield session
 
     def no_network(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"unexpected outbound HTTP call: {request.url}")
 
     fake_redis = FakeRedis()
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(no_network))
-    app.dependency_overrides[get_db] = committing_db
-    app.dependency_overrides[get_redis] = lambda: fake_redis
-    app.dependency_overrides[get_http_client] = lambda: http_client
+    services = build_services(engine, fake_redis, http_client)
     # Scenarios upload more than the per-minute cap; rate limiting is tested elsewhere.
     app.dependency_overrides[documents_api._upload_rate_limit] = lambda: None
+    served = ServedWithState(
+        app, {"services": services, "redis": fake_redis, "engine": engine}
+    )
     client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
+        transport=httpx.ASGITransport(app=served), base_url="http://test"
     )
     try:
         api = Api(client)

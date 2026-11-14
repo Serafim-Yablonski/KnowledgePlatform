@@ -43,6 +43,7 @@ from src.services.document import (
     NOT_INDEXED_DETAIL,
     DocumentService,
 )
+from tests.support.unit_of_work import FakeUnitOfWork
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,6 +142,9 @@ class StubDocumentRepository:
         self._store[doc.id] = doc
         return doc
 
+    async def set_file_path(self, document: Document, file_path: str) -> None:
+        document.file_path = file_path
+
     async def get_by_id(
         self, workspace_id: uuid.UUID, document_id: uuid.UUID
     ) -> Document | None:
@@ -200,16 +204,6 @@ class StubChunkRepository:
         return len(self._of(document_id))
 
 
-class MockSession:
-    """Minimal async session stub — satisfies service.commit/refresh calls."""
-
-    async def commit(self) -> None:
-        pass
-
-    async def refresh(self, obj: Any) -> None:
-        pass
-
-
 # Tests that store files pass a temp root; elsewhere a write fails loudly.
 _NO_UPLOADS = Path("/nonexistent-upload-root")
 
@@ -218,12 +212,8 @@ def _make_service(
     root: Path = _NO_UPLOADS,
 ) -> tuple[DocumentService, StubDocumentRepository]:
     repo = StubDocumentRepository()
-    service = DocumentService(
-        repo=repo,
-        chunk_repo=StubChunkRepository(),
-        session=MockSession(),  # type: ignore[arg-type]
-        files=LocalFileStore(root),
-    )
+    uow = FakeUnitOfWork(documents=repo, chunks=StubChunkRepository())
+    service = DocumentService(uow, files=LocalFileStore(root))
     return service, repo
 
 
@@ -921,12 +911,8 @@ def _reader(
     failure_reason: FailureReason | None = None,
 ) -> tuple[DocumentService, StubChunkRepository, Document]:
     repo, chunks = StubDocumentRepository(), StubChunkRepository()
-    service = DocumentService(
-        repo=repo,
-        chunk_repo=chunks,
-        session=MockSession(),  # type: ignore[arg-type]
-        files=LocalFileStore(_NO_UPLOADS),
-    )
+    uow = FakeUnitOfWork(documents=repo, chunks=chunks)
+    service = DocumentService(uow, files=LocalFileStore(_NO_UPLOADS))
     doc = _make_document(uuid.uuid4(), uuid.uuid4())
     doc.status = status
     doc.failure_reason = failure_reason

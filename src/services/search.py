@@ -15,7 +15,7 @@ from src.ai.embeddings import (
 )
 from src.core.exceptions import ServiceUnavailableError
 from src.domain.search import SearchResults
-from src.repositories.protocols import SearchRepositoryProtocol
+from src.repositories.protocols import UnitOfWorkFactory
 
 logger = structlog.get_logger(__name__)
 
@@ -23,10 +23,10 @@ logger = structlog.get_logger(__name__)
 class SearchService:
     def __init__(
         self,
-        search_repo: SearchRepositoryProtocol,
+        uow: UnitOfWorkFactory,
         embedding_service: EmbeddingService,
     ) -> None:
-        self._repo = search_repo
+        self._uow = uow
         self._embedding = embedding_service
 
     async def search(
@@ -47,14 +47,17 @@ class SearchService:
             min_score=min_score,
         ) as span:
             t0 = time.monotonic()
+            # Embedded before the unit of work opens: no connection is held while
+            # the provider answers (ADR-033).
             embedding = await _embed(self._embedding, query)
 
-            results = await self._repo.search_similar(
-                workspace_id=workspace_id,
-                embedding=embedding,
-                top_k=top_k,
-                min_score=min_score,
-            )
+            async with self._uow() as uow:
+                results = await uow.search.search_similar(
+                    workspace_id=workspace_id,
+                    embedding=embedding,
+                    top_k=top_k,
+                    min_score=min_score,
+                )
 
             search_latency_ms = round((time.monotonic() - t0) * 1000)
             top_score = results[0].score if results else 0.0

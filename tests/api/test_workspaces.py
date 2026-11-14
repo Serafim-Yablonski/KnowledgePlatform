@@ -4,8 +4,11 @@ import io
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.models.workspace import WorkspaceMembership
 from tests.api.conftest import UserFactory
 
 _REGISTER = "/api/v1/auth/register"
@@ -132,6 +135,28 @@ async def test_get_workspace_non_member_forbidden(async_client: AsyncClient) -> 
     resp = await async_client.get(
         f"{_WORKSPACES}/{ws_id}", headers=_auth(token_stranger)
     )
+    assert resp.status_code == 403
+
+
+async def test_membership_is_read_from_postgres_on_every_request(
+    async_client: AsyncClient, committing_session: AsyncSession
+) -> None:
+    """ADR-034: a membership removed by any path — here a write that bypasses the
+    service, as a race with a reader could — is refused on the very next request."""
+    token, _ = await _register_and_token(async_client)
+    ws_id = (
+        await async_client.post(_WORKSPACES, json={"name": "WS"}, headers=_auth(token))
+    ).json()["id"]
+    assert (
+        await async_client.get(f"{_WORKSPACES}/{ws_id}", headers=_auth(token))
+    ).status_code == 200
+
+    await committing_session.execute(
+        sa.delete(WorkspaceMembership).where(WorkspaceMembership.workspace_id == ws_id)
+    )
+    await committing_session.commit()
+
+    resp = await async_client.get(f"{_WORKSPACES}/{ws_id}", headers=_auth(token))
     assert resp.status_code == 403
 
 
